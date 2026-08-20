@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {createGitCheckpoint} from './devexec-git-checkpoint.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'devexec-git-checkpoint-'));
+const git=(a)=>execFileSync('git',['-C',d,...a],{encoding:'utf8'}).trim();
+git(['init']); git(['config','user.email','devexec@test.local']); git(['config','user.name','Dev Exec Test']);
+fs.writeFileSync(path.join(d,'keep.txt'),'v1\n'); fs.writeFileSync(path.join(d,'other.txt'),'o1\n'); git(['add','.']); git(['commit','-m','baseline']);
+const before=git(['rev-parse','HEAD']); fs.writeFileSync(path.join(d,'keep.txt'),'v2\n'); fs.writeFileSync(path.join(d,'other.txt'),'o2\n');
+const r=createGitCheckpoint({root:d,files:['keep.txt'],message:'checkpoint test'});
+assert.equal(r.protocol,'devexec.git-checkpoint'); assert.equal(r.head_before,before); assert.notEqual(r.head_after,before); assert.deepEqual(r.files,['keep.txt']);
+assert.equal(git(['show','HEAD:keep.txt']),'v2'); assert.equal(git(['show','HEAD:other.txt']),'o1'); assert.equal(git(['diff','--cached','--name-only']),''); assert.match(git(['status','--short']),/other\.txt/);
+assert.throws(()=>createGitCheckpoint({root:d,files:['../escape.txt'],message:'bad'}),/unsafe path/);
+fs.writeFileSync(path.join(d,'other.txt'),'o3\n'); git(['add','other.txt']); assert.throws(()=>createGitCheckpoint({root:d,files:['keep.txt'],message:'blocked'}),/preexisting staged changes/);
+console.log('DEVEXEC_GIT_CHECKPOINT_MANAGER_V0_TEST_PASS');
