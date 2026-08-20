@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {emptyRegistry,setTarget,useTarget} from './target-registry.mjs';
+import {stageSupervisorTarget,promoteSupervisorTarget,retireSupervisorTarget} from './devexec-supervisor-target-rotation.mjs';
+const r=emptyRegistry(); setTarget(r,'current-chat','https://chatgpt.com/c/old-1',{mission_id:'M1',rotation_state:'ACTIVE'}); useTarget(r,'current-chat');
+const c=stageSupervisorTarget(r,{mission_id:'M1',generation:2,chat_url:'https://chatgpt.com/c/new-2',previous_target_id:'current-chat'});
+assert.equal(r.default_target,'current-chat'); assert.equal(c.target.rotation_state,'CANDIDATE');
+assert.throws(()=>promoteSupervisorTarget(r,{alias:c.alias,mission_id:'M1',verified:true,rehydrate_ack:false}),/verification incomplete/);
+const a=promoteSupervisorTarget(r,{alias:c.alias,mission_id:'M1',verified:true,rehydrate_ack:true}); assert.equal(r.default_target,c.alias); assert.equal(a.rotation_state,'ACTIVE');
+const old=retireSupervisorTarget(r,{alias:'current-chat'}); assert.equal(old.rotation_state,'RETIRED');
+assert.throws(()=>retireSupervisorTarget(r,{alias:c.alias}),/cannot retire active/);
+console.log('DEVEXEC_SUPERVISOR_TARGET_ROTATION_V0_TEST_PASS');

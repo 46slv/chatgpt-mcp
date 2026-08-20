@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {planHeartbeatRecovery as p} from './devexec-heartbeat-recovery-plan.mjs';
+assert.deepEqual(p({phase:'EXEC_IN_FLIGHT',pending:{step:1}}),{action:'NONE',reason:'EXEC_IN_FLIGHT'});
+assert.equal(p({phase:'NEEDS_HUMAN'}).action,'NONE');
+assert.equal(p({phase:'FAILED'}).action,'CONTINUE_CHILD');
+assert.equal(p({phase:'COMPLETE',stop_reason:'AUTO_CONTINUE checkpoint'}).action,'CONTINUE_CHILD');
+assert.equal(p({phase:'COMPLETE',stop_reason:'done'}).action,'NONE');
+assert.equal(p({phase:'SUPERVISOR_READY'}).action,'RESUME_EXISTING');
+assert.equal(p({phase:'FAILED',stop_type:'CIRCUIT_BREAKER_OPEN'}).action,'NONE');
+console.log('DEVEXEC_HEARTBEAT_AUTO_RECOVERY_PLAN_V0_TEST_PASS');

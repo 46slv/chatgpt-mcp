@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {inspectSupervisorContext as i,buildSupervisorCheckpoint as c,buildSupervisorRehydratePack as p} from './devexec-supervisor-context-governor.mjs';
+assert.equal(i({contextText:'x'}).decision,'CONTINUE');
+assert.equal(i({contextText:'x'.repeat(400000)}).decision,'ROTATE');
+assert.equal(i({contextText:'x',majorCheckpoint:true}).decision,'CHECKPOINT');
+assert.equal(i({contextText:'x',repeatedFailures:3}).decision,'ROTATE');
+const b=i({contextText:'x'.repeat(400000),ambiguousInFlight:true}); assert.equal(b.rotation_allowed,false);
+const cp=c({mission_id:'M1',run_id:'R1'}); assert.equal(cp.mission_id,'M1');
+const rp=p({checkpoint:cp,freshNotion:{ok:true},freshGit:{ok:true}}); assert.equal(rp.mission_id,'M1');
+console.log('DEVEXEC_SUPERVISOR_CONTEXT_GOVERNOR_V0_TEST_PASS');

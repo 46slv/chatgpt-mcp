@@ -1,0 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+export function rotationPlanPath(stateDir,missionId){if(!stateDir||!missionId||!/^[A-Za-z0-9._-]+$/.test(missionId))throw new Error('invalid rotation plan target');return path.join(stateDir,missionId+'.supervisor-rotation-plan.json');}
+export function persistRotationPlan(stateDir,plan){if(!plan||plan.protocol!=='devexec.supervisor-rotation-plan'||!plan.mission_id)throw new Error('invalid rotation plan');fs.mkdirSync(stateDir,{recursive:true});const target=rotationPlanPath(stateDir,plan.mission_id);const temp=target+'.tmp-'+process.pid+'-'+crypto.randomBytes(3).toString('hex');fs.writeFileSync(temp,JSON.stringify(plan,null,2)+'\n','utf8');fs.renameSync(temp,target);return target;}
+export function loadRotationPlan(stateDir,missionId){const file=rotationPlanPath(stateDir,missionId);const value=JSON.parse(fs.readFileSync(file,'utf8'));if(value.protocol!=='devexec.supervisor-rotation-plan'||value.mission_id!==missionId)throw new Error('rotation plan mismatch');return value;}
+export function markRotationState(stateDir,missionId,state,extra={}){const plan=loadRotationPlan(stateDir,missionId);const allowed=['WAIT_RUN_BOUNDARY','CREATE_CANDIDATE','VERIFY_CANDIDATE','REHYDRATE','PROMOTE','COMPLETE','BLOCKED'];if(!allowed.includes(state))throw new Error('invalid rotation state');plan.state=state;plan.updated_at=new Date().toISOString();Object.assign(plan,extra);persistRotationPlan(stateDir,plan);return plan;}

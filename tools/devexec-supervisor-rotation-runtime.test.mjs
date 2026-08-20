@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {buildSupervisorRotationPlan} from './devexec-supervisor-rotation-plan.mjs';
+import {persistRotationPlan,loadRotationPlan,markRotationState} from './devexec-supervisor-rotation-runtime.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'svrot-'));
+const p=buildSupervisorRotationPlan({mission_id:'M1',run_id:'R1',current_target_id:'current-chat',next_generation:2});
+const f=persistRotationPlan(d,p); assert.equal(fs.existsSync(f),true); assert.equal(loadRotationPlan(d,'M1').state,'WAIT_RUN_BOUNDARY');
+const n=markRotationState(d,'M1','CREATE_CANDIDATE',{boundary_run_id:'R1'}); assert.equal(n.state,'CREATE_CANDIDATE'); assert.equal(n.boundary_run_id,'R1');
+assert.throws(()=>markRotationState(d,'M1','BAD'),/invalid rotation state/);
+console.log('DEVEXEC_SUPERVISOR_ROTATION_RUNTIME_V0_TEST_PASS');

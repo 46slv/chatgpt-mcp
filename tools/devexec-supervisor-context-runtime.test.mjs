@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {buildSupervisorCheckpoint} from './devexec-supervisor-context-governor.mjs';
+import {persistSupervisorCheckpoint,loadSupervisorCheckpoint,appendSupervisorContextEvent} from './devexec-supervisor-context-runtime.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'devexec-svctx-'));
+const cp=buildSupervisorCheckpoint({mission_id:'M1',run_id:'R1',git:{head:'abc'},next_goal:'continue'});
+const f=persistSupervisorCheckpoint(d,cp); assert.equal(fs.existsSync(f),true);
+assert.equal(loadSupervisorCheckpoint(d,'M1').run_id,'R1');
+const e=appendSupervisorContextEvent(d,'M1',{decision:'CHECKPOINT',reason:'TEST'});
+const rows=fs.readFileSync(e,'utf8').trim().split(/\r?\n/).map(JSON.parse); assert.equal(rows.length,1); assert.equal(rows[0].mission_id,'M1');
+console.log('DEVEXEC_SUPERVISOR_CONTEXT_RUNTIME_V0_TEST_PASS');
