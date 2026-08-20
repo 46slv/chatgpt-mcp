@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {runHeartbeatTick} from './devexec-heartbeat-runtime.mjs';
+import {buildHeartbeatSupervisorPrompt,parseHeartbeatSupervisorResponse} from './devexec-heartbeat-transport.mjs';
+import {replyHeartbeatViaBridge} from './devexec-heartbeat-bridge.mjs';
+const root=process.cwd(); const mission='DEV-EXEC-CONTINUE-1787234698189-c09185'; const run='HEARTBEAT-ISOLATED-'+Date.now();
+const base=process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'); const dir=path.join(base,'ChatGPTMCPProbe','heartbeat-runs',run); fs.mkdirSync(dir,{recursive:true});
+const stateFile=path.join(dir,'source-state.json'); fs.writeFileSync(stateFile,JSON.stringify({phase:'HEARTBEAT_ISOLATED_SAFE',step:0,pending:null,rounds:{}},null,2)+'\n','utf8');
+const tick=runHeartbeatTick({mission_id:mission,dev_exec_run_id:run,machine:process.env.COMPUTERNAME||os.hostname(),project_root:root,state_file:stateFile,out_dir:dir,slot:run}); if(tick.status!=='READY')throw new Error('heartbeat tick not ready');
+const packet=JSON.parse(fs.readFileSync(path.join(dir,'ops-sync.json'),'utf8')); const prompt=buildHeartbeatSupervisorPrompt(packet);
+const bridge=await replyHeartbeatViaBridge({project_root:root,target_alias:'current-chat',prompt}); const response=parseHeartbeatSupervisorResponse(bridge.response,mission);
+fs.writeFileSync(path.join(dir,'ops-sync-response.json'),JSON.stringify(response,null,2)+'\n','utf8'); fs.writeFileSync(path.join(dir,'bridge-result.json'),JSON.stringify({protocol:'devexec.heartbeat-bridge-result',schema_version:1,mission_id:mission,heartbeat_run_id:run,target_id:bridge.target.target_id,decision:response.decision,sync_id:response.sync_id,notion_read_at:response.notion_read_at,notion_updated:response.notion_updated,at:new Date().toISOString()},null,2)+'\n','utf8');
+console.log(JSON.stringify({heartbeat_run_id:run,decision:response.decision,sync_id:response.sync_id,notion_read_at:response.notion_read_at,notion_updated:response.notion_updated,dir},null,2)); console.log('DEVEXEC_HEARTBEAT_REAL_BRIDGE_OPS_SYNC_E2E_V0_PASS');
