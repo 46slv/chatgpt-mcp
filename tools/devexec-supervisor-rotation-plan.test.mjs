@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {buildSupervisorRotationPlan as b,canActivateSupervisorRotation as c} from './devexec-supervisor-rotation-plan.mjs';
+const p=b({mission_id:'M1',run_id:'R1',current_target_id:'current-chat',next_generation:2,checkpoint_file:'cp.json'});
+assert.equal(p.state,'WAIT_RUN_BOUNDARY'); assert.equal(p.next_alias,'supervisor-g2');
+assert.equal(c({plan:p,current_run_terminal:false}).reason,'CURRENT_RUN_NOT_TERMINAL');
+assert.equal(c({plan:p,current_run_terminal:true,pending_execution:true}).reason,'PENDING_EXECUTION');
+assert.equal(c({plan:p,current_run_terminal:true,candidate_verified:false}).reason,'CANDIDATE_NOT_VERIFIED');
+assert.equal(c({plan:p,current_run_terminal:true,candidate_verified:true,rehydrate_ack:false}).reason,'REHYDRATE_NOT_ACKNOWLEDGED');
+assert.equal(c({plan:p,current_run_terminal:true,candidate_verified:true,rehydrate_ack:true}).allowed,true);
+assert.throws(()=>b({mission_id:'M1',run_id:'R1',current_target_id:'current-chat',next_generation:2,ambiguous_in_flight:true}),/rotation forbidden/);
+console.log('DEVEXEC_SUPERVISOR_ROTATION_PLAN_V0_TEST_PASS');

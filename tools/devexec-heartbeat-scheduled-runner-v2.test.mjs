@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {runScheduledHeartbeatRecovery as r} from './devexec-heartbeat-scheduled-runner-v2.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'hbv2-'));const s=path.join(d,'state');fs.mkdirSync(s,{recursive:true});const out=path.join(d,'result.json');
+const w=(id,parent,phase,extra={})=>fs.writeFileSync(path.join(s,id+'.json'),JSON.stringify({run_id:id,parent_run_id:parent,phase,created_at:new Date().toISOString(),...extra}));
+w('root',null,'FAILED');w('child','root','EXEC_IN_FLIGHT',{pending:{step:1}});let x=r({root_run_id:'root',state_dir:s,result_file:out},()=>{throw Error('must not execute');});assert.equal(x.action_invoked,false);assert.equal(x.reason,'EXEC_IN_FLIGHT');
+w('child','root','FAILED',{target:{target_id:'current-chat'}});let seen=null;x=r({root_run_id:'root',state_dir:s,result_file:out},v=>{seen=v;return 0;});assert.equal(x.status,'ACTION_SUCCEEDED');assert.equal(x.action,'CONTINUE_CHILD');assert.deepEqual(seen.args,['continue','child','--target','current-chat']);
+w('child','root','NEEDS_HUMAN');x=r({root_run_id:'root',state_dir:s,result_file:out},()=>{throw Error('must not execute');});assert.equal(x.action_invoked,false);assert.equal(x.reason,'NEEDS_HUMAN');
+console.log('DEVEXEC_HEARTBEAT_SCHEDULED_AUTO_RECOVERY_V0_TEST_PASS');

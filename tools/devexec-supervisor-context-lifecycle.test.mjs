@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {applySupervisorContextLifecycle as a} from './devexec-supervisor-context-lifecycle.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'svctx-life-'));
+const base={state_dir:d,checkpoint:{mission_id:'M1',run_id:'R1',git:{head:'abc'}}};
+const c=a({...base,context:{contextText:'x'}}); assert.equal(c.decision.decision,'CONTINUE'); assert.equal(c.checkpoint_file,null);
+const k=a({...base,context:{contextText:'x',majorCheckpoint:true}}); assert.equal(k.decision.decision,'CHECKPOINT'); assert.equal(fs.existsSync(k.checkpoint_file),true);
+const r=a({...base,context:{contextText:'x',repeatedFailures:3},freshNotion:{read_at:'now'},freshGit:{head:'abc'}}); assert.equal(r.decision.decision,'ROTATE'); assert.equal(r.rehydrate_pack.mission_id,'M1');
+const b=a({...base,context:{contextText:'x'.repeat(400000),ambiguousInFlight:true}}); assert.equal(b.decision.decision,'CONTINUE'); assert.equal(b.checkpoint_file,null);
+console.log('DEVEXEC_SUPERVISOR_CONTEXT_LIFECYCLE_V0_TEST_PASS');
