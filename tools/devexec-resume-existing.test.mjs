@@ -1,0 +1,12 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {spawnSync} from "node:child_process";
+const root=fs.mkdtempSync(path.join(os.tmpdir(),"resume-existing-")); const stateDir=path.join(root,"state"); fs.mkdirSync(stateDir,{recursive:true});
+const fake=path.join(root,"fake.mjs"); fs.writeFileSync(fake,"console.log(JSON.stringify({run:process.env.DEV_EXEC_RUN_ID,target:process.env.DEV_EXEC_TARGET_ALIAS}));");
+const tool=path.join(process.cwd(),"tools","devexec-resume-existing.mjs"); const env={...process.env,DEV_EXEC_STATE_DIR:stateDir,DEV_EXEC_RUNNER_PATH:fake};
+fs.writeFileSync(path.join(stateDir,"A.json"),JSON.stringify({run_id:"A",phase:"STEP_PASS",step:4,pending:null,target:{target_id:"current-chat"}})); const a=spawnSync(process.execPath,[tool,"A"],{env,encoding:"utf8"}); assert.equal(a.status,0,a.stderr||a.stdout); assert.match(a.stdout,/"run":"A"/); assert.match(a.stdout,/"target":"current-chat"/);
+fs.writeFileSync(path.join(stateDir,"B.json"),JSON.stringify({run_id:"B",phase:"EXEC_IN_FLIGHT",step:4,pending:{step:5},target:{target_id:"current-chat"}})); const b=spawnSync(process.execPath,[tool,"B"],{env,encoding:"utf8"}); assert.notEqual(b.status,0); assert.match(b.stderr,/ambiguous pending execution/);
+fs.writeFileSync(path.join(stateDir,"C.json"),JSON.stringify({run_id:"C",phase:"COMPLETE",step:4,pending:null,target:{target_id:"current-chat"}})); const c=spawnSync(process.execPath,[tool,"C"],{env,encoding:"utf8"}); assert.notEqual(c.status,0); assert.match(c.stderr,/terminal run/);
+console.log("DEVEXEC_RESUME_EXISTING_RUN_V0_TEST_PASS");

@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {estimateContextTokens,decideContextRotation,buildSessionCheckpoint,buildFreshSessionPack} from './devexec-context-governor.mjs';
+assert.equal(estimateContextTokens('1234567'),2);
+assert.equal(decideContextRotation({estimatedTokens:5000,contextWindow:8192}).decision,'CONTINUE');
+assert.equal(decideContextRotation({estimatedTokens:5400,contextWindow:8192}).decision,'CHECKPOINT');
+assert.equal(decideContextRotation({estimatedTokens:6200,contextWindow:8192}).decision,'ROTATE');
+assert.equal(decideContextRotation({estimatedTokens:1000,contextWindow:8192,gateComplete:true}).reason,'BOUNDED_GATE_COMPLETE');
+const cp=buildSessionCheckpoint({run_id:'R1',session_id:'S1',goal:'g',completed_actions:Array.from({length:25},(_,i)=>({i})),important_files:['a','b']});
+assert.equal(cp.completed_actions.length,20);
+const pack=buildFreshSessionPack({fixedContract:'bounded worker',checkpoint:cp,latestInstruction:'continue'});
+assert.equal(pack.session_checkpoint.run_id,'R1');
+console.log('DEVEXEC_CONTEXT_GOVERNOR_V0_TEST_PASS');
