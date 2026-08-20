@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {inspectHeartbeatSafety,buildHeartbeatPacket,persistHeartbeatResult} from './devexec-heartbeat.mjs';
+assert.deepEqual(inspectHeartbeatSafety({pending:{step:1}}),{safe:false,reason:'EXEC_IN_FLIGHT'});
+assert.deepEqual(inspectHeartbeatSafety({phase:'SUPERVISOR_ROUND_1_IN_FLIGHT'}),{safe:false,reason:'PHASE_IN_FLIGHT'});
+assert.deepEqual(inspectHeartbeatSafety({rounds:{'1':{send_state:'IN_FLIGHT'}}}),{safe:false,reason:'SUPERVISOR_IN_FLIGHT'});
+assert.deepEqual(inspectHeartbeatSafety({phase:'RUNNING',rounds:{}}),{safe:true,reason:'SAFE'});
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'devexec-heartbeat-'));
+const base={mission_id:'MISSION-1',dev_exec_run_id:'RUN-1',machine:'TEST',project_root:root,state:{phase:'RUNNING',step:7},slot:'SLOT-1'};
+const a=buildHeartbeatPacket(base); const b=buildHeartbeatPacket(base); const c=buildHeartbeatPacket({...base,slot:'SLOT-2'});
+assert.equal(a.protocol,'devexec.ops-sync'); assert.equal(a.mission_id,'MISSION-1'); assert.equal(a.current_gate,'HEARTBEAT_V0'); assert.equal(a.requested_sync_reason,'HEARTBEAT'); assert.equal(a.dedupe_key,b.dedupe_key); assert.notEqual(a.dedupe_key,c.dedupe_key);
+const file=path.join(root,'state','last-result.json'); persistHeartbeatResult(file,{protocol:'devexec.heartbeat-result',schema_version:1,status:'SKIPPED',reason:'EXEC_IN_FLIGHT',mission_id:'MISSION-1'});
+const saved=JSON.parse(fs.readFileSync(file,'utf8')); assert.equal(saved.mission_id,'MISSION-1'); assert.equal(saved.status,'SKIPPED');
+console.log('DEVEXEC_HEARTBEAT_CORE_V0_TEST_PASS');

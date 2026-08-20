@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {runHeartbeatTick} from './devexec-heartbeat-runtime.mjs';
+const d=fs.mkdtempSync(path.join(os.tmpdir(),'devexec-heartbeat-runtime-'));
+const blocked=path.join(d,'blocked.json'); const safe=path.join(d,'safe.json');
+fs.writeFileSync(blocked,JSON.stringify({phase:'RUNNING',step:31,pending:{step:31},rounds:{}}));
+fs.writeFileSync(safe,JSON.stringify({phase:'RUNNING',step:30,pending:null,rounds:{}}));
+const a=runHeartbeatTick({mission_id:'MISSION-1',dev_exec_run_id:'RUN-1',project_root:process.cwd(),state_file:blocked,out_dir:path.join(d,'blocked-out'),slot:'SLOT-X'});
+assert.equal(a.status,'SKIPPED'); assert.equal(a.reason,'EXEC_IN_FLIGHT'); assert.ok(fs.existsSync(path.join(d,'blocked-out','last-result.json'))); assert.ok(!fs.existsSync(path.join(d,'blocked-out','ops-sync.json')));
+const b=runHeartbeatTick({mission_id:'MISSION-1',dev_exec_run_id:'RUN-1',project_root:process.cwd(),state_file:safe,out_dir:path.join(d,'safe-out'),slot:'SLOT-X'});
+assert.equal(b.status,'READY'); assert.equal(b.reason,'SAFE'); const packet=JSON.parse(fs.readFileSync(path.join(d,'safe-out','ops-sync.json'),'utf8')); assert.equal(packet.protocol,'devexec.ops-sync'); assert.equal(packet.current_gate,'HEARTBEAT_V0'); assert.equal(packet.mission_id,'MISSION-1'); assert.ok(packet.git.head);
+console.log('DEVEXEC_HEARTBEAT_RUNTIME_SKIP_AND_READY_V0_TEST_PASS');
