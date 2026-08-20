@@ -1,0 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import assert from "node:assert/strict";
+import {runScheduledHeartbeatCheck} from "./devexec-heartbeat-scheduled-runner.mjs";
+const d=fs.mkdtempSync(path.join(os.tmpdir(),"hb-runner-"));
+const s=path.join(d,"state");fs.mkdirSync(s,{recursive:true});const out=path.join(d,"last.json");
+const w=(id,parent,phase,extra={})=>fs.writeFileSync(path.join(s,id+".json"),JSON.stringify({run_id:id,parent_run_id:parent,phase,created_at:new Date().toISOString(),...extra},null,2));
+w("root",null,"FAILED");w("child","root","EXEC_IN_FLIGHT",{pending:{step:1}});let r=runScheduledHeartbeatCheck({root_run_id:"root",state_dir:s,result_file:out});assert.equal(r.status,"SKIPPED");assert.equal(r.reason,"EXEC_IN_FLIGHT");assert.equal(r.action_invoked,false);
+w("child","root","FAILED",{rounds:{"2":{send_state:"FAILED_PRE_SUBMIT"}}});r=runScheduledHeartbeatCheck({root_run_id:"root",state_dir:s,result_file:out});assert.equal(r.status,"READY");assert.equal(r.reason,"SAFE");assert.equal(r.action_invoked,false);
+w("child","root","NEEDS_HUMAN");r=runScheduledHeartbeatCheck({root_run_id:"root",state_dir:s,result_file:out});assert.equal(r.status,"SKIPPED");assert.equal(r.reason,"NEEDS_HUMAN");
+assert.equal(JSON.parse(fs.readFileSync(out,"utf8")).status,"SKIPPED");fs.rmSync(d,{recursive:true,force:true});console.log("DEVEXEC_HEARTBEAT_SCHEDULED_RUNNER_GUARDS_V0_TEST_PASS");
