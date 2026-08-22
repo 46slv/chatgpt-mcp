@@ -44,6 +44,12 @@ function sameSemanticRequest(queue, existing, input) {
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
+function findAmendment(queue, amendmentId) {
+  const item = queue.amendments.find(entry => entry.amendment_id === amendmentId);
+  if (!item) throw new Error("amendment not found");
+  return item;
+}
+
 export function createAmendmentQueue({mission_id, run_id = null} = {}) {
   return {
     protocol: "devexec.mission-amendments",
@@ -78,6 +84,8 @@ export function enqueueAmendment(queue, input, {now = new Date().toISOString()} 
     payload: clone(shape.payload),
     status: "PENDING",
     created_at: now,
+    apply_attempt_id: null,
+    apply_started_at: null,
     applied_at: null,
     applied_run_id: null,
     disposition_reason: null,
@@ -89,9 +97,8 @@ export function enqueueAmendment(queue, input, {now = new Date().toISOString()} 
 
 export function setAmendmentDisposition(queue, amendmentId, status, {reason = null, now = new Date().toISOString()} = {}) {
   if (!TERMINAL.has(status)) throw new Error("invalid amendment disposition");
-  const item = queue.amendments.find(entry => entry.amendment_id === amendmentId);
-  if (!item) throw new Error("amendment not found");
-  if (item.status !== "PENDING") throw new Error("amendment already terminal");
+  const item = findAmendment(queue, amendmentId);
+  if (item.status !== "PENDING") throw new Error("amendment already terminal or in flight");
   item.status = status;
   item.disposition_reason = reason;
   if (status === "APPLIED") item.applied_at = now;
@@ -117,16 +124,44 @@ export function selectApplicableAmendments(queue, boundary) {
     .map(item => ({...clone(item), target_run_id: runId}));
 }
 
-export function applyAmendment(queue, amendmentId, boundary, {now = new Date().toISOString()} = {}) {
-  const applicable = selectApplicableAmendments(queue, boundary);
-  const selected = applicable.find(item => item.amendment_id === amendmentId);
+export function beginAmendmentApply(queue, amendmentId, boundary, {apply_attempt_id, now = new Date().toISOString()} = {}) {
+  const attemptId = assertNonEmpty(apply_attempt_id, "apply_attempt_id");
+  const item = findAmendment(queue, amendmentId);
+  if (item.status === "APPLYING") {
+    if (item.apply_attempt_id === attemptId) return {amendment: item, deduplicated: true};
+    throw new Error("AMENDMENT_APPLY_IN_FLIGHT");
+  }
+  if (item.status !== "PENDING") throw new Error("amendment not pending");
+  const selected = selectApplicableAmendments(queue, boundary).find(entry => entry.amendment_id === amendmentId);
   if (!selected) throw new Error("amendment not applicable at this boundary");
-  const item = queue.amendments.find(entry => entry.amendment_id === amendmentId);
+
+  item.status = "APPLYING";
+  item.apply_attempt_id = attemptId;
+  item.apply_started_at = now;
+  item.applied_run_id = selected.target_run_id;
+  queue.revision += 1;
+  return {amendment: item, deduplicated: false};
+}
+
+export function completeAmendmentApply(queue, amendmentId, {apply_attempt_id, now = new Date().toISOString()} = {}) {
+  const attemptId = assertNonEmpty(apply_attempt_id, "apply_attempt_id");
+  const item = findAmendment(queue, amendmentId);
+  if (item.status === "APPLIED") {
+    if (item.apply_attempt_id === attemptId) return {amendment: item, deduplicated: true};
+    throw new Error("AMENDMENT_APPLY_ATTEMPT_MISMATCH");
+  }
+  if (item.status !== "APPLYING") throw new Error("amendment not applying");
+  if (item.apply_attempt_id !== attemptId) throw new Error("AMENDMENT_APPLY_ATTEMPT_MISMATCH");
   item.status = "APPLIED";
   item.applied_at = now;
-  item.applied_run_id = boundary.run_id ?? queue.current_run_id ?? null;
   queue.revision += 1;
-  return item;
+  return {amendment: item, deduplicated: false};
+}
+
+export function applyAmendment(queue, amendmentId, boundary, {now = new Date().toISOString()} = {}) {
+  const attemptId = `legacy-${amendmentId}`;
+  beginAmendmentApply(queue, amendmentId, boundary, {apply_attempt_id: attemptId, now});
+  return completeAmendmentApply(queue, amendmentId, {apply_attempt_id: attemptId, now}).amendment;
 }
 
 export function carryAmendmentsToRun(queue, runId) {
