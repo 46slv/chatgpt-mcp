@@ -4,7 +4,7 @@ import path from "node:path";
 import {dispatchMissionContinuationSync} from "./devexec-mission-continuation-dispatch.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 
-export function inspectLocalAgentGoalCompletion({runDir,base,runId}){
+export function inspectLocalAgentGoalCompletion({runDir,base,runId},{dispatch_continuation=dispatchMissionContinuationSync}={}){
  const ownerFile=path.join(runDir,"local-agent-owner.json");
  if(!fs.existsSync(ownerFile))return null;
  const owner=JSON.parse(fs.readFileSync(ownerFile,"utf8"));
@@ -23,7 +23,7 @@ export function inspectLocalAgentGoalCompletion({runDir,base,runId}){
   pending_action:false,
   ambiguous_action:false,
  }):null;
- const continuationDispatch=complete&&missionBoundary?.continuation?dispatchMissionContinuationSync({
+ const continuationDispatch=complete&&missionBoundary?.continuation?dispatch_continuation({
   base,
   mission_id:owner.mission_id,
   parent_run_id:runId,
