@@ -6,6 +6,7 @@ import {fileURLToPath} from "node:url";
 
 import {startMissionLocalAgent} from "./devexec-mission-entry-runtime.mjs";
 import {resolveMissionEntryIdentity} from "./devexec-mission-entry.mjs";
+import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const AGENT=path.join(HERE,"local-agent-facade.mjs");
@@ -46,7 +47,30 @@ const started=startMissionLocalAgent({
 const agent=started.agent;
 const mission=started.mission;
 if(agent.decision==="COMPLETE"){
- console.log(JSON.stringify({run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,decision:"COMPLETE",supervisor_used:false,mission_created:mission.created},null,2));
+ const boundary=applyMissionLoopBoundary({
+  base:BASE,
+  mission_id:identity.mission_id,
+  run_id:id,
+  parent_run_id:identity.parent_run_id,
+  current_goal_complete:true,
+  pending_action:false,
+  ambiguous_action:false,
+  target_alias:target,
+ });
+ console.log(JSON.stringify({
+  run_id:id,
+  mission_id:identity.mission_id,
+  parent_run_id:identity.parent_run_id,
+  agent_run_id:agent.run_id,
+  decision:"COMPLETE",
+  supervisor_used:false,
+  mission_created:mission.created,
+  mission_boundary:{
+   applied:boundary.applied,
+   skipped:boundary.skipped,
+   continuation:boundary.continuation,
+  },
+ },null,2));
  process.exit(0);
 }
 if(agent.decision!=="NEEDS_SUPERVISOR")throw new Error("unsupported decision: "+agent.decision);
