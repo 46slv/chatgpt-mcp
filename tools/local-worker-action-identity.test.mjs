@@ -8,6 +8,7 @@ import {runIterativeLocalWorker} from "./local-worker-iterative-runner.mjs";
 import {runLocalWorkerResume} from "./local-worker-resume-runtime.mjs";
 import {consumeLocalWorkerRepair} from "./local-worker-supervisor-repair.mjs";
 import {inspectLocalPlannerContext} from "./local-worker-context-runtime.mjs";
+import {buildLocalWorkerEscalation} from "./local-worker-cloud-handoff.mjs";
 
 test("iterative worker persists a pending identity before execution and completes the same record", async () => {
  const actions=[];
@@ -110,4 +111,32 @@ test("context checkpoint retains worker and executor action identities", () => {
  assert.equal(inspection.decision,"ROTATE");
  assert.equal(inspection.checkpoint.completed_actions[0].request_id,"R01-01-001");
  assert.equal(inspection.checkpoint.completed_actions[0].executor_request_id,"LW-TEST-R01-01-001");
+});
+
+test("supervisor escalation reports pending action as ambiguous, not completed", () => {
+ const escalation=buildLocalWorkerEscalation({
+  run_id:"LW-TEST",
+  status:"FAILED",
+  actions:[
+   {request_id:"R01-01-001",executor_request_id:"LW-TEST-R01-01-001",action:"git_status_short",args:{},result:{status:"PASS"}},
+   {request_id:"R02-01-002",action:"read_file",args:{path:"README.md"},pending:true},
+  ],
+ });
+ assert.equal(escalation.reason,"LOCAL_WORKER_AMBIGUOUS_ACTION_IN_FLIGHT");
+ assert.deepEqual(escalation.completed_actions,["LW-TEST-R01-01-001"]);
+ assert.match(escalation.remaining_criteria[0],/R02-01-002/);
+ assert.equal(escalation.requested_help,"RECONCILE_AMBIGUOUS_LOCAL_ACTION_BEFORE_REPAIR");
+});
+
+test("supervisor escalation prefers durable executor and worker identities for completed actions", () => {
+ const escalation=buildLocalWorkerEscalation({
+  run_id:"LW-TEST",
+  status:"FAILED",
+  actions:[
+   {request_id:"R01-01-001",executor_request_id:"LW-TEST-R01-01-001",action:"git_status_short",args:{},result:{status:"PASS",request_id:"legacy-result-id"}},
+   {request_id:"REPAIR-002",action:"read_file",args:{path:"README.md"},result:{status:"BLOCKED"}},
+  ],
+ });
+ assert.deepEqual(escalation.completed_actions,["LW-TEST-R01-01-001","REPAIR-002"]);
+ assert.equal(escalation.reason,"LOCAL_WORKER_FAILED");
 });
