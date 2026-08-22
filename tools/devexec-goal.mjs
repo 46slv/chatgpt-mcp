@@ -9,17 +9,18 @@ import {resolveMissionEntryIdentity} from "./devexec-mission-entry.mjs";
 import {dispatchMissionContinuationSync} from "./devexec-mission-continuation-dispatch.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 import {parseMissionConstraintsEnv, renderMissionGoalWithConstraints} from "./devexec-mission-constraint-envelope.mjs";
+import {applyTargetAliasToEnv, normalizeDurableTargetAlias, parseInheritedTargetAlias} from "./devexec-target-alias.mjs";
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const AGENT=path.join(HERE,"local-agent-facade.mjs");
 const LOOP=path.join(HERE,"dev-exec-loop.mjs");
 const BASE=process.env.LOCALAPPDATA||path.join(os.homedir(),"AppData","Local");
 const argv=process.argv.slice(2);
-let target=process.env.DEV_EXEC_TARGET_ALIAS?.trim()||null;
+let target=parseInheritedTargetAlias(process.env.DEV_EXEC_TARGET_ALIAS);
 let dry=false;let reportOnly=false;
 const parts=[];
 for(let i=0;i<argv.length;i++){
- if(argv[i]==="--target"){target=argv[++i];if(!target)throw new Error("target required");}
+ if(argv[i]==="--target"){target=normalizeDurableTargetAlias(argv[++i]);if(!target)throw new Error("target required");}
  else if(argv[i]==="--dry-run"){dry=true;}
  else if(argv[i]==="--report-only"){reportOnly=true;}
  else parts.push(argv[i]);
@@ -34,9 +35,8 @@ const identity=resolveMissionEntryIdentity({
  parent_run_id:process.env.DEV_EXEC_PARENT_RUN_ID||null,
  mission_id:process.env.DEV_EXEC_MISSION_ID||null,
 });
-const env={...process.env,DEV_EXEC_RUN_ID:id,DEV_EXEC_MISSION_ID:identity.mission_id};
+const env=applyTargetAliasToEnv({...process.env,DEV_EXEC_RUN_ID:id,DEV_EXEC_MISSION_ID:identity.mission_id},target);
 if(identity.parent_run_id)env.DEV_EXEC_PARENT_RUN_ID=identity.parent_run_id;
-if(target)env.DEV_EXEC_TARGET_ALIAS=target;
 const started=startMissionLocalAgent({
  base:BASE,
  identity,
