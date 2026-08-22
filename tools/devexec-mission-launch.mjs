@@ -38,18 +38,18 @@ function createLaunchState(missionId) {
   };
 }
 
-function refreshBoundControlState(control) {
+function refreshControlState(control, {require_bound = true} = {}) {
   const state = loadMissionState(control.paths.state_file);
   if (state.mission_id !== control.state.mission_id) throw new Error("MISSION_STATE_ID_MISMATCH");
   const boundRunId = control.bound_run_id ?? control.state.current_run_id;
-  if (state.current_run_id !== boundRunId) throw new Error("STALE_MISSION_CONTROL");
+  if (require_bound && state.current_run_id !== boundRunId) throw new Error("STALE_MISSION_CONTROL");
   control.state = state;
   return state;
 }
 
-function withLaunchStateLock(control, fn) {
+function withLaunchStateLock(control, fn, options = {}) {
   return withMissionLock(control.paths.root, () => {
-    refreshBoundControlState(control);
+    refreshControlState(control, options);
     return fn();
   });
 }
@@ -203,7 +203,7 @@ export function completeMissionChildLaunch(control, launchId, {
     state.revision += 1;
     saveLaunchState(control, state);
     return {state, launch, deduplicated: false};
-  });
+  }, {require_bound: false});
 }
 
 export function markMissionChildLaunchAmbiguous(control, launchId, {
@@ -223,7 +223,7 @@ export function markMissionChildLaunchAmbiguous(control, launchId, {
     state.revision += 1;
     saveLaunchState(control, state);
     return {state, launch};
-  });
+  }, {require_bound: false});
 }
 
 export function reconcileMissionChildLaunches(control, {
@@ -237,7 +237,6 @@ export function reconcileMissionChildLaunches(control, {
       const attached = control.state.runs.find(run => run.run_id === launch.child_run_id);
       if (!attached) continue;
       if (attached.parent_run_id !== launch.parent_run_id) throw new Error("RUN_LINEAGE_CONFLICT");
-      if (control.state.current_run_id !== launch.child_run_id) continue;
       launch.status = "CONFIRMED";
       launch.confirmed_at = now;
       changed = true;
@@ -269,5 +268,5 @@ export function buildMissionChildLaunchSpec(control, launch, {
 }
 
 export function readMissionLaunchState(control) {
-  return withLaunchStateLock(control, () => clone(loadLaunchState(control)));
+  return withLaunchStateLock(control, () => clone(loadLaunchState(control)), {require_bound: false});
 }
