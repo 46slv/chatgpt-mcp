@@ -12,12 +12,15 @@ Branch: `automation/devexec-mission-runtime-wiring-20260823`, based on exact `au
 - `tools/devexec-mission-launch.mjs` adds durable duplicate-safe child launch intent: idempotency key, lineage, `PENDING -> LAUNCHING -> LAUNCHED -> CONFIRMED`, lease token/expiry, launcher request identity, receipt, and explicit `AMBIGUOUS` fail-closed state.
 - `tools/devexec-mission-launcher.mjs` performs the real process-dispatch seam. `LAUNCHING` is durably persisted before `spawn`; only the Node `spawn` event permits a launch receipt. A spawn error becomes durable `AMBIGUOUS`, not replayable `PENDING`.
 - Child launch specs carry `DEV_EXEC_MISSION_ID`, `DEV_EXEC_PARENT_RUN_ID`, `DEV_EXEC_RUN_ID`, and optional target alias into `devexec-goal.mjs`.
+- `tools/devexec-mission-launch-real-e2e.mjs` is a bounded real-process probe for launch -> inherited environment -> child lineage -> reconciliation.
 
 ## Cloud validation actually run
 
 Focused Node tests for the new entry/amend/launch/dispatcher modules: **11/11 PASS**. A consolidated checked-in regression suite covering the critical cases ran **8/8 PASS**.
 
 A local stub-agent integration probe ran `devexec-goal.mjs --dry-run` for a root then child run and read back the Mission state plus both owner records: **PASS**. It proved the child inherited the root Mission and attached as lineage instead of creating a sibling Mission.
+
+The checked-in real-process launch probe was also executed in the cloud Linux runtime: **PASS**. It spawned one real detached Node child, observed `MISSION-E2E / RUN-ROOT / RUN-CHILD` in the child environment, attached that child to Mission lineage, and reconciled the launch state to `CONFIRMED`.
 
 This does not claim the repository-wide suite, real Local Agent, real ChatGPT Bridge, Windows detached child lifetime, or the production `dev-exec-loop.mjs` safe-boundary wiring.
 
@@ -29,8 +32,8 @@ After that, invoke the new launch request/dispatcher from the existing continuat
 
 ## Host acceptance packet
 
-1. Run the checked-in focused Node regression from a real checkout.
+1. Run `node --test tools/devexec-mission-runtime-wiring.test.mjs` from a real checkout.
 2. Run root `devexec-goal.mjs --dry-run`, then a child with inherited Mission/parent IDs; inspect `mission-state.json` and both owner files.
-3. Dispatch one bounded child through `devexec-mission-launcher.mjs`; verify a single child PID, a durable receipt, child lineage attachment, and `CONFIRMED` reconciliation.
+3. Run `node tools/devexec-mission-launch-real-e2e.mjs`; then repeat the same pattern through the real Windows entrypoint and verify a single child PID, durable receipt, lineage attachment, and `CONFIRMED` reconciliation.
 4. Kill the parent after the child process emits spawn but before receipt completion; restart and prove no duplicate child is launched.
 5. Only after those checks should the production loop safe-boundary/self-continuation wiring be considered for merge.
