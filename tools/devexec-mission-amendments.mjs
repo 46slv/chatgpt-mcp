@@ -3,7 +3,7 @@ import path from "node:path";
 
 const KINDS = new Set(["MISSION_AMENDMENT", "GOAL_PATCH"]);
 const APPLY_MODES = new Set(["next_safe_boundary", "after_current_goal", "supersede_current_goal"]);
-const TERMINAL = new Set(["APPLIED", "REJECTED", "CANCELLED"]);
+const MANUAL_DISPOSITIONS = new Set(["REJECTED", "CANCELLED"]);
 
 function assertNonEmpty(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -22,24 +22,22 @@ function stableValue(value) {
   return value;
 }
 
-function semanticShape(queue, input) {
+function semanticShape(input) {
   return {
     kind: input.kind,
     apply_mode: input.apply_mode,
     priority: Number.isInteger(input.priority) ? input.priority : 0,
     payload: stableValue(input.payload ?? {}),
-    created_for_run_id: input.run_id ?? queue.current_run_id,
   };
 }
 
-function sameSemanticRequest(queue, existing, input) {
-  const expected = semanticShape(queue, input);
+function sameSemanticRequest(existing, input) {
+  const expected = semanticShape(input);
   const actual = {
     kind: existing.kind,
     apply_mode: existing.apply_mode,
     priority: existing.priority,
     payload: stableValue(existing.payload),
-    created_for_run_id: existing.created_for_run_id,
   };
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
@@ -69,19 +67,20 @@ export function enqueueAmendment(queue, input, {now = new Date().toISOString()} 
   const idempotencyKey = assertNonEmpty(input.idempotency_key, "idempotency_key");
   const existing = queue.amendments.find(item => item.idempotency_key === idempotencyKey);
   if (existing) {
-    if (!sameSemanticRequest(queue, existing, input)) throw new Error("IDEMPOTENCY_KEY_CONFLICT");
+    if (!sameSemanticRequest(existing, input)) throw new Error("IDEMPOTENCY_KEY_CONFLICT");
     return {queue, amendment: existing, deduplicated: true};
   }
 
   const id = assertNonEmpty(input.amendment_id, "amendment_id");
   if (queue.amendments.some(item => item.amendment_id === id)) throw new Error("duplicate amendment_id");
 
-  const shape = semanticShape(queue, input);
+  const shape = semanticShape(input);
   const amendment = {
     amendment_id: id,
     idempotency_key: idempotencyKey,
     ...shape,
     payload: clone(shape.payload),
+    created_for_run_id: input.run_id ?? queue.current_run_id,
     status: "PENDING",
     created_at: now,
     apply_attempt_id: null,
@@ -95,13 +94,13 @@ export function enqueueAmendment(queue, input, {now = new Date().toISOString()} 
   return {queue, amendment, deduplicated: false};
 }
 
-export function setAmendmentDisposition(queue, amendmentId, status, {reason = null, now = new Date().toISOString()} = {}) {
-  if (!TERMINAL.has(status)) throw new Error("invalid amendment disposition");
+export function setAmendmentDisposition(queue, amendmentId, status, {reason = null} = {}) {
+  if (status === "APPLIED") throw new Error("APPLIED_REQUIRES_TWO_PHASE_APPLY");
+  if (!MANUAL_DISPOSITIONS.has(status)) throw new Error("invalid amendment disposition");
   const item = findAmendment(queue, amendmentId);
   if (item.status !== "PENDING") throw new Error("amendment already terminal or in flight");
   item.status = status;
   item.disposition_reason = reason;
-  if (status === "APPLIED") item.applied_at = now;
   queue.revision += 1;
   return item;
 }
