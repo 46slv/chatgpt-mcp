@@ -61,10 +61,18 @@ export async function dispatchMissionChildLaunch(control, launch, {
     throw new Error("MISSION_LAUNCH_DISPATCH_ALREADY_IN_FLIGHT");
   }
   const spec = buildMissionChildLaunchSpec(control, begun.launch, {entry_path, node_path});
+  const childEnv = {...spawn_env, ...spec.env};
+  // target_alias:null is an explicit request to use normal/default routing for
+  // this child. Because spawn_env may be inherited from a targeted parent,
+  // omitting the variable would silently reintroduce the parent's target. Clear
+  // it unless the durable launch spec intentionally carries an alias.
+  if (!Object.prototype.hasOwnProperty.call(spec.env, "DEV_EXEC_TARGET_ALIAS")) {
+    delete childEnv.DEV_EXEC_TARGET_ALIAS;
+  }
   let child;
   try {
     child = spawn_impl(spec.command, spec.args, {
-      env: {...spawn_env, ...spec.env},
+      env: childEnv,
       detached: true,
       windowsHide: true,
       stdio: "ignore",
