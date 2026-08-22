@@ -17,6 +17,103 @@ function loadBoundParent(paths, missionId, parentRunId) {
   return state;
 }
 
+function loadBoundRoot(paths, missionId, runId) {
+  const state = loadMissionState(paths.state_file);
+  if (state.mission_id !== missionId) throw new Error("MISSION_STATE_ID_MISMATCH");
+  if (state.current_run_id !== runId) throw new Error("STALE_RUN_ID");
+  const run = findRun(state, runId);
+  if (!run || run.parent_run_id !== null) throw new Error("MISSION_ROOT_RUN_REQUIRED");
+  return {state, run};
+}
+
+export function beginMissionRootRunStart({
+  base,
+  mission_id,
+  run_id,
+  start_attempt_id,
+  now = new Date().toISOString(),
+} = {}) {
+  const missionId = required(mission_id, "mission_id");
+  const runId = required(run_id, "run_id");
+  const attemptId = required(start_attempt_id, "start_attempt_id");
+  const paths = resolveMissionPaths(base, missionId);
+
+  return withMissionLock(paths.root, () => {
+    const {state, run} = loadBoundRoot(paths, missionId, runId);
+    if (run.status === "STARTING") {
+      if (run.start_attempt_id === attemptId) return {state, run, deduplicated: true, paths};
+      throw new Error("MISSION_ROOT_START_IN_FLIGHT");
+    }
+    if (run.status === "AMBIGUOUS") throw new Error("MISSION_ROOT_START_AMBIGUOUS");
+    if (run.status === "ACTIVE") throw new Error("MISSION_ROOT_ALREADY_ACTIVE");
+    if (run.status != null) throw new Error(`mission root not startable: ${run.status}`);
+
+    run.status = "STARTING";
+    run.start_attempt_id = attemptId;
+    run.start_started_at = now;
+    run.ambiguous_reason = null;
+    state.revision += 1;
+    state.updated_at = now;
+    saveMissionState(paths.state_file, state);
+    return {state, run, deduplicated: false, paths};
+  });
+}
+
+export function activateMissionRootRun({
+  base,
+  mission_id,
+  run_id,
+  start_attempt_id,
+  now = new Date().toISOString(),
+} = {}) {
+  const missionId = required(mission_id, "mission_id");
+  const runId = required(run_id, "run_id");
+  const attemptId = required(start_attempt_id, "start_attempt_id");
+  const paths = resolveMissionPaths(base, missionId);
+
+  return withMissionLock(paths.root, () => {
+    const {state, run} = loadBoundRoot(paths, missionId, runId);
+    if (run.status !== "STARTING") throw new Error(`mission root not starting: ${run.status ?? "UNKNOWN"}`);
+    if (run.start_attempt_id !== attemptId) throw new Error("MISSION_ROOT_START_ATTEMPT_MISMATCH");
+
+    run.status = "ACTIVE";
+    run.attached_at = run.attached_at ?? now;
+    state.revision += 1;
+    state.updated_at = now;
+    saveMissionState(paths.state_file, state);
+    return {state, run, paths};
+  });
+}
+
+export function markMissionRootRunAmbiguous({
+  base,
+  mission_id,
+  run_id,
+  start_attempt_id,
+  reason,
+  now = new Date().toISOString(),
+} = {}) {
+  const missionId = required(mission_id, "mission_id");
+  const runId = required(run_id, "run_id");
+  const attemptId = required(start_attempt_id, "start_attempt_id");
+  const ambiguityReason = required(reason, "reason");
+  const paths = resolveMissionPaths(base, missionId);
+
+  return withMissionLock(paths.root, () => {
+    const {state, run} = loadBoundRoot(paths, missionId, runId);
+    if (run.status !== "STARTING" || run.start_attempt_id !== attemptId) {
+      throw new Error("MISSION_ROOT_START_ATTEMPT_MISMATCH");
+    }
+
+    run.status = "AMBIGUOUS";
+    run.ambiguous_reason = ambiguityReason;
+    state.revision += 1;
+    state.updated_at = now;
+    saveMissionState(paths.state_file, state);
+    return {state, run, paths};
+  });
+}
+
 export function reserveMissionChildRun({
   base,
   mission_id,
