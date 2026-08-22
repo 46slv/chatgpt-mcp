@@ -43,6 +43,18 @@ function continuationIdentity(missionId, runId, work, index) {
   };
 }
 
+function missionConstraintTexts(objective) {
+  const seen = new Set();
+  const result = [];
+  for (const item of objective.constraints ?? []) {
+    const text = required(item?.text, "objective constraint");
+    if (seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
+}
+
 function findContinuationWork(control, objective, runId) {
   const launchState = readMissionLaunchState(control);
   for (let index = 0; index < objective.queued_work.length; index += 1) {
@@ -61,6 +73,7 @@ function summarizeExistingContinuation(existing, work, index) {
     launch_id: existing.launch_id,
     idempotency_key: existing.idempotency_key,
     goal: work.text,
+    constraints: [...(existing.constraints ?? [])],
     objective_index: index,
     status: existing.status,
     deduplicated: true,
@@ -116,17 +129,20 @@ export function applyMissionLoopBoundary({
         continuation = summarizeExistingContinuation(existing, work, index);
       } else {
         const identity = continuationIdentity(missionId, runId, work, index);
+        const constraints = missionConstraintTexts(objective);
         const requested = requestMissionChildLaunch(control, {
           parent_run_id: runId,
           child_run_id: identity.child_run_id,
           launch_id: identity.launch_id,
           idempotency_key: identity.idempotency_key,
           goal: work.text,
+          constraints,
           target_alias,
         }, {boundary, now});
         continuation = {
           ...identity,
           goal: work.text,
+          constraints,
           objective_index: index,
           status: requested.launch.status,
           deduplicated: requested.deduplicated === true,
