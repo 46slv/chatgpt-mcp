@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {withMissionLock} from "./devexec-mission-lock.mjs";
 import {loadMissionState} from "./devexec-mission-state.mjs";
+import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
 
 const ACTIVE = new Set(["PENDING", "LAUNCHING", "LAUNCHED", "AMBIGUOUS"]);
 
@@ -86,7 +87,7 @@ function semanticRequest(control, input) {
     child_run_id: input.child_run_id,
     goal: input.goal,
     constraints: normalizeConstraints(input.constraints),
-    target_alias: input.target_alias ?? null,
+    target_alias: normalizeDurableTargetAlias(input.target_alias),
   };
 }
 
@@ -96,7 +97,7 @@ function sameRequest(control, existing, input) {
     child_run_id: existing.child_run_id,
     goal: existing.goal,
     constraints: existing.constraints ?? [],
-    target_alias: existing.target_alias ?? null,
+    target_alias: normalizeDurableTargetAlias(existing.target_alias ?? null),
   })) === JSON.stringify(stable(semanticRequest(control, input)));
 }
 
@@ -121,6 +122,7 @@ export function requestMissionChildLaunch(control, input, {
     const idempotencyKey = required(input?.idempotency_key, "idempotency_key");
     const goal = required(input?.goal, "goal");
     const constraints = normalizeConstraints(input?.constraints);
+    const targetAlias = normalizeDurableTargetAlias(input?.target_alias);
     const launchId = required(input?.launch_id, "launch_id");
 
     const state = loadLaunchState(control);
@@ -141,7 +143,7 @@ export function requestMissionChildLaunch(control, input, {
       child_run_id: childRunId,
       goal,
       constraints,
-      target_alias: input.target_alias ?? null,
+      target_alias: targetAlias,
       status: "PENDING",
       requested_at: now,
       launch_attempt_id: null,
@@ -276,6 +278,7 @@ export function buildMissionChildLaunchSpec(control, launch, {
   if (!launch || launch.mission_id !== control.state.mission_id) throw new Error("launch/control mission mismatch");
   if (!["PENDING", "LAUNCHING"].includes(launch.status)) throw new Error("launch not dispatchable");
   const constraints = normalizeConstraints(launch.constraints);
+  const targetAlias = normalizeDurableTargetAlias(launch.target_alias);
   return {
     command: required(node_path, "node_path"),
     args: [required(entry_path, "entry_path"), launch.goal],
@@ -287,7 +290,7 @@ export function buildMissionChildLaunchSpec(control, launch, {
       // values, so ambient state from the parent process cannot leak into an
       // unrelated child continuation.
       DEV_EXEC_MISSION_CONSTRAINTS_JSON: JSON.stringify(constraints),
-      DEV_EXEC_TARGET_ALIAS: launch.target_alias ?? "",
+      DEV_EXEC_TARGET_ALIAS: targetAlias ?? "",
     },
   };
 }
