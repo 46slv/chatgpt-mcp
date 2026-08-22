@@ -10,6 +10,7 @@ $syntaxFiles = @(
     "tools/devexec-mission-objective.mjs",
     "tools/devexec-mission-loop-boundary.mjs",
     "tools/devexec-mission-launch.mjs",
+    "tools/devexec-mission-launcher.mjs",
     "tools/devexec-mission-constraint-envelope.mjs",
     "tools/devexec-goal.mjs",
     "tools/devexec-local-agent-goal-state.mjs"
@@ -20,6 +21,7 @@ $testFiles = @(
     "tools/devexec-mission-amendment-runtime.test.mjs",
     "tools/devexec-mission-loop-boundary.test.mjs",
     "tools/devexec-mission-constraint-continuation.test.mjs",
+    "tools/devexec-mission-target-env-clear.test.mjs",
     "tools/devexec-local-agent-mission-boundary.test.mjs",
     "tools/devexec-mission-continuation-dispatch.test.mjs"
 )
