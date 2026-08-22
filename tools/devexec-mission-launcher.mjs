@@ -5,8 +5,8 @@ import {
   buildMissionChildLaunchSpec,
   completeMissionChildLaunch,
   markMissionChildLaunchAmbiguous,
+  readMissionLaunchState,
 } from "./devexec-mission-launch.mjs";
-import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -47,11 +47,16 @@ export async function dispatchMissionChildLaunch(control, launch, {
   const launchId = required(launch?.launch_id, "launch_id");
   const attemptId = required(launch_attempt_id, "launch_attempt_id");
   const launcherRequestId = required(launcher_request_id, "launcher_request_id");
-  // Validate the durable routing value before moving PENDING -> LAUNCHING.
-  // Node child_process environment values are string-coercible, so without
-  // this fence a malformed persisted value could silently route to a target
-  // such as "[object Object]" and leave an ambiguous in-flight launch.
-  normalizeDurableTargetAlias(launch?.target_alias);
+
+  // The caller's launch object can be stale. Re-read the durable record and run
+  // every deterministic launch-spec validation before PENDING -> LAUNCHING.
+  // Otherwise a corrupted durable target/constraint/goal (or invalid entry path)
+  // can be discovered only after beginMissionChildLaunch() has persisted an
+  // in-flight attempt, leaving a false LAUNCHING record despite no spawn call.
+  const durableState = readMissionLaunchState(control);
+  const durableLaunch = durableState.launches.find(item => item.launch_id === launchId);
+  if (!durableLaunch) throw new Error("launch not found");
+  buildMissionChildLaunchSpec(control, durableLaunch, {entry_path, node_path});
 
   const begun = beginMissionChildLaunch(control, launchId, {
     launch_attempt_id: attemptId,
