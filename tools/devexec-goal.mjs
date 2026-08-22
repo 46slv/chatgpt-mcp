@@ -4,7 +4,7 @@ import path from "node:path";
 import {spawnSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
 
-import {openMissionControl} from "./devexec-mission-control.mjs";
+import {startMissionLocalAgent} from "./devexec-mission-entry-runtime.mjs";
 import {resolveMissionEntryIdentity} from "./devexec-mission-entry.mjs";
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
@@ -32,16 +32,19 @@ const identity=resolveMissionEntryIdentity({
 const env={...process.env,DEV_EXEC_RUN_ID:id,DEV_EXEC_MISSION_ID:identity.mission_id};
 if(identity.parent_run_id)env.DEV_EXEC_PARENT_RUN_ID=identity.parent_run_id;
 if(target)env.DEV_EXEC_TARGET_ALIAS=target;
-const r=spawnSync(process.execPath,[AGENT,"start",goal],{encoding:"utf8",env,windowsHide:true});
-let agent=null;
-try{agent=JSON.parse((r.stdout||"").trim());}catch{}
-if(!agent||!agent.run_id)throw new Error("local agent start failed");
-const mission=openMissionControl({
+const started=startMissionLocalAgent({
  base:BASE,
- mission_id:identity.mission_id,
- run_id:id,
- parent_run_id:identity.parent_run_id,
+ identity,
+ start_local_agent:()=>{
+  const r=spawnSync(process.execPath,[AGENT,"start",goal],{encoding:"utf8",env,windowsHide:true});
+  let parsed=null;
+  try{parsed=JSON.parse((r.stdout||"").trim());}catch{}
+  if(!parsed||!parsed.run_id)throw new Error("local agent start failed");
+  return parsed;
+ },
 });
+const agent=started.agent;
+const mission=started.mission;
 if(agent.decision==="COMPLETE"){
  console.log(JSON.stringify({run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,decision:"COMPLETE",supervisor_used:false,mission_created:mission.created},null,2));
  process.exit(0);
