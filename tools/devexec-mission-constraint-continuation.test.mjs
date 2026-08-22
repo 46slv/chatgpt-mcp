@@ -7,7 +7,7 @@ import test from "node:test";
 import {parseMissionConstraintsEnv, renderMissionGoalWithConstraints} from "./devexec-mission-constraint-envelope.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 import {enqueueMissionAmendment, openMissionControl} from "./devexec-mission-control.mjs";
-import {buildMissionChildLaunchSpec, readMissionLaunchState} from "./devexec-mission-launch.mjs";
+import {buildMissionChildLaunchSpec, readMissionLaunchState, requestMissionChildLaunch} from "./devexec-mission-launch.mjs";
 
 function tempBase() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-constraint-continuation-"));
@@ -73,6 +73,35 @@ test("a later work item does not inherit constraints from an unrelated earlier a
   });
   assert.deepEqual(result.objective.queued_work.map(item => item.constraints), [["first-only constraint"], []]);
   assert.deepEqual(result.continuation.constraints, ["first-only constraint"]);
+});
+
+test("legacy launch records without target_alias or constraints still deduplicate", () => {
+  const base = tempBase();
+  const control = openMissionControl({base, mission_id: "MISSION-LEGACY-LAUNCH", run_id: "RUN-ROOT"});
+  const request = {
+    parent_run_id: "RUN-ROOT",
+    child_run_id: "RUN-CHILD",
+    launch_id: "LAUNCH-LEGACY",
+    idempotency_key: "legacy-launch-key",
+    goal: "legacy child",
+  };
+  const first = requestMissionChildLaunch(control, request, {
+    boundary: {safe: true, pending_action: false, ambiguous_action: false},
+  });
+  assert.equal(first.deduplicated, false);
+
+  const file = path.join(control.paths.root, "launch-state.json");
+  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+  delete persisted.launches[0].target_alias;
+  delete persisted.launches[0].constraints;
+  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+
+  const reopened = openMissionControl({base, mission_id: "MISSION-LEGACY-LAUNCH", run_id: "RUN-ROOT"});
+  const replay = requestMissionChildLaunch(reopened, request, {
+    boundary: {safe: true, pending_action: false, ambiguous_action: false},
+  });
+  assert.equal(replay.deduplicated, true);
+  assert.equal(replay.launch.launch_id, "LAUNCH-LEGACY");
 });
 
 test("next_safe_boundary constraint remains pending because live Goal mutation is unsupported", () => {
