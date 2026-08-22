@@ -50,6 +50,7 @@ export async function dispatchMissionContinuation({
     launcher_request_id: `${launchId}:request-1`,
     lease_token: `${launchId}:lease-1`,
     entry_path,
+    spawn_env: {...process.env, ...(base ? {LOCALAPPDATA: base} : {})},
     now,
   });
   return {...result, deduplicated: false};
