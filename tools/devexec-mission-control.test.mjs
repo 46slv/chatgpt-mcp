@@ -100,3 +100,22 @@ test("only matching apply attempt can durably complete", () => withRoot(root => 
   assert.equal(completed.amendment.status, "APPLIED");
   assert.equal(loadAmendmentQueue(control.paths.amendments_file).amendments[0].status, "APPLIED");
 }));
+
+test("stale control refresh preserves an APPLYING fence while another writer enqueues", () => withRoot(root => {
+  const controlA = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  enqueueMissionAmendment(controlA, amendment({amendment_id: "AMD-A", idempotency_key: "MISSION-001:operator:A"}));
+
+  const staleControlB = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  beginMissionAmendmentApply(controlA, "AMD-A", {safe: true}, {apply_attempt_id: "APPLY-A"});
+
+  enqueueMissionAmendment(staleControlB, amendment({
+    amendment_id: "AMD-B",
+    idempotency_key: "MISSION-001:operator:B",
+    payload: {add_work: "second mutation"},
+  }));
+
+  const disk = loadAmendmentQueue(controlA.paths.amendments_file);
+  assert.equal(disk.amendments.find(item => item.amendment_id === "AMD-A").status, "APPLYING");
+  assert.equal(disk.amendments.find(item => item.amendment_id === "AMD-A").apply_attempt_id, "APPLY-A");
+  assert.equal(disk.amendments.find(item => item.amendment_id === "AMD-B").status, "PENDING");
+}));
