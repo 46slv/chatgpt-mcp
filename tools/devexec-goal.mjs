@@ -6,6 +6,7 @@ import {fileURLToPath} from "node:url";
 
 import {startMissionLocalAgent} from "./devexec-mission-entry-runtime.mjs";
 import {resolveMissionEntryIdentity} from "./devexec-mission-entry.mjs";
+import {dispatchMissionContinuationSync} from "./devexec-mission-continuation-dispatch.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,12 @@ if(agent.decision==="COMPLETE"){
   ambiguous_action:false,
   target_alias:target,
  });
+ const continuationDispatch=boundary.continuation?dispatchMissionContinuationSync({
+  base:BASE,
+  mission_id:identity.mission_id,
+  parent_run_id:id,
+  launch_id:boundary.continuation.launch_id,
+ }):null;
  console.log(JSON.stringify({
   run_id:id,
   mission_id:identity.mission_id,
@@ -69,6 +76,7 @@ if(agent.decision==="COMPLETE"){
    applied:boundary.applied,
    skipped:boundary.skipped,
    continuation:boundary.continuation,
+   continuation_dispatch:continuationDispatch,
   },
  },null,2));
  process.exit(0);
