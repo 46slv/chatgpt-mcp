@@ -89,13 +89,17 @@ export function normalizeMissionObjectivePayload(amendment) {
     ...asTextArray(payload.constraint, "constraint"),
     ...asTextArray(payload.constraints, "constraints"),
   ];
-  if (constraints.length > 0) {
-    throw new Error("MISSION_OBJECTIVE_UNSUPPORTED_CONSTRAINT_ENFORCEMENT");
+
+  // A live-running Goal has no replay-safe mutation surface yet. Constraints are
+  // therefore supported only when they become part of an after-current-goal
+  // continuation envelope. This keeps next_safe_boundary constraints PENDING.
+  if (constraints.length > 0 && amendment.apply_mode !== "after_current_goal") {
+    throw new Error("MISSION_OBJECTIVE_UNSUPPORTED_LIVE_CONSTRAINT_ENFORCEMENT");
   }
-  if (queuedWork.length < 1) {
+  if (queuedWork.length < 1 && constraints.length < 1) {
     throw new Error("MISSION_OBJECTIVE_EMPTY_MUTATION");
   }
-  return {queued_work: queuedWork, constraints: []};
+  return {queued_work: queuedWork, constraints};
 }
 
 export function applyMissionObjectiveAmendment({
