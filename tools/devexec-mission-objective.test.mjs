@@ -31,6 +31,7 @@ test("typed Mission add_work amendment produces durable queued work and receipt"
   assert.equal(applied.deduplicated, false);
   const state = readMissionObjective({base: root, mission_id: "MISSION-001"});
   assert.deepEqual(state.queued_work.map(x => x.text), ["review current tests"]);
+  assert.deepEqual(state.queued_work[0].constraints, []);
   assert.deepEqual(state.constraints, []);
   assert.equal(state.receipts[0].amendment_id, "AMD-001");
   assert.equal(state.receipts[0].apply_attempt_id, "APPLY-001");
@@ -65,12 +66,37 @@ test("different attempt or changed payload for an already-applied amendment fail
   );
 }));
 
-test("unsupported GOAL_PATCH, supersede mode, constraints, and unknown payload keys remain unapplied", () => {
+test("unsupported GOAL_PATCH, supersede mode, live constraints, and unknown payload keys remain unapplied", () => {
   assert.throws(() => normalizeMissionObjectivePayload(amendment({kind: "GOAL_PATCH"})), /UNSUPPORTED_AMENDMENT_KIND/);
   assert.throws(() => normalizeMissionObjectivePayload(amendment({apply_mode: "supersede_current_goal"})), /UNSUPPORTED_APPLY_MODE/);
-  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {constraint: "must be enforced"}})), /UNSUPPORTED_CONSTRAINT_ENFORCEMENT/);
-  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {add_work: "A", constraints: ["C1", "C2"]}})), /UNSUPPORTED_CONSTRAINT_ENFORCEMENT/);
+  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {constraint: "must be enforced"}})), /UNSUPPORTED_LIVE_CONSTRAINT_ENFORCEMENT/);
+  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {add_work: "A", constraints: ["C1", "C2"]}})), /UNSUPPORTED_LIVE_CONSTRAINT_ENFORCEMENT/);
   assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {replace_running_goal: "unsafe"}})), /UNKNOWN_PAYLOAD_KEYS/);
+});
+
+test("after_current_goal work can atomically snapshot scoped constraints", () => withRoot(root => {
+  const constrained = amendment({
+    apply_mode: "after_current_goal",
+    payload: {add_work: ["A", "B"], constraints: ["C1", "C2"]},
+  });
+  const applied = applyMissionObjectiveAmendment({
+    base: root,
+    mission_id: "MISSION-001",
+    amendment: constrained,
+    apply_attempt_id: "APPLY-CONSTRAINED",
+  });
+  assert.equal(applied.deduplicated, false);
+  const state = readMissionObjective({base: root, mission_id: "MISSION-001"});
+  assert.deepEqual(state.queued_work.map(item => item.constraints), [["C1", "C2"], ["C1", "C2"]]);
+  assert.deepEqual(state.constraints.map(item => item.text), ["C1", "C2"]);
+  assert.equal(state.receipts[0].constraint_count, 2);
+}));
+
+test("standalone after_current_goal constraint stays unsupported until it has scoped work", () => {
+  assert.throws(
+    () => normalizeMissionObjectivePayload(amendment({apply_mode: "after_current_goal", payload: {constraint: "C1"}})),
+    /UNSUPPORTED_CONSTRAINT_WITHOUT_WORK/,
+  );
 });
 
 test("array work normalizes deterministically", () => {
