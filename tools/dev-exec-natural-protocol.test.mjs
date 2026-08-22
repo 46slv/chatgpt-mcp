@@ -45,3 +45,21 @@ test('fenced multiline PowerShell remains accepted and preserves line structure'
   assert.equal(result.timeoutSeconds, 300);
   assert.equal(result.script, '$x = 1\nWrite-Output $x');
 });
+
+test('rendered Bridge multiline PowerShell marker preserves structured script', () => {
+  const result = parseNaturalDirective(
+    'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300\npowershell\n$x = 1\nWrite-Output $x',
+    opts,
+  );
+  assert.equal(result.decision, 'RUN');
+  assert.equal(result.workingDirectory, 'C:\\Work');
+  assert.equal(result.timeoutSeconds, 300);
+  assert.equal(result.script, '$x = 1\nWrite-Output $x');
+});
+
+test('rendered Bridge form rejects multiple standalone PowerShell markers', () => {
+  assert.throws(
+    () => parseNaturalDirective('RUN\npowershell\nWrite-Output "a"\npwsh\nWrite-Output "b"', opts),
+    /exactly one standalone PowerShell marker/,
+  );
+});
