@@ -38,6 +38,25 @@ test("idempotency key deduplicates repeated operator delivery without revision c
   assert.equal(queue.revision, 1);
 });
 
+test("same idempotency key with changed semantic request fails closed", () => {
+  const queue = createAmendmentQueue({mission_id: "MISSION-1", run_id: "RUN-1"});
+  add(queue, {payload: {add_work: "A"}});
+  assert.throws(
+    () => add(queue, {amendment_id: "AMD-REUSED", payload: {add_work: "B"}}),
+    /IDEMPOTENCY_KEY_CONFLICT/,
+  );
+  assert.equal(queue.amendments.length, 1);
+  assert.equal(queue.revision, 1);
+});
+
+test("object key order does not create a false idempotency conflict", () => {
+  const queue = createAmendmentQueue({mission_id: "MISSION-1", run_id: "RUN-1"});
+  add(queue, {payload: {constraint: "safe", add_work: "A"}});
+  const second = add(queue, {amendment_id: "AMD-REDELIVERED", payload: {add_work: "A", constraint: "safe"}});
+  assert.equal(second.deduplicated, true);
+  assert.equal(queue.amendments.length, 1);
+});
+
 test("unsafe, pending-action, and ambiguous-action boundaries never expose amendments for apply", () => {
   const queue = createAmendmentQueue({mission_id: "MISSION-1", run_id: "RUN-1"});
   add(queue);
