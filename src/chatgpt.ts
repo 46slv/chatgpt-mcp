@@ -145,7 +145,9 @@ async function getLatestResponseText(): Promise<string | null> {
         cleaned = cleaned.replace(/Pro\s+thinking\s*\u2022?\s*/gi, '');
         // Remove timing indicators like "15 seconds" but be careful not to strip legitimate numbers
         cleaned = cleaned.replace(/^\d+\s*(seconds?|secs?)\s*/i, '');
-        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+        // Preserve response structure: fenced executable blocks rely on line breaks,
+        // indentation, tabs, and repeated spaces surviving Bridge extraction intact.
+        cleaned = cleaned.replace(/\r\n?/g, '\n').trim();
         return cleaned;
       };
 
