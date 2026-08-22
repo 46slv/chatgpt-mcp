@@ -53,6 +53,12 @@ export async function dispatchMissionChildLaunch(control, launch, {
     lease_ms,
     now,
   });
+  if (begun.deduplicated) {
+    // A durable LAUNCHING record with the same attempt means a previous dispatcher
+    // may already have crossed the spawn side-effect boundary. Re-spawning here
+    // would turn an ambiguous restart into a duplicate child RUN.
+    throw new Error("MISSION_LAUNCH_DISPATCH_ALREADY_IN_FLIGHT");
+  }
   const spec = buildMissionChildLaunchSpec(control, begun.launch, {entry_path, node_path});
   let child;
   try {
