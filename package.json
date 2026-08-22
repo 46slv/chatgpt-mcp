@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test:bridge": "node --test tools/dev-exec-natural-protocol.test.mjs tools/chatgpt-response-text.test.mjs tools/bridge-response-integration.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
