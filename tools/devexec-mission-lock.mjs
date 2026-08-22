@@ -71,7 +71,11 @@ export function withMissionLock(missionRoot, fn, options = {}) {
   const lock = acquireMissionLock(missionRoot, options);
   let callbackError = null;
   try {
-    return fn(lock);
+    const result = fn(lock);
+    if (result && typeof result.then === "function") {
+      throw new Error("MISSION_LOCK_ASYNC_CALLBACK_UNSUPPORTED");
+    }
+    return result;
   } catch (error) {
     callbackError = error;
     throw error;
