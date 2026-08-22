@@ -16,11 +16,11 @@ function amendment(overrides = {}) {
     amendment_id: overrides.amendment_id ?? "AMD-001",
     kind: overrides.kind ?? "MISSION_AMENDMENT",
     apply_mode: overrides.apply_mode ?? "next_safe_boundary",
-    payload: overrides.payload ?? {add_work: "review current tests", constraint: "preserve cache"},
+    payload: overrides.payload ?? {add_work: "review current tests"},
   };
 }
 
-test("typed Mission amendment produces durable queued work, constraints, and receipt", () => withRoot(root => {
+test("typed Mission add_work amendment produces durable queued work and receipt", () => withRoot(root => {
   const applied = applyMissionObjectiveAmendment({
     base: root,
     mission_id: "MISSION-001",
@@ -31,7 +31,7 @@ test("typed Mission amendment produces durable queued work, constraints, and rec
   assert.equal(applied.deduplicated, false);
   const state = readMissionObjective({base: root, mission_id: "MISSION-001"});
   assert.deepEqual(state.queued_work.map(x => x.text), ["review current tests"]);
-  assert.deepEqual(state.constraints.map(x => x.text), ["preserve cache"]);
+  assert.deepEqual(state.constraints, []);
   assert.equal(state.receipts[0].amendment_id, "AMD-001");
   assert.equal(state.receipts[0].apply_attempt_id, "APPLY-001");
 }));
@@ -44,7 +44,7 @@ test("same amendment attempt is idempotent across restart-style reapplication", 
   assert.equal(second.deduplicated, true);
   const state = readMissionObjective({base: root, mission_id: "MISSION-001"});
   assert.equal(state.queued_work.length, 1);
-  assert.equal(state.constraints.length, 1);
+  assert.equal(state.constraints.length, 0);
   assert.equal(state.receipts.length, 1);
 }));
 
@@ -65,15 +65,17 @@ test("different attempt or changed payload for an already-applied amendment fail
   );
 }));
 
-test("unsupported GOAL_PATCH, supersede mode, and unknown payload keys remain unapplied", () => {
+test("unsupported GOAL_PATCH, supersede mode, constraints, and unknown payload keys remain unapplied", () => {
   assert.throws(() => normalizeMissionObjectivePayload(amendment({kind: "GOAL_PATCH"})), /UNSUPPORTED_AMENDMENT_KIND/);
   assert.throws(() => normalizeMissionObjectivePayload(amendment({apply_mode: "supersede_current_goal"})), /UNSUPPORTED_APPLY_MODE/);
+  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {constraint: "must be enforced"}})), /UNSUPPORTED_CONSTRAINT_ENFORCEMENT/);
+  assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {add_work: "A", constraints: ["C1", "C2"]}})), /UNSUPPORTED_CONSTRAINT_ENFORCEMENT/);
   assert.throws(() => normalizeMissionObjectivePayload(amendment({payload: {replace_running_goal: "unsafe"}})), /UNKNOWN_PAYLOAD_KEYS/);
 });
 
-test("array work and constraints normalize deterministically", () => {
+test("array work normalizes deterministically", () => {
   assert.deepEqual(
-    normalizeMissionObjectivePayload(amendment({payload: {add_work: ["A", "B"], constraints: ["C1", "C2"]}})),
-    {queued_work: ["A", "B"], constraints: ["C1", "C2"]},
+    normalizeMissionObjectivePayload(amendment({payload: {add_work: ["A", "B"]}})),
+    {queued_work: ["A", "B"], constraints: []},
   );
 });
