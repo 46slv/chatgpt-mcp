@@ -283,11 +283,11 @@ export function buildMissionChildLaunchSpec(control, launch, {
       DEV_EXEC_MISSION_ID: launch.mission_id,
       DEV_EXEC_PARENT_RUN_ID: launch.parent_run_id,
       DEV_EXEC_RUN_ID: launch.child_run_id,
-      // Always write the key, including an explicit empty array, so a parent
-      // continuation's constraint envelope cannot leak through spawn_env into an
-      // unrelated unconstrained child.
+      // Always write these inherited-control keys, including explicit empty
+      // values, so ambient state from the parent process cannot leak into an
+      // unrelated child continuation.
       DEV_EXEC_MISSION_CONSTRAINTS_JSON: JSON.stringify(constraints),
-      ...(launch.target_alias ? {DEV_EXEC_TARGET_ALIAS: launch.target_alias} : {}),
+      DEV_EXEC_TARGET_ALIAS: launch.target_alias ?? "",
     },
   };
 }
