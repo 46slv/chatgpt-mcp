@@ -43,11 +43,13 @@ function continuationIdentity(missionId, runId, work, index) {
   };
 }
 
-function missionConstraintTexts(objective) {
+function workConstraintTexts(work) {
+  const values = work?.constraints ?? [];
+  if (!Array.isArray(values)) throw new Error("objective work constraints must be an array");
   const seen = new Set();
   const result = [];
-  for (const item of objective.constraints ?? []) {
-    const text = required(item?.text, "objective constraint");
+  for (let index = 0; index < values.length; index += 1) {
+    const text = required(values[index], `objective work constraints[${index}]`);
     if (seen.has(text)) continue;
     seen.add(text);
     result.push(text);
@@ -129,7 +131,7 @@ export function applyMissionLoopBoundary({
         continuation = summarizeExistingContinuation(existing, work, index);
       } else {
         const identity = continuationIdentity(missionId, runId, work, index);
-        const constraints = missionConstraintTexts(objective);
+        const constraints = workConstraintTexts(work);
         const requested = requestMissionChildLaunch(control, {
           parent_run_id: runId,
           child_run_id: identity.child_run_id,
