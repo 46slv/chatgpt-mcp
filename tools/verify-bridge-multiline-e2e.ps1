@@ -91,7 +91,8 @@ foreach ($Marker in $ExpectedStdout) {
     }
 }
 
-if ($Result.timedOut -or $Result.exitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($Result.stderr)) {
+$HasStderr = -not ([string]::IsNullOrWhiteSpace([string]$Result.stderr))
+if ($Result.timedOut -or $Result.exitCode -ne 0 -or $HasStderr) {
     throw "PowerShell probe did not complete cleanly. ExitCode=$($Result.exitCode) TimedOut=$($Result.timedOut) Stderr=$($Result.stderr)"
 }
 
