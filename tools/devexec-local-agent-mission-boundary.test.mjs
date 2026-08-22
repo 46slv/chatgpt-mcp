@@ -70,6 +70,27 @@ test("after_current_goal is durable and dispatched before COMPLETE is returned",
   assert.equal(launchState.launches[0].goal,"continue with the verification goal");
 });
 
+test("dispatch failure aborts inspection before terminal COMPLETE can be returned", () => {
+  const ctx=setup();
+  const control=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
+  enqueueMissionAmendment(control,{
+    amendment_id:"AMEND-DISPATCH-FAIL",
+    idempotency_key:"dispatch-fail-1",
+    kind:"MISSION_AMENDMENT",
+    apply_mode:"after_current_goal",
+    payload:{add_work:"must not be lost"},
+  });
+  assert.throws(
+    ()=>inspectLocalAgentGoalCompletion(ctx,{dispatch_continuation:()=>{throw new Error("synthetic dispatch failure");}}),
+    /synthetic dispatch failure/,
+  );
+  const reopened=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
+  assert.equal(reopened.amendments.amendments[0].status,"APPLIED");
+  const launchState=readMissionLaunchState(reopened);
+  assert.equal(launchState.launches.length,1);
+  assert.equal(launchState.launches[0].status,"PENDING");
+});
+
 test("after_current_goal stays pending while local goal is not complete", () => {
   const ctx=setup({decision:"NEEDS_SUPERVISOR",status:"RUNNING"});
   const control=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
