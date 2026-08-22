@@ -7,14 +7,18 @@ const chatgptSource = readFileSync(
   'utf8',
 );
 
+const phrasesMatch = chatgptSource.match(
+  /const phrasesToRemove = \[\n([\s\S]*?)\n      \];/,
+);
 const cleanTextMatch = chatgptSource.match(
   /const cleanText = \(text: string\): string => \{\n([\s\S]*?)\n      \};/,
 );
 
+assert.ok(phrasesMatch, 'phrasesToRemove must remain discoverable by the regression test');
 assert.ok(cleanTextMatch, 'cleanText implementation must remain discoverable by the regression test');
 
 const cleanText = new Function(
-  `const cleanText = (text) => {\n${cleanTextMatch[1]}\n};\nreturn cleanText;`,
+  `const phrasesToRemove = [\n${phrasesMatch[1]}\n];\nconst cleanText = (text) => {\n${cleanTextMatch[1]}\n};\nreturn cleanText;`,
 )();
 
 test('source does not collapse all whitespace into spaces', () => {
@@ -35,6 +39,7 @@ test('preserves fenced multiline PowerShell structure and indentation', () => {
   ].join('\n');
 
   const expected = [
+    '15 seconds',
     'RUN',
     '```powershell',
     'Set-Location "D:\\Documents\\ChatGPTMCPProbe"',
@@ -61,4 +66,8 @@ test('retains legacy chrome cleanup for simple prose', () => {
     cleanText('Thinking...\nPro thinking • \nChatGPT said:\nReady'),
     'Ready',
   );
+});
+
+test('retains legacy leading timing cleanup', () => {
+  assert.equal(cleanText('15 seconds\nReady'), 'Ready');
 });
