@@ -8,7 +8,7 @@ import {inspectLocalAgentGoalCompletion} from "./devexec-local-agent-goal-state.
 import {enqueueMissionAmendment, openMissionControl} from "./devexec-mission-control.mjs";
 import {buildMissionChildLaunchSpec, readMissionLaunchState} from "./devexec-mission-launch.mjs";
 
-function setup({decision="COMPLETE",status="DONE",targetAlias=undefined}={}) {
+function setup({decision="COMPLETE",status="DONE",targetAlias=undefined,missionConstraints=undefined}={}) {
   const base=fs.mkdtempSync(path.join(os.tmpdir(),"devexec-local-agent-mission-"));
   const runId="RUN-ROOT";
   const missionId="MISSION-LOCAL";
@@ -29,6 +29,7 @@ function setup({decision="COMPLETE",status="DONE",targetAlias=undefined}={}) {
     goal:"initial goal",
   };
   if(targetAlias!==undefined) owner.target_alias=targetAlias;
+  if(missionConstraints!==undefined) owner.mission_constraints=missionConstraints;
   fs.writeFileSync(path.join(runDir,"local-agent-owner.json"),JSON.stringify(owner,null,2)+"\n");
   fs.writeFileSync(path.join(agentDir,agentRunId+".json"),JSON.stringify({
     protocol:"devexec.local-agent",
@@ -58,6 +59,7 @@ test("after_current_goal is durable and dispatched before COMPLETE is returned",
     },
   });
   assert.equal(result.complete,true);
+  assert.deepEqual(result.mission_constraints,[]);
   assert.equal(result.mission_boundary.applied.length,1);
   assert.equal(result.mission_boundary.objective.queued_work[0].text,"continue with the verification goal");
   assert.equal(result.mission_boundary.continuation.status,"PENDING");
@@ -97,7 +99,35 @@ test("supervised completion preserves explicit target alias into child launch en
   assert.equal(spec.env.DEV_EXEC_TARGET_ALIAS,"devexec-supervisor");
 });
 
-test("legacy supervised owner without target alias remains valid", () => {
+test("supervised completion carries scoped amendment constraints into child environment", () => {
+  const ctx=setup({targetAlias:"devexec-supervisor",missionConstraints:["parent constraint"]});
+  const control=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
+  enqueueMissionAmendment(control,{
+    amendment_id:"AMEND-CONSTRAINED-TARGET",
+    idempotency_key:"target-constraint-1",
+    kind:"MISSION_AMENDMENT",
+    apply_mode:"after_current_goal",
+    payload:{
+      add_work:"continue with constrained verification",
+      constraints:["do not publish","preserve target routing"],
+    },
+  });
+
+  const result=inspectLocalAgentGoalCompletion(ctx,{
+    dispatch_continuation:()=>({status:"LAUNCHED",child_run_id:"CHILD-CONSTRAINED"}),
+  });
+  assert.deepEqual(result.mission_constraints,["parent constraint"]);
+  const reopened=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
+  const launch=readMissionLaunchState(reopened).launches[0];
+  assert.deepEqual(launch.constraints,["do not publish","preserve target routing"]);
+  const spec=buildMissionChildLaunchSpec(reopened,launch,{
+    entry_path:"/tmp/devexec-goal.mjs",
+    node_path:process.execPath,
+  });
+  assert.deepEqual(JSON.parse(spec.env.DEV_EXEC_MISSION_CONSTRAINTS_JSON),["do not publish","preserve target routing"]);
+});
+
+test("legacy supervised owner without target alias or constraint envelope remains valid", () => {
   const ctx=setup();
   const control=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
   enqueueMissionAmendment(control,{
@@ -111,8 +141,10 @@ test("legacy supervised owner without target alias remains valid", () => {
     dispatch_continuation:()=>({status:"LAUNCHED",child_run_id:"CHILD-LEGACY"}),
   });
   assert.equal(result.complete,true);
+  assert.deepEqual(result.mission_constraints,[]);
   const launch=readMissionLaunchState(openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId})).launches[0];
   assert.equal(launch.target_alias,null);
+  assert.deepEqual(launch.constraints,[]);
 });
 
 test("malformed persisted target alias fails closed before continuation mutation", () => {
@@ -126,6 +158,20 @@ test("malformed persisted target alias fails closed before continuation mutation
     payload:{add_work:"must not launch"},
   });
   assert.throws(()=>inspectLocalAgentGoalCompletion(ctx),/Invalid local-agent-owner target_alias/);
+  assert.equal(readMissionLaunchState(control).launches.length,0);
+});
+
+test("malformed persisted constraint envelope fails closed before continuation mutation", () => {
+  const ctx=setup({missionConstraints:{bad:true}});
+  const control=openMissionControl({base:ctx.base,mission_id:ctx.missionId,run_id:ctx.runId});
+  enqueueMissionAmendment(control,{
+    amendment_id:"AMEND-BAD-CONSTRAINT",
+    idempotency_key:"bad-constraint-1",
+    kind:"MISSION_AMENDMENT",
+    apply_mode:"after_current_goal",
+    payload:{add_work:"must not launch"},
+  });
+  assert.throws(()=>inspectLocalAgentGoalCompletion(ctx),/Invalid local-agent-owner mission_constraints/);
   assert.equal(readMissionLaunchState(control).launches.length,0);
 });
 
