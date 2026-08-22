@@ -104,6 +104,28 @@ test("legacy launch records without target_alias or constraints still deduplicat
   assert.equal(replay.launch.launch_id, "LAUNCH-LEGACY");
 });
 
+test("unconstrained child explicitly clears an inherited parent constraint envelope", () => {
+  const base = tempBase();
+  const control = openMissionControl({base, mission_id: "MISSION-CLEAR-CONSTRAINTS", run_id: "RUN-ROOT"});
+  const requested = requestMissionChildLaunch(control, {
+    parent_run_id: "RUN-ROOT",
+    child_run_id: "RUN-PLAIN-CHILD",
+    launch_id: "LAUNCH-PLAIN",
+    idempotency_key: "plain-child-key",
+    goal: "plain child work",
+    constraints: [],
+  }, {
+    boundary: {safe: true, pending_action: false, ambiguous_action: false},
+  });
+  const spec = buildMissionChildLaunchSpec(control, requested.launch, {node_path: "node", entry_path: "devexec-goal.mjs"});
+  assert.equal(spec.env.DEV_EXEC_MISSION_CONSTRAINTS_JSON, "[]");
+
+  const inheritedParentEnv = {DEV_EXEC_MISSION_CONSTRAINTS_JSON: JSON.stringify(["parent-only constraint"])};
+  const childEnv = {...inheritedParentEnv, ...spec.env};
+  assert.equal(childEnv.DEV_EXEC_MISSION_CONSTRAINTS_JSON, "[]");
+  assert.deepEqual(parseMissionConstraintsEnv(childEnv.DEV_EXEC_MISSION_CONSTRAINTS_JSON), []);
+});
+
 test("next_safe_boundary constraint remains pending because live Goal mutation is unsupported", () => {
   const base = tempBase();
   const control = openMissionControl({base, mission_id: "MISSION-LIVE", run_id: "RUN-LIVE"});
