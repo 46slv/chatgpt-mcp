@@ -90,13 +90,16 @@ export function normalizeMissionObjectivePayload(amendment) {
     ...asTextArray(payload.constraints, "constraints"),
   ];
 
-  // A live-running Goal has no replay-safe mutation surface yet. Constraints are
-  // therefore supported only when they become part of an after-current-goal
-  // continuation envelope. This keeps next_safe_boundary constraints PENDING.
+  // There is still no replay-safe surface for mutating a live Goal. For now a
+  // constraint is supported only as an atomic part of after-current-goal work,
+  // so it is snapshotted into the continuation that will actually consume it.
   if (constraints.length > 0 && amendment.apply_mode !== "after_current_goal") {
     throw new Error("MISSION_OBJECTIVE_UNSUPPORTED_LIVE_CONSTRAINT_ENFORCEMENT");
   }
-  if (queuedWork.length < 1 && constraints.length < 1) {
+  if (constraints.length > 0 && queuedWork.length < 1) {
+    throw new Error("MISSION_OBJECTIVE_UNSUPPORTED_CONSTRAINT_WITHOUT_WORK");
+  }
+  if (queuedWork.length < 1) {
     throw new Error("MISSION_OBJECTIVE_EMPTY_MUTATION");
   }
   return {queued_work: queuedWork, constraints};
@@ -134,6 +137,7 @@ export function applyMissionObjectiveAmendment({
     for (const text of mutation.queued_work) {
       state.queued_work.push({
         text,
+        constraints: [...mutation.constraints],
         amendment_id: amendmentId,
         apply_attempt_id: attemptId,
         queued_at: now,
