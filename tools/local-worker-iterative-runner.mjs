@@ -1,4 +1,4 @@
-export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,plan,execute,onProgress=()=>{}}){
+export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,plan,execute,onBeforeExecute=()=>{},onProgress=()=>{}}){
  if(!mission||typeof plan!=="function"||typeof execute!=="function")throw new Error("iterative local worker arguments invalid");
  if(!Number.isInteger(maxRounds)||maxRounds<1||maxRounds>10)throw new Error("invalid planner round budget");
  for(let round=1;round<=maxRounds;round++){
@@ -8,11 +8,13 @@ export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,pl
  for(let i=0;i<decision.actions.length;i++){
  const item=decision.actions[i];
  const requestId="R"+String(round).padStart(2,"0")+"-"+String(i+1).padStart(2,"0")+"-"+String(actions.length+1).padStart(3,"0");
+ if(actions.some(x=>x?.request_id===requestId))throw new Error("duplicate local action identity: "+requestId);
+ await onBeforeExecute({round,item,requestId,actions});
  const result=await execute(item.action,item.args,requestId);
  if(!result||!["PASS","BLOCKED","FAIL"].includes(result.status))throw new Error("local typed action unexpected: "+item.action);
+ actions.push({request_id:requestId,action:item.action,args:item.args,result,planner_round:round});
+ await onProgress({round,item,requestId,result,actions});
  if(result.status==="FAIL")throw new Error("local typed action failed: "+item.action);
- actions.push({action:item.action,args:item.args,result,planner_round:round});
- await onProgress({round,item,result,actions});
  if(result.status!=="PASS")break;
  }
  }
