@@ -29,7 +29,7 @@ This prevents a late or standalone constraint from being falsely marked APPLIED 
 
 - `tools/devexec-mission-objective.mjs`: supports constraints only when atomically paired with `after_current_goal` work; each queued work entry stores its own constraint snapshot. The existing top-level constraint list remains audit evidence, but launch selection uses the work-local snapshot so unrelated later work does not inherit earlier constraints.
 - `tools/devexec-mission-loop-boundary.mjs`: carries only the selected work item's constraints into the continuation request.
-- `tools/devexec-mission-launch.mjs`: persists `constraints` in launch state, includes them in semantic idempotency comparison, and exports them to child environment.
+- `tools/devexec-mission-launch.mjs`: persists `constraints` in launch state, includes them in semantic idempotency comparison, and exports them to child environment. Missing legacy `constraints` and `target_alias` fields normalize to `[]` / `null` during semantic replay comparison so pre-schema launch records do not spuriously conflict.
 - `tools/devexec-mission-constraint-envelope.mjs`: validates the typed string-array transport and deterministically renders the constraint envelope.
 - `tools/devexec-goal.mjs`: consumes the envelope before Local Agent start; the Local Agent's durable mission string therefore includes the constraints. On Supervisor escalation, the same constraints are appended to `DEV_EXEC_TARGET`. The owner file records the original Goal plus `mission_constraints` separately.
 - `tools/devexec-local-agent-goal-state.mjs`: validates the optional durable owner constraint envelope; legacy owners without it remain valid.
@@ -41,6 +41,7 @@ The prompt-level constraint envelope is an explicit consumption surface, not a c
 - `tools/devexec-mission-constraint-continuation.test.mjs`
   - scoped constraints persist into queued work, launch state, target alias, and child env;
   - an unrelated later work item does not inherit the first amendment's constraints;
+  - legacy launch records lacking the newly introduced optional `constraints` / `target_alias` fields still deduplicate against the same semantic request;
   - live `next_safe_boundary` constraints remain PENDING;
   - standalone `after_current_goal` constraints remain PENDING;
   - malformed transport fails closed.
@@ -65,6 +66,8 @@ Two source-faithful isolated Node semantic harnesses were executed against the i
 1. Constraint objective / scoped work / launch transport / idempotency / envelope semantics: **8/8 PASS**.
 2. Local Goal + Supervisor target envelope / legacy owner / malformed-owner fail-closed semantics: **4/4 PASS**.
 
+A focused semantic probe also confirmed the legacy launch default normalization (`missing constraints -> []`, `missing target_alias -> null`) compares equal to the equivalent current request.
+
 GitHub connector readback confirms the dedicated branch contains the implementation, regression files, and real-checkout verifier. No combined CI statuses are registered at this checkpoint.
 
 ## Required real-checkout / SHIRO-WS acceptance
@@ -78,6 +81,7 @@ GitHub connector readback confirms the dedicated branch contains the implementat
    - Supervisor target if the child escalates.
 3. Complete the child and launch an unrelated second work item with no constraints; prove the first work's scoped constraints do not leak into it.
 4. Kill/restart at the existing reliability points: objective write, PENDING launch, LAUNCHING/spawn-before-receipt, LAUNCHED-before-child-attach. No duplicate child, lost constraint envelope, or target drift.
-5. Submit `next_safe_boundary` and standalone `after_current_goal` constraint amendments and prove they remain PENDING with no execution side effect.
+5. Load/replay a pre-schema launch-state record with no `constraints` / `target_alias`; prove identical replay deduplicates rather than throwing `LAUNCH_IDEMPOTENCY_KEY_CONFLICT`.
+6. Submit `next_safe_boundary` and standalone `after_current_goal` constraint amendments and prove they remain PENDING with no execution side effect.
 
 Do not enable live Goal replacement or broaden constraints beyond this scoped continuation contract until a replay-safe typed mutation/enforcement surface exists.
