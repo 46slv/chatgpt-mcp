@@ -1,0 +1,106 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {openMissionControl} from "./devexec-mission-control.mjs";
+import {startMissionLocalAgent} from "./devexec-mission-entry-runtime.mjs";
+import {loadMissionState, resolveMissionPaths} from "./devexec-mission-state.mjs";
+
+function withRoot(fn) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-entry-runtime-"));
+  return Promise.resolve(fn(root)).finally(() => fs.rmSync(root, {recursive: true, force: true}));
+}
+
+const rootIdentity = {mission_id: "MISSION-001", run_id: "RUN-001", parent_run_id: null};
+const childIdentity = {mission_id: "MISSION-001", run_id: "RUN-002", parent_run_id: "RUN-001"};
+
+test("root Mission is durable before Local Agent start is invoked", () => withRoot(root => {
+  let observed = null;
+  const result = startMissionLocalAgent({
+    base: root,
+    identity: rootIdentity,
+    start_local_agent: () => {
+      observed = loadMissionState(resolveMissionPaths(root, "MISSION-001").state_file);
+      return {run_id: "AGENT-ROOT", decision: "COMPLETE"};
+    },
+  });
+  assert.equal(observed.current_run_id, "RUN-001");
+  assert.equal(result.agent.run_id, "AGENT-ROOT");
+  assert.equal(result.mission.state.current_run_id, "RUN-001");
+}));
+
+test("child is STARTING and parent remains current during the Local Agent side effect", () => withRoot(root => {
+  openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  let duringStart = null;
+  const result = startMissionLocalAgent({
+    base: root,
+    identity: childIdentity,
+    start_attempt_id: "START-001",
+    start_local_agent: () => {
+      duringStart = loadMissionState(resolveMissionPaths(root, "MISSION-001").state_file);
+      return {run_id: "AGENT-CHILD", decision: "NEEDS_SUPERVISOR"};
+    },
+  });
+
+  const childDuring = duringStart.runs.find(run => run.run_id === "RUN-002");
+  assert.equal(duringStart.current_run_id, "RUN-001");
+  assert.equal(childDuring.status, "STARTING");
+  assert.equal(childDuring.start_attempt_id, "START-001");
+  assert.equal(result.mission.state.current_run_id, "RUN-002");
+  assert.equal(result.mission.state.runs.find(run => run.run_id === "RUN-002").status, "ACTIVE");
+}));
+
+test("Local Agent start failure becomes durable AMBIGUOUS and is never automatically replayed", () => withRoot(root => {
+  openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  let calls = 0;
+  assert.throws(
+    () => startMissionLocalAgent({
+      base: root,
+      identity: childIdentity,
+      start_attempt_id: "START-001",
+      start_local_agent: () => {
+        calls += 1;
+        throw new Error("unreadable start result");
+      },
+    }),
+    /unreadable start result/,
+  );
+
+  const state = loadMissionState(resolveMissionPaths(root, "MISSION-001").state_file);
+  const child = state.runs.find(run => run.run_id === "RUN-002");
+  assert.equal(state.current_run_id, "RUN-001");
+  assert.equal(child.status, "AMBIGUOUS");
+  assert.match(child.ambiguous_reason, /unreadable start result/);
+
+  assert.throws(
+    () => startMissionLocalAgent({
+      base: root,
+      identity: childIdentity,
+      start_attempt_id: "START-002",
+      start_local_agent: () => {
+        calls += 1;
+        return {run_id: "MUST-NOT-RUN"};
+      },
+    }),
+    /MISSION_CHILD_START_AMBIGUOUS/,
+  );
+  assert.equal(calls, 1);
+}));
+
+test("invalid Local Agent result is treated as ambiguous after the STARTING fence", () => withRoot(root => {
+  openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  assert.throws(
+    () => startMissionLocalAgent({
+      base: root,
+      identity: childIdentity,
+      start_attempt_id: "START-001",
+      start_local_agent: () => ({decision: "COMPLETE"}),
+    }),
+    /LOCAL_AGENT_START_RESULT_INVALID/,
+  );
+  const child = loadMissionState(resolveMissionPaths(root, "MISSION-001").state_file)
+    .runs.find(run => run.run_id === "RUN-002");
+  assert.equal(child.status, "AMBIGUOUS");
+}));
