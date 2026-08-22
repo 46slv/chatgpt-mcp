@@ -40,6 +40,7 @@ export async function dispatchMissionChildLaunch(control, launch, {
   lease_token,
   lease_ms,
   spawn_impl = spawn,
+  spawn_env = process.env,
   now = new Date().toISOString(),
 } = {}) {
   const launchId = required(launch?.launch_id, "launch_id");
@@ -63,7 +64,7 @@ export async function dispatchMissionChildLaunch(control, launch, {
   let child;
   try {
     child = spawn_impl(spec.command, spec.args, {
-      env: {...process.env, ...spec.env},
+      env: {...spawn_env, ...spec.env},
       detached: true,
       windowsHide: true,
       stdio: "ignore",
