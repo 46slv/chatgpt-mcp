@@ -33,25 +33,45 @@ Added `tools/devexec-mission-root-start-review.test.mjs` with desired-behavior r
 
 A source-faithful Node reconstruction of the modified root admission/entry semantics passed 3/3 targeted behavior tests, including an async-style invalid start result becoming ambiguous. Syntax validation of the reconstructed modified modules passed.
 
-This is not repository-checkout CI and not Windows/SHIRO-WS host proof. GitHub exposes no combined statuses for the current branch checkpoint.
+This is not repository-checkout CI and not Windows/SHIRO-WS host proof. GitHub exposes no combined statuses for the reviewed checkpoints.
 
 ## Adjacent safe-boundary review
 
 The next requested staging seam is Mission amendment application in `tools/dev-exec-loop.mjs`. The code has the expected safe decision point: after the PowerShell result is persisted, `state.pending` is cleared and state is saved, immediately before `inspectLocalAgentGoalCompletion()` may terminally mark the run complete.
 
-However the repository currently has a durable amendment queue and two-phase `PENDING -> APPLYING -> APPLIED` fence, but no durable typed mutation target for a running Local Agent Goal/constraints. `local-agent-facade.mjs` persists `goal` into Local Agent state and `local-worker-adapter.mjs` persists `mission`, but neither exposes a safe live Goal-patch operation. The amendment tests intentionally use generic payload examples such as `{add_work: ...}` and `{constraint: ...}`; those examples do not define executable mutation semantics.
+The repository already had a durable amendment queue and two-phase `PENDING -> APPLYING -> APPLIED` fence, but no durable typed mutation target. Marking an amendment `APPLIED` merely because the loop reached the safe point would therefore be false evidence.
 
-Therefore the loop should not mark an amendment `APPLIED` merely because it reached the safe point. Before production wiring, define and test the durable mutation target/readback contract. At minimum it must answer:
+### Durable mutation target added
 
-1. which payload fields are accepted for `MISSION_AMENDMENT` versus `GOAL_PATCH`;
-2. whether a patch changes the current Local Agent run, only the next Goal/child RUN, or a Mission-level objective overlay;
-3. what durable file/state is written before `completeMissionAmendmentApply()`;
-4. how restart after `APPLYING` proves whether the mutation occurred without blindly replaying it;
-5. how `after_current_goal` is consumed before terminal COMPLETE and converted into continued work/child launch;
-6. how `supersede_current_goal` remains blocked while a typed action is pending or ambiguous.
+This branch now adds `tools/devexec-mission-objective.mjs` as a deliberately small Mission-level mutation target for the safe subset of ordinary additions:
 
-Until that contract exists, the safe implementation boundary is to select/begin only when an executable durable mutation plan is known; otherwise leave the amendment `PENDING`, not falsely `APPLIED`.
+- supports `MISSION_AMENDMENT` only;
+- supports `next_safe_boundary` and `after_current_goal` only;
+- accepts only `add_work`, `constraint`, and `constraints` payload fields;
+- persists `queued_work`, `constraints`, and an amendment/apply-attempt receipt in `mission-objective.json`;
+- repeat of the same `amendment_id + apply_attempt_id + payload` is idempotent;
+- changed attempt or payload for an already-recorded amendment fails closed;
+- `GOAL_PATCH`, `supersede_current_goal`, and unknown payload keys remain unsupported rather than being falsely applied.
+
+`tools/devexec-mission-amendment-runtime.mjs` composes the existing two-phase amendment fence with this objective target:
+
+1. persist `APPLYING` and attempt identity;
+2. perform the idempotent durable objective mutation and receipt;
+3. only then mark the amendment `APPLIED`;
+4. after a restart, an `APPLYING` amendment can safely retry the objective mutation: an existing matching receipt deduplicates, while a missing receipt creates the mutation once, then the same attempt completes.
+
+Targeted validation performed in the cloud: exact Mission-objective module semantics **5/5 PASS**; amendment-runtime orchestration reconstruction **5/5 PASS** plus `node --check` PASS. The committed repository test files are `tools/devexec-mission-objective.test.mjs` and `tools/devexec-mission-amendment-runtime.test.mjs`. These are still not a real checkout/CI result.
+
+### What remains intentionally unsupported
+
+`local-agent-facade.mjs` persists a root `goal` string and `local-worker-adapter.mjs` persists a worker `mission` string, but neither exposes a safe live Goal-replacement operation. Therefore this branch does **not** pretend that a `GOAL_PATCH` or `supersede_current_goal` can mutate an already-running Local Agent. Those items stay PENDING until an explicit replay-safe current-Goal transition is implemented.
+
+Similarly, applying `{add_work: ...}` to `mission-objective.json` is not yet sufficient to terminally complete the current run: the queued work still needs a continuation consumer. Production loop wiring must pair `after_current_goal` with a deterministic next-run/child-launch path or another explicit consumer before suppressing/allowing terminal COMPLETE.
 
 ## Next action
 
-Reconcile this root-start fence onto the current continuation head after review, run the real repository Mission tests, then implement a small typed durable Mission objective/Goal-patch target with mutation receipt/readback and crash tests. Only then connect it to the post-result / pre-local-goal-COMPLETE seam in `dev-exec-loop.mjs`. Host acceptance should also kill/restart during root `STARTING` and prove the Local Agent side effect is not replayed.
+1. Reconcile this branch onto the latest continuation head after review and run the real repository Mission tests.
+2. Connect the objective/amendment runtime at the post-result safe boundary, but only for the supported Mission-level additions and with fresh Mission control readback.
+3. Before terminal Local Agent COMPLETE, if `after_current_goal` created queued work, hand that work to the existing duplicate-safe child-launch path with a durable consumption/launch receipt; do not drop it or merely report APPLIED.
+4. Keep `GOAL_PATCH` / `supersede_current_goal` PENDING until a typed current-Goal transition exists.
+5. On SHIRO-WS, add root `STARTING` kill/restart to the existing concurrent-writer and child-launch crash acceptance packet and prove the Local Agent side effect is not replayed.
