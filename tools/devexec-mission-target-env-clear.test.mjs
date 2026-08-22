@@ -63,17 +63,19 @@ test("untargeted child clears inherited parent target alias", async () => {
     },
   });
 
-  assert.equal(Object.hasOwn(capture.options.env, "DEV_EXEC_TARGET_ALIAS"), false);
+  assert.equal(result.spec.env.DEV_EXEC_TARGET_ALIAS, "");
+  assert.equal(capture.options.env.DEV_EXEC_TARGET_ALIAS, "");
   assert.equal(capture.options.env.DEV_EXEC_MISSION_CONSTRAINTS_JSON, "[]");
   assert.equal(capture.options.env.KEEP_ME, "yes");
   assert.equal(result.launch.status, "LAUNCHED");
 });
 
 test("explicit child target alias overrides inherited parent target alias", async () => {
-  const {capture} = await dispatch({
+  const {capture, result} = await dispatch({
     target_alias: "child-target",
     spawn_env: {DEV_EXEC_TARGET_ALIAS: "parent-target"},
   });
 
+  assert.equal(result.spec.env.DEV_EXEC_TARGET_ALIAS, "child-target");
   assert.equal(capture.options.env.DEV_EXEC_TARGET_ALIAS, "child-target");
 });
