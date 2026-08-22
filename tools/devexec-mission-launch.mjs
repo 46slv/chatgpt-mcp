@@ -96,7 +96,7 @@ function sameRequest(control, existing, input) {
     child_run_id: existing.child_run_id,
     goal: existing.goal,
     constraints: existing.constraints ?? [],
-    target_alias: existing.target_alias,
+    target_alias: existing.target_alias ?? null,
   })) === JSON.stringify(stable(semanticRequest(control, input)));
 }
 
