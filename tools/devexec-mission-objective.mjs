@@ -89,10 +89,13 @@ export function normalizeMissionObjectivePayload(amendment) {
     ...asTextArray(payload.constraint, "constraint"),
     ...asTextArray(payload.constraints, "constraints"),
   ];
-  if (queuedWork.length < 1 && constraints.length < 1) {
+  if (constraints.length > 0) {
+    throw new Error("MISSION_OBJECTIVE_UNSUPPORTED_CONSTRAINT_ENFORCEMENT");
+  }
+  if (queuedWork.length < 1) {
     throw new Error("MISSION_OBJECTIVE_EMPTY_MUTATION");
   }
-  return {queued_work: queuedWork, constraints};
+  return {queued_work: queuedWork, constraints: []};
 }
 
 export function applyMissionObjectiveAmendment({
