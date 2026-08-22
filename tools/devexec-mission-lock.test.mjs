@@ -49,3 +49,11 @@ test("callback failure releases a live lock but never auto-takes over a stale lo
   assert.throws(() => acquireMissionLock(root), /MISSION_CONTROL_LOCKED/);
   assert.equal(fs.existsSync(missionLockPath(root)), true);
 }));
+
+test("async callbacks are rejected so work cannot outlive the synchronous lock", () => withRoot(root => {
+  assert.throws(
+    () => withMissionLock(root, async () => "late mutation"),
+    /MISSION_LOCK_ASYNC_CALLBACK_UNSUPPORTED/,
+  );
+  assert.equal(fs.existsSync(missionLockPath(root)), false);
+}));
