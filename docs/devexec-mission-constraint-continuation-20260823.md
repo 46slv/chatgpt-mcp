@@ -52,6 +52,9 @@ The prompt-level constraint envelope is an explicit consumption surface, not a c
   - supervised continuation carries constraint env;
   - legacy owner remains valid;
   - malformed persisted owner constraints fail before continuation mutation.
+- `tools/verify-devexec-mission-constraint-continuation.ps1`
+  - fail-closed real-checkout verifier for the changed module syntax and six focused Mission test files;
+  - intentionally does not claim process-kill/restart host acceptance.
 
 ## Validation actually performed in this cloud run
 
@@ -62,11 +65,11 @@ Two source-faithful isolated Node semantic harnesses were executed against the i
 1. Constraint objective / scoped work / launch transport / idempotency / envelope semantics: **8/8 PASS**.
 2. Local Goal + Supervisor target envelope / legacy owner / malformed-owner fail-closed semantics: **4/4 PASS**.
 
-GitHub connector readback confirms the dedicated branch contains the implementation and regression files. No combined CI statuses are registered at this checkpoint.
+GitHub connector readback confirms the dedicated branch contains the implementation, regression files, and real-checkout verifier. No combined CI statuses are registered at this checkpoint.
 
 ## Required real-checkout / SHIRO-WS acceptance
 
-1. Run the repository Mission suites, including objective, amendment-runtime, loop-boundary, continuation-dispatch, launch/restart, run-admission/entry-runtime, local-agent Mission-boundary, and the new constraint-continuation tests.
+1. Run `tools/verify-devexec-mission-constraint-continuation.ps1` from the exact branch checkout. It checks the changed module syntax and focused objective/amendment/boundary/constraint/owner/dispatcher tests.
 2. Start an explicit-target root Mission, enqueue `after_current_goal` work with constraints, and prove the exact constraints appear in:
    - mission objective queued work;
    - launch state;
