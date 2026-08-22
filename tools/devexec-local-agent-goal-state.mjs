@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {dispatchMissionContinuationSync} from "./devexec-mission-continuation-dispatch.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 
 export function inspectLocalAgentGoalCompletion({runDir,base,runId}){
@@ -9,7 +10,7 @@ export function inspectLocalAgentGoalCompletion({runDir,base,runId}){
  const owner=JSON.parse(fs.readFileSync(ownerFile,"utf8"));
  if(owner.protocol!=="devexec.local-agent-owner"||owner.schema_version!==1||owner.dev_exec_run_id!==runId||!owner.agent_run_id||!owner.worker_run_id)throw new Error("Invalid local-agent-owner.json");
  const agentFile=path.join(base,"ChatGPTMCPProbe","local-agent-runs",owner.agent_run_id+".json");
- if(!fs.existsSync(agentFile))return {owner,complete:false,reason:"AGENT_STATE_MISSING",mission_boundary:null};
+ if(!fs.existsSync(agentFile))return {owner,complete:false,reason:"AGENT_STATE_MISSING",mission_boundary:null,mission_continuation_dispatch:null};
  const agent=JSON.parse(fs.readFileSync(agentFile,"utf8"));
  if(agent.protocol!=="devexec.local-agent"||agent.run_id!==owner.agent_run_id||agent.worker_run_id!==owner.worker_run_id)throw new Error("Local Agent owner/state mismatch");
  const complete=agent.status==="DONE"&&agent.decision==="COMPLETE";
@@ -22,5 +23,11 @@ export function inspectLocalAgentGoalCompletion({runDir,base,runId}){
   pending_action:false,
   ambiguous_action:false,
  }):null;
- return {owner,agent,complete,reason:complete?"LOCAL_AGENT_COMPLETE":"LOCAL_AGENT_NOT_COMPLETE",mission_boundary:missionBoundary};
+ const continuationDispatch=complete&&missionBoundary?.continuation?dispatchMissionContinuationSync({
+  base,
+  mission_id:owner.mission_id,
+  parent_run_id:runId,
+  launch_id:missionBoundary.continuation.launch_id,
+ }):null;
+ return {owner,agent,complete,reason:complete?"LOCAL_AGENT_COMPLETE":"LOCAL_AGENT_NOT_COMPLETE",mission_boundary:missionBoundary,mission_continuation_dispatch:continuationDispatch};
 }
