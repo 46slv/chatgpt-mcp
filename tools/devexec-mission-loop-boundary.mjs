@@ -39,6 +39,18 @@ function continuationIdentity(missionId, runId, work, index) {
   };
 }
 
+function findContinuationWork(control, objective, runId) {
+  for (let index = 0; index < objective.queued_work.length; index += 1) {
+    const work = objective.queued_work[index];
+    const source = control.amendments.amendments.find(amendment =>
+      amendment.amendment_id === work.amendment_id &&
+      amendment.apply_attempt_id === work.apply_attempt_id
+    );
+    if (source?.status === "APPLIED" && source.applied_run_id === runId) return {work, index};
+  }
+  return null;
+}
+
 export function applyMissionLoopBoundary({
   base,
   mission_id,
@@ -81,9 +93,10 @@ export function applyMissionLoopBoundary({
   let continuation = null;
 
   if (boundary.current_goal_complete && !boundary.pending_action && !boundary.ambiguous_action) {
-    const work = objective.queued_work[0] ?? null;
-    if (work) {
-      const identity = continuationIdentity(missionId, runId, work, 0);
+    const candidate = findContinuationWork(control, objective, runId);
+    if (candidate) {
+      const {work, index} = candidate;
+      const identity = continuationIdentity(missionId, runId, work, index);
       const requested = requestMissionChildLaunch(control, {
         parent_run_id: runId,
         child_run_id: identity.child_run_id,
@@ -95,6 +108,7 @@ export function applyMissionLoopBoundary({
       continuation = {
         ...identity,
         goal: work.text,
+        objective_index: index,
         status: requested.launch.status,
         deduplicated: requested.deduplicated === true,
       };
