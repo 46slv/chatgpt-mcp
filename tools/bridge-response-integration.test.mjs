@@ -22,9 +22,36 @@ const cleanText = new Function(
   `const phrasesToRemove = [\n${phrasesMatch[1]}\n];\nconst cleanText = (text) => {\n${cleanTextMatch[1]}\n};\nreturn cleanText;`,
 )();
 
-test('Bridge cleaner -> Natural Protocol preserves a fenced multiline RUN end to end', () => {
+function parse(extracted) {
+  return parseNaturalDirective(extracted, {
+    defaultWorkingDirectory: 'C:\\Fallback',
+    defaultTimeoutSeconds: 240,
+  });
+}
+
+test('Bridge cleaner -> Natural Protocol preserves rendered multiline PowerShell end to end', () => {
+  // Browser innerText commonly exposes the rendered code language as a standalone
+  // label rather than preserving Markdown backticks. This is the important real UI shape.
   const renderedTurn = [
     'ChatGPT said:',
+    'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
+    'powershell',
+    '$x = 1',
+    'Write-Output $x',
+  ].join('\n');
+
+  const extracted = cleanText(renderedTurn);
+  assert.match(extracted, /powershell\n\$x = 1\nWrite-Output \$x/);
+
+  const directive = parse(extracted);
+  assert.equal(directive.decision, 'RUN');
+  assert.equal(directive.workingDirectory, 'C:\\Work');
+  assert.equal(directive.timeoutSeconds, 300);
+  assert.equal(directive.script, '$x = 1\nWrite-Output $x');
+});
+
+test('Bridge cleaner -> Natural Protocol also preserves literal fenced multiline RUN', () => {
+  const renderedTurn = [
     'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
     '```powershell',
     '$x = 1',
@@ -32,16 +59,6 @@ test('Bridge cleaner -> Natural Protocol preserves a fenced multiline RUN end to
     '```',
   ].join('\n');
 
-  const extracted = cleanText(renderedTurn);
-  assert.match(extracted, /```powershell\n\$x = 1\nWrite-Output \$x\n```/);
-
-  const directive = parseNaturalDirective(extracted, {
-    defaultWorkingDirectory: 'C:\\Fallback',
-    defaultTimeoutSeconds: 240,
-  });
-
-  assert.equal(directive.decision, 'RUN');
-  assert.equal(directive.workingDirectory, 'C:\\Work');
-  assert.equal(directive.timeoutSeconds, 300);
+  const directive = parse(cleanText(renderedTurn));
   assert.equal(directive.script, '$x = 1\nWrite-Output $x');
 });
