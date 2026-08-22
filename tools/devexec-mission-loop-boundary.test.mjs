@@ -118,6 +118,50 @@ test("root queued work is not re-consumed after the child becomes current", () =
   assert.equal(childResult.continuation, null);
 });
 
+test("multiple queued work items chain sequentially across child runs", () => {
+  const base = tempBase();
+  const root = openMissionControl({base, mission_id: "MISSION-CHAIN", run_id: "RUN-ROOT"});
+  enqueueMissionAmendment(root, {
+    amendment_id: "AMEND-WORK-1",
+    idempotency_key: "chain-1",
+    kind: "MISSION_AMENDMENT",
+    apply_mode: "after_current_goal",
+    payload: {add_work: "first continuation"},
+  }, {now: "2026-08-23T00:00:01.000Z"});
+  enqueueMissionAmendment(root, {
+    amendment_id: "AMEND-WORK-2",
+    idempotency_key: "chain-2",
+    kind: "MISSION_AMENDMENT",
+    apply_mode: "after_current_goal",
+    payload: {add_work: "second continuation"},
+  }, {now: "2026-08-23T00:00:02.000Z"});
+
+  const first = applyMissionLoopBoundary({
+    base,
+    mission_id: "MISSION-CHAIN",
+    run_id: "RUN-ROOT",
+    current_goal_complete: true,
+  });
+  assert.equal(first.objective.queued_work.length, 2);
+  assert.equal(first.continuation.goal, "first continuation");
+
+  openMissionControl({
+    base,
+    mission_id: "MISSION-CHAIN",
+    run_id: first.continuation.child_run_id,
+    parent_run_id: "RUN-ROOT",
+  });
+  const second = applyMissionLoopBoundary({
+    base,
+    mission_id: "MISSION-CHAIN",
+    run_id: first.continuation.child_run_id,
+    parent_run_id: "RUN-ROOT",
+    current_goal_complete: true,
+  });
+  assert.equal(second.continuation.goal, "second continuation");
+  assert.notEqual(second.continuation.child_run_id, first.continuation.child_run_id);
+});
+
 test("unsupported GOAL_PATCH stays pending and is reported as skipped", () => {
   const base = tempBase();
   const control = openMissionControl({base, mission_id: "MISSION-D", run_id: "RUN-D"});
