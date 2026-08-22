@@ -78,9 +78,12 @@ $ExpectedCommands = @(
     'Write-Output "BRIDGE_MULTILINE_E2E_OK"'
 )
 
-foreach ($Expected in $ExpectedCommands) {
-    if ($ScriptLines -notcontains $Expected) {
-        throw "Multiline structure verification failed; missing separate script line: $Expected"
+if ($ScriptLines.Count -ne $ExpectedCommands.Count) {
+    throw "Persisted script line count changed. Expected=$($ExpectedCommands.Count) Actual=$($ScriptLines.Count) Script=$($ScriptLines -join ' | ')"
+}
+for ($i = 0; $i -lt $ExpectedCommands.Count; $i++) {
+    if ($ScriptLines[$i] -cne $ExpectedCommands[$i]) {
+        throw "Persisted script differs at line $($i + 1). Expected=<$($ExpectedCommands[$i])> Actual=<$($ScriptLines[$i])>"
     }
 }
 
