@@ -96,6 +96,6 @@ if(dry){
  process.exit(2);
 }
 env.DEV_EXEC_PURPOSE="Supervise Local Agent only after local escalation.";
-env.DEV_EXEC_TARGET="Apply bounded typed repair, then resume Local Agent "+agent.run_id+". Keep ordinary execution local.";
+env.DEV_EXEC_TARGET=renderMissionGoalWithConstraints("Apply bounded typed repair, then resume Local Agent "+agent.run_id+". Keep ordinary execution local.",missionConstraints);
 const loop=spawnSync(process.execPath,[LOOP],{stdio:"inherit",env,windowsHide:true});
 process.exit(loop.status===null?2:loop.status);
