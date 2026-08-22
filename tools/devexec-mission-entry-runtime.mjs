@@ -4,8 +4,11 @@ import {openMissionControl} from "./devexec-mission-control.mjs";
 import {reconcileMissionChildLaunches} from "./devexec-mission-launch.mjs";
 import {
   activateMissionChildRun,
+  activateMissionRootRun,
   beginMissionChildRunStart,
+  beginMissionRootRunStart,
   markMissionChildRunAmbiguous,
+  markMissionRootRunAmbiguous,
   reserveMissionChildRun,
 } from "./devexec-mission-run-admission.mjs";
 
@@ -35,10 +38,43 @@ export function startMissionLocalAgent({
   if (typeof start_local_agent !== "function") throw new Error("start_local_agent required");
 
   if (parentRunId === null) {
+    const opened = openMissionControl({base, mission_id: missionId, run_id: runId, now});
+    const begun = beginMissionRootRunStart({
+      base,
+      mission_id: missionId,
+      run_id: runId,
+      start_attempt_id,
+      now,
+    });
+    if (begun.deduplicated) throw new Error("MISSION_ROOT_START_ALREADY_IN_FLIGHT");
+
+    let agent;
+    try {
+      agent = start_local_agent();
+      if (agent && typeof agent.then === "function") throw new Error("LOCAL_AGENT_ASYNC_START_UNSUPPORTED");
+      assertAgentResult(agent);
+    } catch (error) {
+      markMissionRootRunAmbiguous({
+        base,
+        mission_id: missionId,
+        run_id: runId,
+        start_attempt_id,
+        reason: `LOCAL_AGENT_START_AMBIGUOUS:${error?.message || String(error)}`,
+        now,
+      });
+      throw error;
+    }
+
+    activateMissionRootRun({
+      base,
+      mission_id: missionId,
+      run_id: runId,
+      start_attempt_id,
+      now,
+    });
     const mission = openMissionControl({base, mission_id: missionId, run_id: runId, now});
-    const agent = start_local_agent();
-    if (agent && typeof agent.then === "function") throw new Error("LOCAL_AGENT_ASYNC_START_UNSUPPORTED");
-    return {mission, agent: assertAgentResult(agent), start_attempt_id: null, launch_reconciled: false};
+    mission.created = opened.created;
+    return {mission, agent, start_attempt_id, launch_reconciled: false};
   }
 
   reserveMissionChildRun({base, mission_id: missionId, run_id: runId, parent_run_id: parentRunId, now});
