@@ -1,8 +1,9 @@
 # Local Worker action-identity replay-safety review — 2026-08-23
 
-Status: **review clean for process-crash replay safety; host acceptance still required**
+Status: **review clean for process-crash replay safety; live Local Executor / SHIRO-WS acceptance still required**
 
-Reviewed branch: `automation/local-worker-action-identity-20260823@28828eeb4fc9258838ecd3c1325c43d609e785fa`.
+Reviewed implementation branch: `automation/local-worker-action-identity-20260823@28828eeb4fc9258838ecd3c1325c43d609e785fa`.
+Continuation branch: `automation/local-worker-process-kill-replay-20260823`.
 
 ## Source audit
 
@@ -17,25 +18,29 @@ The actual adapter path supports the intended pre-dispatch fence:
 
 This closes the process-crash replay gap at the source level: if the executor may have completed but result evidence was not attached, the last persisted state remains pending and later execution is fail-closed rather than replayed.
 
-## Added regression
+## Deterministic restart regressions
 
 `tools/local-worker-restart-persistence.test.mjs` persists the pending action to a real temporary JSON file, simulates an executor-side effect followed by process loss, reloads the actions as a fresh process would, and proves `runLocalWorkerResume()` rejects before replanning or re-executing.
 
-Independent Node execution of this exact regression in the cloud review environment: **1/1 PASS**.
+Independent Node execution of that regression in the prior cloud review environment: **1/1 PASS**.
+
+`tools/local-worker-process-kill-restart.test.mjs` strengthens the proof by spawning a real child Node process. The child persists `pending:true`, enters `execute()`, writes a dispatch marker, and blocks. The parent waits until both durable pending state and dispatch evidence exist, terminates the process, reloads the state, and proves resume throws `AMBIGUOUS_ACTION_IN_FLIGHT: R01-01-001` before planner or executor code can run.
+
+Independent Node execution against exact reconstructed `local-worker-iterative-runner.mjs` and `local-worker-resume-runtime.mjs` semantics: **1/1 PASS**. This is an actual OS process termination test, not a thrown-error simulation.
 
 ## Remaining boundaries
 
-- The cloud test models process restart and filesystem persistence but is not an actual SHIRO-WS process kill.
-- The adapter's temp-write + rename is sufficient evidence for process-crash recovery semantics; this review does not claim power-loss/fsync durability.
-- A live Local Executor request/result round trip and an actual forced process termination between the pending-state save and result-state save remain host-only acceptance.
-- The existing focused `local-worker-action-identity.test.mjs` should also be run from a real checkout together with the new persistence regression.
+- The process-kill replay fence is now proven with a real child process in the cloud execution environment, but not yet on SHIRO-WS.
+- The adapter's temp-write + rename is sufficient evidence for ordinary process-crash recovery semantics; this review does not claim power-loss/fsync durability.
+- A live Local Executor request/result round trip on SHIRO-WS remains host-only acceptance.
+- The focused action-identity, persistence, and process-kill regressions should be run from the real checkout to catch environment/module drift.
 
 ## Exact host validation
 
-From the reviewed branch or this continuation branch, run the two deterministic tests first:
+From the continuation branch, run the deterministic suite first:
 
-`node --test tools/local-worker-action-identity.test.mjs tools/local-worker-restart-persistence.test.mjs`
+`node --test tools/local-worker-action-identity.test.mjs tools/local-worker-restart-persistence.test.mjs tools/local-worker-process-kill-restart.test.mjs`
 
-Then perform one bounded SHIRO-WS kill/restart probe using a disposable local-worker run: terminate the worker only after the persisted state visibly contains one `pending:true` action and after executor dispatch may have occurred, restart the same run, and require `AMBIGUOUS_ACTION_IN_FLIGHT` before any new planner/executor request. Preserve the pre/post state JSON and executor request IDs as evidence.
+Then perform one bounded SHIRO-WS live Local Executor round trip using a disposable local-worker run. Preserve the worker request ID, executor request ID, pre/post state JSON, and result evidence. If a live forced termination is also performed, require the same pending fence and `AMBIGUOUS_ACTION_IN_FLIGHT` before any new planner/executor request.
 
-Do not merge on the basis of cloud review alone; read back the host evidence first.
+Do not merge on cloud evidence alone; read back the SHIRO-WS checkout and live executor evidence first.
