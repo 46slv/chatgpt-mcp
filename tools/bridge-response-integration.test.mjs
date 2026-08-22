@@ -62,3 +62,27 @@ test('Bridge cleaner -> Natural Protocol also preserves literal fenced multiline
   const directive = parse(cleanText(renderedTurn));
   assert.equal(directive.script, '$x = 1\nWrite-Output $x');
 });
+
+test('producer -> Natural Protocol preserves chrome-like payload text exactly', () => {
+  const payloadLines = [
+    'Write-Output "ChatGPT said:"',
+    'Write-Output "Thinking..."',
+    'Write-Output "Answer now"',
+    'Write-Output "bullet • value"',
+    'Write-Output "15 seconds"',
+  ];
+  const renderedTurn = [
+    'Thinking...',
+    'ChatGPT said:',
+    'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
+    'powershell',
+    ...payloadLines,
+  ].join('\n');
+
+  const extracted = cleanText(renderedTurn);
+  const directive = parse(extracted);
+  assert.equal(directive.decision, 'RUN');
+  assert.equal(directive.workingDirectory, 'C:\\Work');
+  assert.equal(directive.timeoutSeconds, 300);
+  assert.equal(directive.script, payloadLines.join('\n'));
+});
