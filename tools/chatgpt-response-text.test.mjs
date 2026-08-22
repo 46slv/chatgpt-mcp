@@ -39,7 +39,6 @@ test('preserves fenced multiline PowerShell structure and indentation', () => {
   ].join('\n');
 
   const expected = [
-    '15 seconds',
     'RUN',
     '```powershell',
     'Set-Location "D:\\Documents\\ChatGPTMCPProbe"',
@@ -61,13 +60,42 @@ test('normalizes CRLF and CR line endings without flattening lines', () => {
   assert.equal(cleanText('one\r\ntwo\rthree'), 'one\ntwo\nthree');
 });
 
-test('retains legacy chrome cleanup for simple prose', () => {
+test('retains leading chrome cleanup for simple prose', () => {
   assert.equal(
     cleanText('Thinking...\nPro thinking • \nChatGPT said:\nReady'),
     'Ready',
   );
 });
 
-test('retains legacy leading timing cleanup', () => {
+test('retains leading timing cleanup', () => {
   assert.equal(cleanText('15 seconds\nReady'), 'Ready');
+});
+
+test('never rewrites chrome-like strings inside executable payload', () => {
+  const payloadLines = [
+    'Write-Output "ChatGPT said:"',
+    'Write-Output "Thinking..."',
+    'Write-Output "Answer now"',
+    'Write-Output "bullet • value"',
+    'Write-Output "15 seconds"',
+  ];
+  const input = [
+    'ChatGPT said:',
+    'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
+    'powershell',
+    ...payloadLines,
+  ].join('\n');
+
+  const cleaned = cleanText(input);
+  for (const line of payloadLines) {
+    assert.ok(
+      cleaned.split('\n').includes(line),
+      `cleaned response must preserve payload line exactly: ${line}\nActual:\n${cleaned}`,
+    );
+  }
+});
+
+test('does not remove chrome-like phrases after ordinary response content begins', () => {
+  const input = 'Ready\nChatGPT said:\nThinking...\nAnswer now\nbullet • value';
+  assert.equal(cleanText(input), input);
 });
