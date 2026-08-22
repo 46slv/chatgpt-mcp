@@ -139,12 +139,13 @@ async function getLatestResponseText(): Promise<string | null> {
       const cleanText = (text: string): string => {
         let cleaned = text.replace(/\r\n?/g, '\n').trim();
 
-        // Peel known UI chrome only while it is at the current beginning. Never
-        // search-and-replace through the response body: payload strings may legally
-        // contain labels such as "ChatGPT said:", "Thinking...", or "Answer now".
+        // Peel mixed leading UI chrome/timing tokens until neither matches. This
+        // handles real innerText orders such as timing -> Thinking -> ChatGPT said
+        // without ever searching through the response body after RUN/content begins.
         let changed = true;
         while (changed && cleaned) {
           changed = false;
+
           for (const phrase of phrasesToRemove) {
             const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const match = cleaned.match(new RegExp(`^\\s*${escaped}\\s*`, 'i'));
@@ -153,11 +154,16 @@ async function getLatestResponseText(): Promise<string | null> {
             changed = true;
             break;
           }
+
+          if (changed) continue;
+
+          const timing = cleaned.match(/^\s*\d+\s*(seconds?|secs?)\s*/i);
+          if (timing) {
+            cleaned = cleaned.slice(timing[0].length);
+            changed = true;
+          }
         }
 
-        // Timing indicators are UI prefix only as well. Keep this anchored so a
-        // legitimate payload line containing a duration is never rewritten.
-        cleaned = cleaned.replace(/^\s*\d+\s*(seconds?|secs?)\s*/i, '');
         return cleaned.trim();
       };
 
