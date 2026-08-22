@@ -32,17 +32,24 @@ Until a typed constraint-consumption surface exists, any amendment carrying `con
 
 Tests were updated so ordinary `add_work` remains supported and deterministic, while constraint-only and mixed add-work-plus-constraint payloads fail closed/persist as PENDING.
 
+## Finding 3: the committed multi-child chaining test skipped the real launch lifecycle
+
+The previous chaining test attached the first child directly while its launch journal entry was still `PENDING`. That state cannot represent the production self-launch path: a child must cross `PENDING -> LAUNCHING -> LAUNCHED`, attach, and then reconcile to `CONFIRMED`. With the launch guard faithfully reconstructed, the old test failed on the second continuation with `MISSION_LAUNCH_ACTIVE` because the first synthetic launch was still active.
+
+The test now models the production lifecycle explicitly: begin launch, complete launch with a receipt, attach the child, reconcile the launch to `CONFIRMED`, then request the next queued work. The same correction was applied to the root-work-not-reconsumed case. This makes sequential-chain coverage test the actual invariant rather than an impossible shortcut state.
+
 ## Validation actually performed
 
 - GitHub branch HEAD was re-read before every write and remained unchanged from the expected preceding commit.
 - Connector readback confirms the owner now contains `target_alias`, completion inspection validates/forwards it, inherited `DEV_EXEC_TARGET_ALIAS` initializes child target state, and the committed target regressions are present.
-- A connector-fetched source-faithful Node harness executed the modified `devexec-local-agent-goal-state.mjs` with stubbed boundary/dispatcher dependencies: explicit alias propagation, legacy missing alias, and malformed alias fail-closed all passed (`3/3`). `node --check` passed for that exact reconstructed module.
-- A second connector-fetched source-faithful harness executed the exact revised Mission objective semantics with the real lock/state helpers: constraint-only rejection, mixed add-work-plus-constraint rejection, and ordinary add-work durable receipt all passed (`3/3`). `node --check` passed for the reconstructed revised objective module.
-- A real repository checkout is still unavailable in the cloud container because `github.com` DNS resolution fails. Therefore the committed repository test suite and GitHub CI are not claimed as PASS, and no Windows/SHIRO-WS runtime proof is claimed.
+- A connector-fetched source-faithful reconstruction ran four focused suites against the reviewed semantics: Mission objective `5/5 PASS`, amendment-runtime `5/5 PASS`, loop-boundary including the real confirmed-child lifecycle `5/5 PASS`, and local-agent Mission boundary including target propagation `6/6 PASS` — **21/21 PASS** total.
+- The same reconstruction exposed the old impossible-state chaining test before it was corrected: it failed at the second child with `MISSION_LAUNCH_ACTIVE`; after modeling `LAUNCHING -> LAUNCHED -> CONFIRMED`, the suite passed `5/5`.
+- `node --check` also passed for the reconstructed modified goal-state and objective modules.
+- A real repository checkout is still unavailable in the cloud container because `github.com` DNS resolution fails. Therefore these are connector-fetched source-faithful tests, not a real checkout or GitHub CI PASS, and no Windows/SHIRO-WS runtime proof is claimed.
 
 ## Host / checkout acceptance
 
-1. Run all existing Mission suites plus the modified objective, loop-boundary, and local-agent mission-boundary tests from a real checkout.
+1. Run all existing Mission suites plus the modified objective, loop-boundary, amendment-runtime, and local-agent mission-boundary tests from a real checkout.
 2. Start a Mission with an explicit target that requires supervisor escalation, then enqueue `after_current_goal` work. Verify parent owner -> launch-state -> child environment all retain the exact target alias.
 3. Let that child complete immediately and via supervisor on separate runs; verify a second continuation still retains the target.
 4. Continue the existing kill/restart acceptance for objective write, PENDING launch, LAUNCHING/spawn-before-receipt, and LAUNCHED-before-child-attach. No duplicate child and no target drift are allowed.
