@@ -8,12 +8,19 @@ import {
   carryAmendmentsToRun,
   createAmendmentQueue,
   enqueueAmendment,
+  loadAmendmentQueue,
   setAmendmentDisposition,
 } from "./devexec-mission-amendments.mjs";
-import {openMissionControl} from "./devexec-mission-control.mjs";
+import {
+  beginMissionAmendmentApply,
+  enqueueMissionAmendment,
+  openMissionControl,
+} from "./devexec-mission-control.mjs";
 import {
   beginMissionChildLaunch,
+  completeMissionChildLaunch,
   readMissionLaunchState,
+  reconcileMissionChildLaunches,
   requestMissionChildLaunch,
 } from "./devexec-mission-launch.mjs";
 import {dispatchMissionChildLaunch} from "./devexec-mission-launcher.mjs";
@@ -61,6 +68,26 @@ test("manual APPLIED disposition cannot bypass two-phase amendment apply", () =>
   assert.equal(queue.revision, revisionBefore);
 });
 
+test("stale amendment control cannot erase an APPLYING fence while enqueueing new work", () => withRoot(root => {
+  const seed = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  enqueueMissionAmendment(seed, amendment());
+
+  const applyControl = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  const ingressControl = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+
+  beginMissionAmendmentApply(applyControl, "AMD-001", {safe: true}, {apply_attempt_id: "APPLY-001"});
+  enqueueMissionAmendment(ingressControl, amendment({
+    amendment_id: "AMD-002",
+    idempotency_key: "MISSION-001:operator:002",
+    payload: {add_work: "B"},
+  }));
+
+  const disk = loadAmendmentQueue(seed.paths.amendments_file);
+  assert.equal(disk.amendments.find(item => item.amendment_id === "AMD-001").status, "APPLYING");
+  assert.equal(disk.amendments.find(item => item.amendment_id === "AMD-001").apply_attempt_id, "APPLY-001");
+  assert.deepEqual(disk.amendments.map(item => item.amendment_id), ["AMD-001", "AMD-002"]);
+}));
+
 test("restarted dispatcher never respawns an already durable LAUNCHING attempt", () => withRoot(async root => {
   const control = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
   const launch = requestMissionChildLaunch(control, {
@@ -95,4 +122,63 @@ test("restarted dispatcher never respawns an already durable LAUNCHING attempt",
   assert.equal(disk.status, "LAUNCHING");
   assert.equal(disk.launch_attempt_id, "ATTEMPT-001");
   assert.equal(disk.launcher_request_id, "REQ-001");
+}));
+
+test("two stale launch controls cannot both create active child intents", () => withRoot(root => {
+  const firstControl = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  const secondControl = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+
+  requestMissionChildLaunch(firstControl, {
+    launch_id: "LAUNCH-001",
+    idempotency_key: "launch-001",
+    child_run_id: "RUN-002",
+    goal: "first child",
+  }, {boundary: {safe: true}});
+
+  assert.throws(
+    () => requestMissionChildLaunch(secondControl, {
+      launch_id: "LAUNCH-002",
+      idempotency_key: "launch-002",
+      child_run_id: "RUN-003",
+      goal: "second child",
+    }, {boundary: {safe: true}}),
+    /MISSION_LAUNCH_ACTIVE/,
+  );
+  assert.equal(readMissionLaunchState(firstControl).launches.length, 1);
+}));
+
+test("launch receipt can complete after child attaches and delayed reconciliation follows lineage", () => withRoot(root => {
+  const parent = openMissionControl({base: root, mission_id: "MISSION-001", run_id: "RUN-001"});
+  const launch = requestMissionChildLaunch(parent, {
+    launch_id: "LAUNCH-001",
+    idempotency_key: "launch-001",
+    child_run_id: "RUN-002",
+    goal: "child",
+  }, {boundary: {safe: true}}).launch;
+  beginMissionChildLaunch(parent, launch.launch_id, {
+    launch_attempt_id: "ATTEMPT-001",
+    launcher_request_id: "REQ-001",
+    lease_token: "LEASE-001",
+  });
+
+  const child = openMissionControl({
+    base: root,
+    mission_id: "MISSION-001",
+    run_id: "RUN-002",
+    parent_run_id: "RUN-001",
+  });
+  completeMissionChildLaunch(parent, launch.launch_id, {
+    launch_attempt_id: "ATTEMPT-001",
+    receipt: {pid: 4242},
+  });
+
+  const grandchild = openMissionControl({
+    base: root,
+    mission_id: "MISSION-001",
+    run_id: "RUN-003",
+    parent_run_id: "RUN-002",
+  });
+  assert.equal(child.state.current_run_id, "RUN-002");
+  assert.equal(reconcileMissionChildLaunches(grandchild).changed, true);
+  assert.equal(readMissionLaunchState(grandchild).launches[0].status, "CONFIRMED");
 }));
