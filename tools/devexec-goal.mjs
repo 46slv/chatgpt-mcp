@@ -84,7 +84,7 @@ if(agent.decision==="COMPLETE"){
 if(agent.decision!=="NEEDS_SUPERVISOR")throw new Error("unsupported decision: "+agent.decision);
 const dir=path.join(BASE,"ChatGPTMCPProbe","dev-exec-runs",id);
 fs.mkdirSync(dir,{recursive:true});
-const owner={protocol:"devexec.local-agent-owner",schema_version:1,dev_exec_run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,worker_run_id:agent.worker_run_id,goal};
+const owner={protocol:"devexec.local-agent-owner",schema_version:1,dev_exec_run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,worker_run_id:agent.worker_run_id,target_alias:target,goal};
 fs.writeFileSync(path.join(dir,"local-agent-owner.json"),JSON.stringify(owner,null,2)+"\n");
 if(reportOnly)env.DEV_EXEC_REPORT_ONLY="1";
 if(dry){
