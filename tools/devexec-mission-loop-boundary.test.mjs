@@ -6,10 +6,40 @@ import path from "node:path";
 
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
 import {enqueueMissionAmendment, openMissionControl} from "./devexec-mission-control.mjs";
-import {readMissionLaunchState} from "./devexec-mission-launch.mjs";
+import {
+  beginMissionChildLaunch,
+  completeMissionChildLaunch,
+  readMissionLaunchState,
+  reconcileMissionChildLaunches,
+} from "./devexec-mission-launch.mjs";
 
 function tempBase() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-loop-boundary-"));
+}
+
+function attachConfirmedChild({base, missionId, parentRunId, continuation}) {
+  const parent = openMissionControl({base, mission_id: missionId, run_id: parentRunId});
+  const attemptId = `${continuation.launch_id}:test-attempt`;
+  beginMissionChildLaunch(parent, continuation.launch_id, {
+    launch_attempt_id: attemptId,
+    launcher_request_id: `${continuation.launch_id}:test-request`,
+    lease_token: `${continuation.launch_id}:test-lease`,
+  });
+  completeMissionChildLaunch(parent, continuation.launch_id, {
+    launch_attempt_id: attemptId,
+    receipt: {test: true, launch_id: continuation.launch_id},
+  });
+  const child = openMissionControl({
+    base,
+    mission_id: missionId,
+    run_id: continuation.child_run_id,
+    parent_run_id: parentRunId,
+  });
+  const reconciled = reconcileMissionChildLaunches(child);
+  assert.equal(reconciled.changed, true);
+  const launch = readMissionLaunchState(child).launches.find(item => item.launch_id === continuation.launch_id);
+  assert.equal(launch.status, "CONFIRMED");
+  return child;
 }
 
 test("constraint remains pending until a runtime enforcement surface exists", () => {
@@ -88,7 +118,7 @@ test("after_current_goal creates one deterministic durable child launch intent",
   assert.equal(launchState.launches.length, 1);
 });
 
-test("root queued work is not re-consumed after the child becomes current", () => {
+test("root queued work is not re-consumed after the launched child becomes current", () => {
   const base = tempBase();
   const root = openMissionControl({base, mission_id: "MISSION-C", run_id: "RUN-ROOT"});
   enqueueMissionAmendment(root, {
@@ -105,11 +135,11 @@ test("root queued work is not re-consumed after the child becomes current", () =
     current_goal_complete: true,
   });
 
-  openMissionControl({
+  attachConfirmedChild({
     base,
-    mission_id: "MISSION-C",
-    run_id: rootResult.continuation.child_run_id,
-    parent_run_id: "RUN-ROOT",
+    missionId: "MISSION-C",
+    parentRunId: "RUN-ROOT",
+    continuation: rootResult.continuation,
   });
   const childResult = applyMissionLoopBoundary({
     base,
@@ -121,7 +151,7 @@ test("root queued work is not re-consumed after the child becomes current", () =
   assert.equal(childResult.continuation, null);
 });
 
-test("multiple queued work items chain sequentially across child runs", () => {
+test("multiple queued work items chain sequentially across confirmed child runs", () => {
   const base = tempBase();
   const root = openMissionControl({base, mission_id: "MISSION-CHAIN", run_id: "RUN-ROOT"});
   enqueueMissionAmendment(root, {
@@ -148,11 +178,11 @@ test("multiple queued work items chain sequentially across child runs", () => {
   assert.equal(first.objective.queued_work.length, 2);
   assert.equal(first.continuation.goal, "first continuation");
 
-  openMissionControl({
+  attachConfirmedChild({
     base,
-    mission_id: "MISSION-CHAIN",
-    run_id: first.continuation.child_run_id,
-    parent_run_id: "RUN-ROOT",
+    missionId: "MISSION-CHAIN",
+    parentRunId: "RUN-ROOT",
+    continuation: first.continuation,
   });
   const second = applyMissionLoopBoundary({
     base,
