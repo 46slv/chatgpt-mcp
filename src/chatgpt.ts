@@ -118,7 +118,10 @@ async function getLatestResponseText(): Promise<string | null> {
     const page = await getPage();
 
     const text = await page.evaluate(() => {
-      // UI chrome phrases that appear in turn elements but aren't part of the response
+      // UI chrome phrases that appear in turn elements but aren't part of the response.
+      // They may be removed only from the leading UI prefix; executable payload text
+      // after the supervisor directive boundary must remain byte-for-byte equivalent
+      // apart from canonical line-ending normalization and outer trim.
       const phrasesToRemove = [
         'ChatGPT said:',
         'ChatGPT said',
@@ -134,21 +137,28 @@ async function getLatestResponseText(): Promise<string | null> {
       ];
 
       const cleanText = (text: string): string => {
-        let cleaned = text;
-        for (const phrase of phrasesToRemove) {
-          while (cleaned.includes(phrase)) {
-            cleaned = cleaned.replace(phrase, '');
+        let cleaned = text.replace(/\r\n?/g, '\n').trim();
+
+        // Peel known UI chrome only while it is at the current beginning. Never
+        // search-and-replace through the response body: payload strings may legally
+        // contain labels such as "ChatGPT said:", "Thinking...", or "Answer now".
+        let changed = true;
+        while (changed && cleaned) {
+          changed = false;
+          for (const phrase of phrasesToRemove) {
+            const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const match = cleaned.match(new RegExp(`^\\s*${escaped}\\s*`, 'i'));
+            if (!match) continue;
+            cleaned = cleaned.slice(match[0].length);
+            changed = true;
+            break;
           }
         }
-        // Remove "Thinking" only as a standalone word at the start
-        cleaned = cleaned.replace(/^Thinking\s*/i, '');
-        cleaned = cleaned.replace(/Pro\s+thinking\s*\u2022?\s*/gi, '');
-        // Remove timing indicators like "15 seconds" but be careful not to strip legitimate numbers
-        cleaned = cleaned.replace(/^\d+\s*(seconds?|secs?)\s*/i, '');
-        // Preserve response structure: fenced executable blocks rely on line breaks,
-        // indentation, tabs, and repeated spaces surviving Bridge extraction intact.
-        cleaned = cleaned.replace(/\r\n?/g, '\n').trim();
-        return cleaned;
+
+        // Timing indicators are UI prefix only as well. Keep this anchored so a
+        // legitimate payload line containing a duration is never rewritten.
+        cleaned = cleaned.replace(/^\s*\d+\s*(seconds?|secs?)\s*/i, '');
+        return cleaned.trim();
       };
 
       // Get all conversation turns
