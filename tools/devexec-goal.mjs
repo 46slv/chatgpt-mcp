@@ -14,7 +14,7 @@ const AGENT=path.join(HERE,"local-agent-facade.mjs");
 const LOOP=path.join(HERE,"dev-exec-loop.mjs");
 const BASE=process.env.LOCALAPPDATA||path.join(os.homedir(),"AppData","Local");
 const argv=process.argv.slice(2);
-let target=null;
+let target=process.env.DEV_EXEC_TARGET_ALIAS?.trim()||null;
 let dry=false;let reportOnly=false;
 const parts=[];
 for(let i=0;i<argv.length;i++){
