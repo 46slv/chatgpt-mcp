@@ -14,6 +14,36 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+function semanticShape(queue, input) {
+  return {
+    kind: input.kind,
+    apply_mode: input.apply_mode,
+    priority: Number.isInteger(input.priority) ? input.priority : 0,
+    payload: stableValue(input.payload ?? {}),
+    created_for_run_id: input.run_id ?? queue.current_run_id,
+  };
+}
+
+function sameSemanticRequest(queue, existing, input) {
+  const expected = semanticShape(queue, input);
+  const actual = {
+    kind: existing.kind,
+    apply_mode: existing.apply_mode,
+    priority: existing.priority,
+    payload: stableValue(existing.payload),
+    created_for_run_id: existing.created_for_run_id,
+  };
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
 export function createAmendmentQueue({mission_id, run_id = null} = {}) {
   return {
     protocol: "devexec.mission-amendments",
@@ -32,21 +62,22 @@ export function enqueueAmendment(queue, input, {now = new Date().toISOString()} 
 
   const idempotencyKey = assertNonEmpty(input.idempotency_key, "idempotency_key");
   const existing = queue.amendments.find(item => item.idempotency_key === idempotencyKey);
-  if (existing) return {queue, amendment: existing, deduplicated: true};
+  if (existing) {
+    if (!sameSemanticRequest(queue, existing, input)) throw new Error("IDEMPOTENCY_KEY_CONFLICT");
+    return {queue, amendment: existing, deduplicated: true};
+  }
 
   const id = assertNonEmpty(input.amendment_id, "amendment_id");
   if (queue.amendments.some(item => item.amendment_id === id)) throw new Error("duplicate amendment_id");
 
+  const shape = semanticShape(queue, input);
   const amendment = {
     amendment_id: id,
     idempotency_key: idempotencyKey,
-    kind: input.kind,
-    apply_mode: input.apply_mode,
-    priority: Number.isInteger(input.priority) ? input.priority : 0,
-    payload: clone(input.payload ?? {}),
+    ...shape,
+    payload: clone(shape.payload),
     status: "PENDING",
     created_at: now,
-    created_for_run_id: input.run_id ?? queue.current_run_id,
     applied_at: null,
     applied_run_id: null,
     disposition_reason: null,
@@ -117,6 +148,7 @@ export function loadAmendmentQueue(file) {
   if (!queue || queue.protocol !== "devexec.mission-amendments" || queue.schema_version !== 1) {
     throw new Error("invalid amendment queue file");
   }
+  assertNonEmpty(queue.mission_id, "mission_id");
   if (!Array.isArray(queue.amendments)) throw new Error("invalid amendment queue amendments");
   return queue;
 }
