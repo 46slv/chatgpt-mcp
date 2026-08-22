@@ -77,6 +77,16 @@ test("target alias is canonicalized before it becomes durable launch state", () 
   assert.equal(readMissionLaunchState(control).launches[0].target_alias, "child-target");
 });
 
+test("idempotency compares canonical target aliases instead of transport whitespace", () => {
+  const control = controlFor();
+  const first = request(control, "  child-target  ");
+  assert.equal(first.deduplicated, false);
+  const replay = request(control, "child-target");
+  assert.equal(replay.deduplicated, true);
+  assert.equal(replay.launch.target_alias, "child-target");
+  assert.throws(() => request(control, "different-target"), /LAUNCH_IDEMPOTENCY_KEY_CONFLICT/);
+});
+
 test("valid target alias still reaches the launch side-effect boundary", async () => {
   const control = controlFor();
   const requested = request(control, "child-target");
