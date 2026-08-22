@@ -6,17 +6,11 @@ import {
   completeMissionChildLaunch,
   markMissionChildLaunchAmbiguous,
 } from "./devexec-mission-launch.mjs";
+import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
   return value.trim();
-}
-
-function assertOptionalTargetAlias(value) {
-  if (value == null) return;
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error("MISSION_LAUNCH_TARGET_ALIAS_INVALID");
-  }
 }
 
 function waitForSpawn(child) {
@@ -57,7 +51,7 @@ export async function dispatchMissionChildLaunch(control, launch, {
   // Node child_process environment values are string-coercible, so without
   // this fence a malformed persisted value could silently route to a target
   // such as "[object Object]" and leave an ambiguous in-flight launch.
-  assertOptionalTargetAlias(launch?.target_alias);
+  normalizeDurableTargetAlias(launch?.target_alias);
 
   const begun = beginMissionChildLaunch(control, launchId, {
     launch_attempt_id: attemptId,
