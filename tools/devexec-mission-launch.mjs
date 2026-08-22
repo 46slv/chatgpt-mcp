@@ -190,13 +190,22 @@ export function completeMissionChildLaunch(control, launchId, {
     const launch = state.launches.find(item => item.launch_id === launchId);
     if (!launch) throw new Error("launch not found");
     const attemptId = required(launch_attempt_id, "launch_attempt_id");
+    if (!receipt || typeof receipt !== "object") throw new Error("launch receipt required");
     if (launch.status === "LAUNCHED") {
       if (launch.launch_attempt_id === attemptId) return {state, launch, deduplicated: true};
       throw new Error("MISSION_LAUNCH_ATTEMPT_MISMATCH");
     }
+    if (launch.status === "CONFIRMED") {
+      if (launch.launch_attempt_id !== attemptId) throw new Error("MISSION_LAUNCH_ATTEMPT_MISMATCH");
+      if (launch.receipt) return {state, launch, deduplicated: true};
+      launch.launched_at = launch.launched_at ?? now;
+      launch.receipt = clone(receipt);
+      state.revision += 1;
+      saveLaunchState(control, state);
+      return {state, launch, deduplicated: false};
+    }
     if (launch.status !== "LAUNCHING") throw new Error(`launch not launching: ${launch.status}`);
     if (launch.launch_attempt_id !== attemptId) throw new Error("MISSION_LAUNCH_ATTEMPT_MISMATCH");
-    if (!receipt || typeof receipt !== "object") throw new Error("launch receipt required");
     launch.status = "LAUNCHED";
     launch.launched_at = now;
     launch.receipt = clone(receipt);
@@ -233,7 +242,7 @@ export function reconcileMissionChildLaunches(control, {
     const state = loadLaunchState(control);
     let changed = false;
     for (const launch of state.launches) {
-      if (launch.status !== "LAUNCHED") continue;
+      if (!["LAUNCHING", "LAUNCHED"].includes(launch.status)) continue;
       const attached = control.state.runs.find(run => run.run_id === launch.child_run_id);
       if (!attached) continue;
       if (attached.parent_run_id !== launch.parent_run_id) throw new Error("RUN_LINEAGE_CONFLICT");
