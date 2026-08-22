@@ -22,6 +22,7 @@ $testFiles = @(
     "tools/devexec-mission-loop-boundary.test.mjs",
     "tools/devexec-mission-constraint-continuation.test.mjs",
     "tools/devexec-mission-target-env-clear.test.mjs",
+    "tools/devexec-mission-target-validation.test.mjs",
     "tools/devexec-local-agent-mission-boundary.test.mjs",
     "tools/devexec-mission-continuation-dispatch.test.mjs"
 )
