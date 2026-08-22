@@ -8,6 +8,7 @@ import {startMissionLocalAgent} from "./devexec-mission-entry-runtime.mjs";
 import {resolveMissionEntryIdentity} from "./devexec-mission-entry.mjs";
 import {dispatchMissionContinuationSync} from "./devexec-mission-continuation-dispatch.mjs";
 import {applyMissionLoopBoundary} from "./devexec-mission-loop-boundary.mjs";
+import {parseMissionConstraintsEnv, renderMissionGoalWithConstraints} from "./devexec-mission-constraint-envelope.mjs";
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const AGENT=path.join(HERE,"local-agent-facade.mjs");
@@ -25,6 +26,8 @@ for(let i=0;i<argv.length;i++){
 }
 const goal=parts.join(" ").trim();
 if(!goal)throw new Error("goal required");
+const missionConstraints=parseMissionConstraintsEnv(process.env.DEV_EXEC_MISSION_CONSTRAINTS_JSON);
+const executionGoal=renderMissionGoalWithConstraints(goal,missionConstraints);
 const id=process.env.DEV_EXEC_RUN_ID||"DEV-EXEC-GOAL-"+Date.now();
 const identity=resolveMissionEntryIdentity({
  run_id:id,
@@ -38,7 +41,7 @@ const started=startMissionLocalAgent({
  base:BASE,
  identity,
  start_local_agent:()=>{
-  const r=spawnSync(process.execPath,[AGENT,"start",goal],{encoding:"utf8",env,windowsHide:true});
+  const r=spawnSync(process.execPath,[AGENT,"start",executionGoal],{encoding:"utf8",env,windowsHide:true});
   let parsed=null;
   try{parsed=JSON.parse((r.stdout||"").trim());}catch{}
   if(!parsed||!parsed.run_id)throw new Error("local agent start failed");
@@ -72,6 +75,7 @@ if(agent.decision==="COMPLETE"){
   decision:"COMPLETE",
   supervisor_used:false,
   mission_created:mission.created,
+  mission_constraints:missionConstraints,
   mission_boundary:{
    applied:boundary.applied,
    skipped:boundary.skipped,
@@ -84,7 +88,7 @@ if(agent.decision==="COMPLETE"){
 if(agent.decision!=="NEEDS_SUPERVISOR")throw new Error("unsupported decision: "+agent.decision);
 const dir=path.join(BASE,"ChatGPTMCPProbe","dev-exec-runs",id);
 fs.mkdirSync(dir,{recursive:true});
-const owner={protocol:"devexec.local-agent-owner",schema_version:1,dev_exec_run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,worker_run_id:agent.worker_run_id,target_alias:target,goal};
+const owner={protocol:"devexec.local-agent-owner",schema_version:1,dev_exec_run_id:id,mission_id:identity.mission_id,parent_run_id:identity.parent_run_id,agent_run_id:agent.run_id,worker_run_id:agent.worker_run_id,target_alias:target,goal,mission_constraints:missionConstraints};
 fs.writeFileSync(path.join(dir,"local-agent-owner.json"),JSON.stringify(owner,null,2)+"\n");
 if(reportOnly)env.DEV_EXEC_REPORT_ONLY="1";
 if(dry){
