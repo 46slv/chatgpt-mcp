@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import {openMissionControl} from "./devexec-mission-control.mjs";
+import {reconcileMissionChildLaunches} from "./devexec-mission-launch.mjs";
 import {
   activateMissionChildRun,
   beginMissionChildRunStart,
@@ -37,7 +38,7 @@ export function startMissionLocalAgent({
     const mission = openMissionControl({base, mission_id: missionId, run_id: runId, now});
     const agent = start_local_agent();
     if (agent && typeof agent.then === "function") throw new Error("LOCAL_AGENT_ASYNC_START_UNSUPPORTED");
-    return {mission, agent: assertAgentResult(agent), start_attempt_id: null};
+    return {mission, agent: assertAgentResult(agent), start_attempt_id: null, launch_reconciled: false};
   }
 
   reserveMissionChildRun({base, mission_id: missionId, run_id: runId, parent_run_id: parentRunId, now});
@@ -84,5 +85,6 @@ export function startMissionLocalAgent({
     parent_run_id: parentRunId,
     now,
   });
-  return {mission, agent, start_attempt_id};
+  const reconciliation = reconcileMissionChildLaunches(mission, {now});
+  return {mission, agent, start_attempt_id, launch_reconciled: reconciliation.changed};
 }
