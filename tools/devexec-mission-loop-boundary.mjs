@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import {openMissionControl} from "./devexec-mission-control.mjs";
 import {applyApplicableMissionObjectiveAmendments} from "./devexec-mission-amendment-runtime.mjs";
 import {readMissionObjective} from "./devexec-mission-objective.mjs";
-import {requestMissionChildLaunch} from "./devexec-mission-launch.mjs";
+import {readMissionLaunchState, requestMissionChildLaunch} from "./devexec-mission-launch.mjs";
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -23,6 +23,10 @@ function summarizeApplied(entry) {
   };
 }
 
+function workIdempotencyKey(work, index) {
+  return `mission-objective:${work.amendment_id}:${work.apply_attempt_id}:${index}`;
+}
+
 function continuationIdentity(missionId, runId, work, index) {
   const parts = [
     missionId,
@@ -35,20 +39,32 @@ function continuationIdentity(missionId, runId, work, index) {
   return {
     child_run_id: stableId("DEV-EXEC-CONT", parts),
     launch_id: stableId("MISSION-LAUNCH", parts),
-    idempotency_key: `mission-objective:${work.amendment_id}:${work.apply_attempt_id}:${index}`,
+    idempotency_key: workIdempotencyKey(work, index),
   };
 }
 
 function findContinuationWork(control, objective, runId) {
+  const launchState = readMissionLaunchState(control);
   for (let index = 0; index < objective.queued_work.length; index += 1) {
     const work = objective.queued_work[index];
-    const source = control.amendments.amendments.find(amendment =>
-      amendment.amendment_id === work.amendment_id &&
-      amendment.apply_attempt_id === work.apply_attempt_id
-    );
-    if (source?.status === "APPLIED" && source.applied_run_id === runId) return {work, index};
+    const idempotencyKey = workIdempotencyKey(work, index);
+    const existing = launchState.launches.find(launch => launch.idempotency_key === idempotencyKey) ?? null;
+    if (!existing) return {work, index, existing: null};
+    if (existing.parent_run_id === runId) return {work, index, existing};
   }
   return null;
+}
+
+function summarizeExistingContinuation(existing, work, index) {
+  return {
+    child_run_id: existing.child_run_id,
+    launch_id: existing.launch_id,
+    idempotency_key: existing.idempotency_key,
+    goal: work.text,
+    objective_index: index,
+    status: existing.status,
+    deduplicated: true,
+  };
 }
 
 export function applyMissionLoopBoundary({
@@ -95,23 +111,27 @@ export function applyMissionLoopBoundary({
   if (boundary.current_goal_complete && !boundary.pending_action && !boundary.ambiguous_action) {
     const candidate = findContinuationWork(control, objective, runId);
     if (candidate) {
-      const {work, index} = candidate;
-      const identity = continuationIdentity(missionId, runId, work, index);
-      const requested = requestMissionChildLaunch(control, {
-        parent_run_id: runId,
-        child_run_id: identity.child_run_id,
-        launch_id: identity.launch_id,
-        idempotency_key: identity.idempotency_key,
-        goal: work.text,
-        target_alias,
-      }, {boundary, now});
-      continuation = {
-        ...identity,
-        goal: work.text,
-        objective_index: index,
-        status: requested.launch.status,
-        deduplicated: requested.deduplicated === true,
-      };
+      const {work, index, existing} = candidate;
+      if (existing) {
+        continuation = summarizeExistingContinuation(existing, work, index);
+      } else {
+        const identity = continuationIdentity(missionId, runId, work, index);
+        const requested = requestMissionChildLaunch(control, {
+          parent_run_id: runId,
+          child_run_id: identity.child_run_id,
+          launch_id: identity.launch_id,
+          idempotency_key: identity.idempotency_key,
+          goal: work.text,
+          target_alias,
+        }, {boundary, now});
+        continuation = {
+          ...identity,
+          goal: work.text,
+          objective_index: index,
+          status: requested.launch.status,
+          deduplicated: requested.deduplicated === true,
+        };
+      }
     }
   }
 
