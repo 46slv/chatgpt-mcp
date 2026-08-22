@@ -12,7 +12,7 @@ function tempBase() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-loop-boundary-"));
 }
 
-test("next_safe_boundary applies a supported constraint without creating continuation", () => {
+test("constraint remains pending until a runtime enforcement surface exists", () => {
   const base = tempBase();
   const control = openMissionControl({base, mission_id: "MISSION-A", run_id: "RUN-A"});
   enqueueMissionAmendment(control, {
@@ -30,10 +30,13 @@ test("next_safe_boundary applies a supported constraint without creating continu
     current_goal_complete: false,
   });
 
-  assert.equal(result.applied.length, 1);
-  assert.equal(result.objective.constraints.length, 1);
+  assert.equal(result.applied.length, 0);
+  assert.deepEqual(result.skipped, [{amendment_id: "AMEND-CONSTRAINT", reason: "UNSUPPORTED_MUTATION_TARGET"}]);
+  assert.equal(result.objective.constraints.length, 0);
   assert.equal(result.objective.queued_work.length, 0);
   assert.equal(result.continuation, null);
+  const reopened = openMissionControl({base, mission_id: "MISSION-A", run_id: "RUN-A"});
+  assert.equal(reopened.amendments.amendments[0].status, "PENDING");
 });
 
 test("after_current_goal creates one deterministic durable child launch intent", () => {
