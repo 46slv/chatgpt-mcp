@@ -63,6 +63,27 @@ test('Bridge cleaner -> Natural Protocol also preserves literal fenced multiline
   assert.equal(directive.script, '$x = 1\nWrite-Output $x');
 });
 
+test('producer -> Natural Protocol accepts mixed UI prefix order before RUN', () => {
+  const payloadLines = [
+    '$x = 1',
+    'Write-Output $x',
+  ];
+  const renderedTurn = [
+    'Thinking...',
+    '15 secs',
+    'ChatGPT said:',
+    'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
+    'powershell',
+    ...payloadLines,
+  ].join('\n');
+
+  const directive = parse(cleanText(renderedTurn));
+  assert.equal(directive.decision, 'RUN');
+  assert.equal(directive.workingDirectory, 'C:\\Work');
+  assert.equal(directive.timeoutSeconds, 300);
+  assert.equal(directive.script, payloadLines.join('\n'));
+});
+
 test('producer -> Natural Protocol preserves chrome-like payload text exactly', () => {
   const payloadLines = [
     'Write-Output "ChatGPT said:"',
@@ -73,6 +94,7 @@ test('producer -> Natural Protocol preserves chrome-like payload text exactly', 
   ];
   const renderedTurn = [
     'Thinking...',
+    '15 seconds',
     'ChatGPT said:',
     'RUN WorkingDirectory: C:\\Work TimeoutSeconds: 300',
     'powershell',
