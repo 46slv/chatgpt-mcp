@@ -71,6 +71,21 @@ test('retains leading timing cleanup', () => {
   assert.equal(cleanText('15 seconds\nReady'), 'Ready');
 });
 
+test('peels mixed timing and chrome prefix tokens until content begins', () => {
+  assert.equal(
+    cleanText('15 seconds\nThinking...\nChatGPT said:\nRUN'),
+    'RUN',
+  );
+  assert.equal(
+    cleanText('Thinking...\n15 secs\nChatGPT said:\nRUN'),
+    'RUN',
+  );
+  assert.equal(
+    cleanText('Pro thinking\n3 seconds\nReasoning\n4 secs\nRUN'),
+    'RUN',
+  );
+});
+
 test('never rewrites chrome-like strings inside executable payload', () => {
   const payloadLines = [
     'Write-Output "ChatGPT said:"',
