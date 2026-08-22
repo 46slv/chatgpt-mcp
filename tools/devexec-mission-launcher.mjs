@@ -12,6 +12,13 @@ function required(value, name) {
   return value.trim();
 }
 
+function assertOptionalTargetAlias(value) {
+  if (value == null) return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("MISSION_LAUNCH_TARGET_ALIAS_INVALID");
+  }
+}
+
 function waitForSpawn(child) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -46,6 +53,11 @@ export async function dispatchMissionChildLaunch(control, launch, {
   const launchId = required(launch?.launch_id, "launch_id");
   const attemptId = required(launch_attempt_id, "launch_attempt_id");
   const launcherRequestId = required(launcher_request_id, "launcher_request_id");
+  // Validate the durable routing value before moving PENDING -> LAUNCHING.
+  // Node child_process environment values are string-coercible, so without
+  // this fence a malformed persisted value could silently route to a target
+  // such as "[object Object]" and leave an ambiguous in-flight launch.
+  assertOptionalTargetAlias(launch?.target_alias);
 
   const begun = beginMissionChildLaunch(control, launchId, {
     launch_attempt_id: attemptId,
