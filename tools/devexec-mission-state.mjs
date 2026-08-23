@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {durableWriteJsonAtomic} from "./devexec-durable-write.mjs";
+
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function assertMissionId(value) {
@@ -64,9 +66,7 @@ export function attachMissionRun(state, {run_id, parent_run_id, now = new Date()
 export function saveMissionState(file, state) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, {recursive: true});
-  const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(temp, JSON.stringify(state, null, 2) + "\n", "utf8");
-  fs.renameSync(temp, file);
+  durableWriteJsonAtomic(file, state);
 }
 
 export function loadMissionState(file) {
