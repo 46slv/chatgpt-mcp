@@ -155,6 +155,15 @@ export function verifyMissionHostEvidence(summaryPath, {
     });
   }
 
+  const receiptRequested = typeof writeReceipt === "string" ? writeReceipt.trim() : "";
+  if (receiptRequested && (typeof expectedRepoRoot !== "string" || !expectedRepoRoot.trim())) {
+    throw verificationError("MISSION_HOST_EVIDENCE_VERIFIER_EXPECTED_REPO_ROOT_REQUIRED");
+  }
+  if (receiptRequested &&
+      (typeof expectedMissionProbeRoot !== "string" || !expectedMissionProbeRoot.trim())) {
+    throw verificationError("MISSION_HOST_EVIDENCE_VERIFIER_EXPECTED_MISSION_PROBE_ROOT_REQUIRED");
+  }
+
   let recordedRepoRoot = null;
   if (expectedRepoRoot) {
     recordedRepoRoot = canonicalPath(
@@ -291,8 +300,8 @@ export function verifyMissionHostEvidence(summaryPath, {
     status: "PASS",
   };
 
-  if (writeReceipt) {
-    const receiptPath = path.resolve(writeReceipt);
+  if (receiptRequested) {
+    const receiptPath = path.resolve(receiptRequested);
     const receiptParent = canonicalPath(path.dirname(receiptPath));
     if (!samePath(receiptParent, summaryDir)) {
       throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_ROOT_MISMATCH", {
