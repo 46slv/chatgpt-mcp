@@ -145,6 +145,10 @@ export function recoverStaleMissionLock(missionRoot) {
   };
 }
 
+function stagingLockPath(file, pid, token) {
+  return `${file}.claim-${pid}-${token}.tmp`;
+}
+
 export function acquireMissionLock(missionRoot, {
   owner = `pid:${process.pid}`,
   now = new Date().toISOString(),
@@ -152,10 +156,42 @@ export function acquireMissionLock(missionRoot, {
   const file = missionLockPath(missionRoot);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   const token = crypto.randomUUID();
-  let fd;
+  const stagingFile = stagingLockPath(file, process.pid, token);
+  const record = {
+    protocol: "devexec.mission-lock",
+    schema_version: 1,
+    token,
+    owner,
+    pid: process.pid,
+    acquired_at: now,
+    publication: "hardlink-v1",
+  };
+
+  // Never expose the canonical lock path before its owner record is complete.
+  // The old open(file, "wx") -> write -> fsync sequence had a process-crash
+  // window where an empty/partial canonical file could permanently fail closed.
+  // Here the record is written and fsynced under a unique staging name first,
+  // then atomically published with linkSync(), which fails rather than replacing
+  // an existing canonical lock.
+  let stagingFd;
   try {
-    fd = fs.openSync(file, "wx", 0o600);
+    stagingFd = fs.openSync(stagingFile, "wx", 0o600);
+    fs.writeFileSync(stagingFd, JSON.stringify(record, null, 2) + "\n", "utf8");
+    fs.fsyncSync(stagingFd);
+    fs.closeSync(stagingFd);
+    stagingFd = null;
   } catch (error) {
+    if (stagingFd != null) {
+      try { fs.closeSync(stagingFd); } catch {}
+    }
+    try { fs.rmSync(stagingFile, {force: true}); } catch {}
+    throw error;
+  }
+
+  try {
+    fs.linkSync(stagingFile, file);
+  } catch (error) {
+    try { fs.rmSync(stagingFile, {force: true}); } catch {}
     if (error?.code === "EEXIST") {
       const locked = new Error("MISSION_CONTROL_LOCKED");
       locked.lock_file = file;
@@ -164,21 +200,11 @@ export function acquireMissionLock(missionRoot, {
     throw error;
   }
 
-  try {
-    fs.writeFileSync(fd, JSON.stringify({
-      protocol: "devexec.mission-lock",
-      schema_version: 1,
-      token,
-      owner,
-      pid: process.pid,
-      acquired_at: now,
-    }, null, 2) + "\n", "utf8");
-    fs.fsyncSync(fd);
-  } catch (error) {
-    try { fs.closeSync(fd); } catch {}
-    try { fs.rmSync(file, {force: true}); } catch {}
-    throw error;
-  }
+  // Publication already succeeded. Staging cleanup is deliberately best-effort:
+  // throwing after linkSync() would tell the caller acquisition failed while a
+  // valid canonical lock actually exists. A crash here can leave a harmless
+  // non-canonical staging alias; the canonical lock remains parseable/recoverable.
+  try { fs.rmSync(stagingFile, {force: true}); } catch {}
 
   let released = false;
   return {
@@ -189,7 +215,6 @@ export function acquireMissionLock(missionRoot, {
     release() {
       if (released) return false;
       released = true;
-      fs.closeSync(fd);
 
       let current;
       try {
@@ -199,7 +224,9 @@ export function acquireMissionLock(missionRoot, {
         lost.cause = error;
         throw lost;
       }
-      if (current?.token !== token) throw new Error("MISSION_CONTROL_LOCK_OWNERSHIP_LOST");
+      if (current?.token !== token || current?.pid !== process.pid) {
+        throw new Error("MISSION_CONTROL_LOCK_OWNERSHIP_LOST");
+      }
       fs.rmSync(file);
       return true;
     },
