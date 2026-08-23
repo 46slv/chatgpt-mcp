@@ -9,25 +9,33 @@ import {fileURLToPath} from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const devexec = path.join(here, "devexec.mjs");
 
-test("devexec autonomous-start CLI launches exactly one real child and duplicate invocation does not replay", async () => {
-  const base = fs.mkdtempSync(
-    path.join(os.tmpdir(), "devexec-autonomous-cli-e2e-"),
+function writeParentState(base, {
+  phase = "COMPLETE",
+  pending = null,
+} = {}) {
+  const stateDir = path.join(
+    base,
+    "ChatGPTMCPProbe",
+    "dev-exec-state",
   );
 
-  const child = path.join(base, "child.mjs");
-  const marker = path.join(base, "child.txt");
+  fs.mkdirSync(stateDir, {recursive: true});
 
-  try {
-    fs.writeFileSync(
-      child,
-      [
-        'import fs from "node:fs";',
-        `fs.appendFileSync(${JSON.stringify(marker)}, "once\\n", "utf8");`,
-      ].join("\n") + "\n",
-      "utf8",
-    );
+  fs.writeFileSync(
+    path.join(stateDir, "RUN-ROOT.json"),
+    JSON.stringify({
+      run_id: "RUN-ROOT",
+      phase,
+      pending,
+    }),
+    "utf8",
+  );
+}
 
-    const args = [
+function invoke(base, child) {
+  return spawnSync(
+    process.execPath,
+    [
       devexec,
       "autonomous-start",
       "--mission", "MISSION-CLI-E2E",
@@ -37,23 +45,40 @@ test("devexec autonomous-start CLI launches exactly one real child and duplicate
       "--entry", child,
       "--target", "devexec-selfdev",
       "--constraint", "preserve reliability",
-    ];
-
-    const env = {
-      ...process.env,
-      LOCALAPPDATA: base,
-    };
-
-    const first = spawnSync(
-      process.execPath,
-      args,
-      {
-        encoding: "utf8",
-        env,
-        windowsHide: true,
-        timeout: 15000,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LOCALAPPDATA: base,
       },
+      windowsHide: true,
+      timeout: 15000,
+    },
+  );
+}
+
+test("devexec autonomous-start launches exactly one real child from durable safe parent and duplicate does not replay", async () => {
+  const base = fs.mkdtempSync(
+    path.join(os.tmpdir(), "devexec-autonomous-cli-e2e-"),
+  );
+
+  const child = path.join(base, "child.mjs");
+  const marker = path.join(base, "child.txt");
+
+  try {
+    writeParentState(base);
+
+    fs.writeFileSync(
+      child,
+      [
+        'import fs from "node:fs";',
+        `fs.appendFileSync(${JSON.stringify(marker)}, "once\\n", "utf8");`,
+      ].join("\n") + "\n",
+      "utf8",
     );
+
+    const first = invoke(base, child);
 
     assert.equal(
       first.status,
@@ -74,22 +99,18 @@ test("devexec autonomous-start CLI launches exactly one real child and duplicate
       !fs.existsSync(marker) &&
       Date.now() < deadline
     ) {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await new Promise(
+        resolve => setTimeout(resolve, 20),
+      );
     }
 
     assert.equal(fs.existsSync(marker), true);
-    assert.equal(fs.readFileSync(marker, "utf8"), "once\n");
-
-    const second = spawnSync(
-      process.execPath,
-      args,
-      {
-        encoding: "utf8",
-        env,
-        windowsHide: true,
-        timeout: 15000,
-      },
+    assert.equal(
+      fs.readFileSync(marker, "utf8"),
+      "once\n",
     );
+
+    const second = invoke(base, child);
 
     assert.equal(
       second.status,
@@ -103,14 +124,104 @@ test("devexec autonomous-start CLI launches exactly one real child and duplicate
 
     assert.equal(secondReceipt.dispatched, false);
     assert.equal(secondReceipt.replay_blocked, true);
-    assert.equal(secondReceipt.request_deduplicated, true);
+    assert.equal(
+      secondReceipt.request_deduplicated,
+      true,
+    );
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(
+      resolve => setTimeout(resolve, 200),
+    );
 
     assert.equal(
       fs.readFileSync(marker, "utf8"),
       "once\n",
       "duplicate CLI invocation must not replay child",
+    );
+  } finally {
+    fs.rmSync(base, {recursive: true, force: true});
+  }
+});
+
+test("devexec autonomous-start rejects incomplete parent before child side effect", () => {
+  const base = fs.mkdtempSync(
+    path.join(os.tmpdir(), "devexec-autonomous-cli-unsafe-"),
+  );
+
+  const child = path.join(base, "child.mjs");
+  const marker = path.join(base, "child.txt");
+
+  try {
+    writeParentState(base, {
+      phase: "EXECUTING",
+    });
+
+    fs.writeFileSync(
+      child,
+      [
+        'import fs from "node:fs";',
+        `fs.appendFileSync(${JSON.stringify(marker)}, "unexpected\\n", "utf8");`,
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = invoke(base, child);
+
+    assert.notEqual(result.status, 0);
+
+    assert.match(
+      result.stderr + result.stdout,
+      /MISSION_AUTONOMOUS_START_UNSAFE_BOUNDARY/,
+    );
+
+    assert.equal(
+      fs.existsSync(marker),
+      false,
+      "unsafe parent must not launch a child",
+    );
+  } finally {
+    fs.rmSync(base, {recursive: true, force: true});
+  }
+});
+
+test("devexec autonomous-start rejects pending parent before child side effect", () => {
+  const base = fs.mkdtempSync(
+    path.join(os.tmpdir(), "devexec-autonomous-cli-pending-"),
+  );
+
+  const child = path.join(base, "child.mjs");
+  const marker = path.join(base, "child.txt");
+
+  try {
+    writeParentState(base, {
+      phase: "COMPLETE",
+      pending: {
+        kind: "execution",
+      },
+    });
+
+    fs.writeFileSync(
+      child,
+      [
+        'import fs from "node:fs";',
+        `fs.appendFileSync(${JSON.stringify(marker)}, "unexpected\\n", "utf8");`,
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = invoke(base, child);
+
+    assert.notEqual(result.status, 0);
+
+    assert.match(
+      result.stderr + result.stdout,
+      /MISSION_AUTONOMOUS_START_BLOCKED_BY_IN_FLIGHT_ACTION/,
+    );
+
+    assert.equal(
+      fs.existsSync(marker),
+      false,
+      "pending parent must not launch a child",
     );
   } finally {
     fs.rmSync(base, {recursive: true, force: true});
