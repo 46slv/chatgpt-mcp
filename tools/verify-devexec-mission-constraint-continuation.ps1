@@ -65,6 +65,7 @@ $testFiles = @(
     "tools/devexec-mission-raw-tree.test.mjs",
     "tools/devexec-mission-raw-git-bootstrap.test.mjs",
     "tools/devexec-mission-reviewed-host-git-env.test.mjs",
+    "tools/devexec-mission-git-template-authority.test.mjs",
     "tools/devexec-mission-reviewed-host-launch.test.mjs"
 )
 
@@ -135,5 +136,6 @@ Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit dri
 Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, BOM-free UTF-8 evidence, and post-write readback requirements=PASS"
 Write-Host "Raw snapshot source verifier reproduces canonical Git tree identity and fails on byte/path drift=PASS"
 Write-Host "Raw snapshot synthetic Git carrier is created only after exact-tree proof and remains source-tree clean=PASS"
+Write-Host "Git template/config/init authority isolation prevents inherited metadata injection into the RAW carrier=PASS"
 Write-Host "Reviewed-host launcher strips Git routing/config/attribute/replace-object authority before invoking the unchanged reviewed verifier and host packet=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
