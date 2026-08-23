@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import {spawn} from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {fileURLToPath} from "node:url";
 
 import {verifyMissionHostEvidence} from "./devexec-mission-host-evidence-verify.mjs";
 
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const VERIFIER = path.join(HERE, "devexec-mission-host-evidence-verify.mjs");
 const HEAD = "24c2c37913ff39fb9dda7562decddaadaa82563f";
 const REQUIRED = [
   ["00-repo-preflight.txt", "MISSION_HOST_PREFLIGHT=PASS"],
@@ -73,6 +77,26 @@ function expectCode(fn, code) {
   assert.throws(fn, error => {
     assert.equal(error?.message, code);
     return true;
+  });
+}
+
+function runVerifierChild(fx, receipt) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      VERIFIER,
+      "--summary", fx.summaryFile,
+      "--expected-head", HEAD,
+      "--expected-mission-probe-root", fx.missionRoot,
+      "--receipt", receipt,
+    ], {stdio: ["ignore", "pipe", "pipe"]});
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve({code, signal, stdout, stderr}));
   });
 }
 
@@ -220,6 +244,28 @@ test("verification receipt is immutable and is never overwritten", () => {
       "MISSION_HOST_EVIDENCE_RECEIPT_EXISTS",
     );
     assert.equal(fs.readFileSync(receipt, "utf8"), "existing\n");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("competing verifier processes cannot replace the winning receipt", async () => {
+  const fx = fixture();
+  try {
+    const receipt = path.join(fx.evidenceRoot, "VERIFICATION.json");
+    const results = await Promise.all([
+      runVerifierChild(fx, receipt),
+      runVerifierChild(fx, receipt),
+    ]);
+    const codes = results.map(result => result.code).sort((a, b) => a - b);
+    assert.deepEqual(codes, [0, 2]);
+    const winner = results.find(result => result.code === 0);
+    const loser = results.find(result => result.code === 2);
+    assert.match(winner.stdout, /MISSION_HOST_EVIDENCE_VERIFY=PASS/);
+    assert.match(loser.stderr, /MISSION_HOST_EVIDENCE_RECEIPT_EXISTS/);
+    const persisted = JSON.parse(fs.readFileSync(receipt, "utf8"));
+    assert.equal(persisted.status, "PASS");
+    assert.equal(persisted.summary_sha256, sha256(fx.summaryFile));
   } finally {
     fx.cleanup();
   }
