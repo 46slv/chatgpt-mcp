@@ -19,13 +19,14 @@ For evidence verification, silent replacement is undesirable: the SHA-256 receip
 - valid BOM-free UTF-8 is still hashed and interpreted from the same in-memory byte snapshot.
 - the rule applies to `SUMMARY.json`, all five component logs, and persisted verification receipt readback.
 
-`tools/devexec-mission-host-utf8-contract.test.mjs` now adds runtime regressions for BOM-prefixed SUMMARY and malformed component bytes whose recorded SHA is deliberately updated to match. The latter proves that a valid hash alone cannot bypass the encoding contract.
+`tools/devexec-mission-host-utf8-contract.test.mjs` now adds runtime regressions for BOM-prefixed SUMMARY and malformed component bytes whose recorded SHA is deliberately updated to match. The latter proves that a valid hash alone cannot bypass the encoding contract. A positive regression also requires valid Japanese/non-ASCII UTF-8 with Windows CRLF line endings to continue verifying successfully, so the strict decoder does not narrow the legitimate Windows evidence format.
 
 ## Validation performed in this cloud run
 
 - GitHub base/head readback and exact branch compare.
 - Updated production verifier and test file readback from GitHub.
 - Source-faithful Node v22.16.0 semantic probe for the new decoder/read-snapshot logic: valid UTF-8 PASS; BOM rejection PASS; malformed UTF-8 rejection PASS; marker `MISSION_HOST_EVIDENCE_STRICT_UTF8_SEMANTIC_PROBE=PASS`.
+- Focused Windows-like semantic probe: non-ASCII UTF-8 + CRLF PASS; BOM rejection PASS; malformed UTF-8 rejection PASS; marker `MISSION_HOST_EVIDENCE_UTF8_CRLF_SEMANTIC_PROBE=PASS`.
 
 Not proven here:
 
@@ -36,7 +37,7 @@ Not proven here:
 - Local Agent/Local Executor E2E;
 - remaining forced-kill matrix and power-loss durability.
 
-The cloud container still cannot resolve `github.com` directly for a normal checkout, so connector readback and the focused semantic probe must not be represented as a full-checkout PASS.
+The cloud container still cannot resolve `github.com` directly for a normal checkout, so connector readback and the focused semantic probes must not be represented as a full-checkout PASS.
 
 ## Next host/check-out action
 
@@ -46,4 +47,6 @@ On the exact reviewed continuation head, first run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-devexec-mission-constraint-continuation.ps1
 ```
 
-Then run the pinned SHIRO-WS host packet and verify that both the runtime writer and runtime verifier enforce the same BOM-free strict UTF-8 contract before accepting `SUMMARY.json` / component evidence. Only after the Mission reliability acceptance packet passes should `GOAL_PATCH / supersede_current_goal` or the Control API/service stage expand.
+Then run the pinned SHIRO-WS host packet and verify that both the runtime writer and runtime verifier enforce the same BOM-free strict UTF-8 contract before accepting `SUMMARY.json` / component evidence. Read back `SUMMARY.json`, `VERIFICATION.json`, both SHA-256 values, all five component logs/hashes, and `mission_probe_root`. The host evidence must demonstrate that valid non-ASCII/CRLF text is accepted while BOM-prefixed or malformed UTF-8 evidence fails closed.
+
+Only after the Mission reliability acceptance packet passes should `GOAL_PATCH / supersede_current_goal` or the Control API/service stage expand.
