@@ -274,7 +274,6 @@ export function verifyMissionHostEvidence(summaryPath, {
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
-      fs.renameSync(tmp, receiptPath);
     } catch (cause) {
       if (fd != null) {
         try { fs.closeSync(fd); } catch {}
@@ -285,6 +284,29 @@ export function verifyMissionHostEvidence(summaryPath, {
         receipt_path: receiptPath,
       });
     }
+
+    try {
+      // Publish without replacement. renameSync() would overwrite an existing
+      // destination on POSIX if a competing verifier won the race after the
+      // earlier exists check. A hard link gives an atomic create-if-absent
+      // boundary while preserving the already-fsynced receipt bytes.
+      fs.linkSync(tmp, receiptPath);
+    } catch (cause) {
+      try { fs.rmSync(tmp, {force: true}); } catch {}
+      if (cause?.code === "EEXIST" || fs.existsSync(receiptPath)) {
+        throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_EXISTS", {
+          cause,
+          receipt_path: receiptPath,
+        });
+      }
+      throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_ATOMIC_PUBLISH_FAILED", {
+        cause,
+        receipt_path: receiptPath,
+        fs_code: cause?.code ?? null,
+      });
+    }
+    try { fs.rmSync(tmp, {force: true}); } catch {}
+
     report.receipt_file = receiptPath;
     report.receipt_sha256 = sha256File(receiptPath);
   }
