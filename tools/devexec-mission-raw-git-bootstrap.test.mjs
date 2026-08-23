@@ -155,3 +155,43 @@ test("pre-existing Git metadata is rejected rather than reusing ambiguous author
     cleanup(fixture);
   }
 });
+
+test("nested Git metadata is rejected before root repository metadata is created", () => {
+  const fixture = makeOriginal();
+  try {
+    const nestedGit = path.join(fixture.root, "nested", ".git");
+    fs.mkdirSync(nestedGit, {recursive: true});
+    fs.writeFileSync(path.join(nestedGit, "config"), "hidden\n");
+    assert.throws(
+      () => prepareRawSnapshotExactGitWorkspace(fixture.root, {
+        expectedTree: fixture.tree,
+        expectedCommit: fixture.head,
+        commitObject: fixture.commitObject,
+      }),
+      error => error?.message === "MISSION_RAW_SNAPSHOT_NESTED_GIT_METADATA_FORBIDDEN",
+    );
+    assert.equal(fs.existsSync(path.join(fixture.root, ".git")), false);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("dangling root .git symlink is rejected as pre-existing metadata", {skip: process.platform === "win32"}, () => {
+  const fixture = makeOriginal();
+  try {
+    const gitPath = path.join(fixture.root, ".git");
+    fs.symlinkSync(path.join(fixture.root, "missing-git-target"), gitPath, "dir");
+    assert.equal(fs.existsSync(gitPath), false, "precondition: dangling link is invisible to existsSync");
+    assert.throws(
+      () => prepareRawSnapshotExactGitWorkspace(fixture.root, {
+        expectedTree: fixture.tree,
+        expectedCommit: fixture.head,
+        commitObject: fixture.commitObject,
+      }),
+      error => error?.message === "MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS",
+    );
+    assert.equal(fs.lstatSync(gitPath).isSymbolicLink(), true);
+  } finally {
+    cleanup(fixture);
+  }
+});
