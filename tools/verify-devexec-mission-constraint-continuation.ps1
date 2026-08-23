@@ -7,6 +7,7 @@ Set-Location $repoRoot
 $node = (Get-Command node -ErrorAction Stop).Source
 
 $syntaxFiles = @(
+    "tools/devexec-durable-write.mjs",
     "tools/devexec-mission-objective.mjs",
     "tools/devexec-mission-amendment-runtime.mjs",
     "tools/devexec-mission-loop-boundary.mjs",
@@ -29,6 +30,7 @@ $syntaxFiles = @(
 )
 
 $testFiles = @(
+    "tools/devexec-durable-write.test.mjs",
     "tools/devexec-mission-objective.test.mjs",
     "tools/devexec-mission-amendment-runtime.test.mjs",
     "tools/devexec-mission-loop-boundary.test.mjs",
@@ -128,3 +130,7 @@ Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=P
 Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit drift and writes an immutable verification receipt=PASS"
 Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, BOM-free UTF-8 evidence, and post-write readback requirements=PASS"
 Write-Host "Local Agent/Local Executor integration, power-loss durability, and pinned SHIRO-WS clean-checkout host acceptance remain separate and are NOT proven by this script."
+Write-Host "Mission JSON state writers fsync temporary file bytes before atomic rename=PASS"
+Write-Host "Forced external termination after durable LAUNCHING and real child spawn before receipt=PASS"
+Write-Host "Directory metadata durability remains host-dependent: SHIRO-WS Node directory fsync returns EPERM, so full power-loss durability remains OPEN."
+Write-Host "Local Agent/Local Executor live read-only E2E is separate host evidence and has passed on SHIRO-WS; pinned clean-checkout host acceptance remains separate."
