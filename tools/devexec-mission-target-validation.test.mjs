@@ -70,6 +70,60 @@ for (const [label, value] of [
   });
 }
 
+test("durable constraints corruption is rejected before PENDING -> LAUNCHING", async () => {
+  const control = controlFor();
+  const requested = request(control, "valid-target");
+  const file = path.join(control.paths.root, "launch-state.json");
+  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+  persisted.launches[0].constraints = "corrupt";
+  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+
+  let spawnCalls = 0;
+  await assert.rejects(
+    () => dispatchMissionChildLaunch(control, requested.launch, {
+      launch_attempt_id: "ATTEMPT-1",
+      launcher_request_id: "REQUEST-1",
+      entry_path: "devexec-goal.mjs",
+      node_path: "node",
+      spawn_impl: () => {
+        spawnCalls += 1;
+        throw new Error("spawn must not be reached");
+      },
+    }),
+    /constraints must be an array/,
+  );
+  assert.equal(spawnCalls, 0);
+  const after = readMissionLaunchState(control).launches[0];
+  assert.equal(after.status, "PENDING");
+  assert.equal(after.launch_attempt_id, null);
+  assert.equal(after.launcher_request_id, null);
+});
+
+test("invalid launch entry path is rejected before PENDING -> LAUNCHING", async () => {
+  const control = controlFor();
+  const requested = request(control, "valid-target");
+
+  let spawnCalls = 0;
+  await assert.rejects(
+    () => dispatchMissionChildLaunch(control, requested.launch, {
+      launch_attempt_id: "ATTEMPT-1",
+      launcher_request_id: "REQUEST-1",
+      entry_path: "   ",
+      node_path: "node",
+      spawn_impl: () => {
+        spawnCalls += 1;
+        throw new Error("spawn must not be reached");
+      },
+    }),
+    /entry_path required/,
+  );
+  assert.equal(spawnCalls, 0);
+  const after = readMissionLaunchState(control).launches[0];
+  assert.equal(after.status, "PENDING");
+  assert.equal(after.launch_attempt_id, null);
+  assert.equal(after.launcher_request_id, null);
+});
+
 test("target alias is canonicalized before it becomes durable launch state", () => {
   const control = controlFor();
   const requested = request(control, "  child-target  ");
