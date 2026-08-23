@@ -17,6 +17,17 @@ if (helperMode === "crash_with_lock") {
   if (!root) process.exit(91);
   acquireMissionLock(root, {owner: `resume-helper:${process.pid}`});
   process.exit(77);
+} else if (helperMode === "crash_during_recovery") {
+  const root = process.env.DEVEXEC_MISSION_RESUME_ROOT;
+  if (!root) process.exit(92);
+  const canonical = missionLockPath(root);
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = (target, ...args) => {
+    if (path.resolve(String(target)) === path.resolve(canonical)) process.exit(78);
+    return originalRmSync(target, ...args);
+  };
+  recoverOrResumeStaleMissionLock(root);
+  process.exit(93);
 } else {
   function withRoot(fn) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-lock-resume-"));
@@ -62,6 +73,33 @@ if (helperMode === "crash_with_lock") {
     const evidence = JSON.parse(fs.readFileSync(recovered.quarantine_file, "utf8"));
     assert.equal(evidence.token, inspected.record.token);
     assert.equal(evidence.pid, inspected.record.pid);
+  }));
+
+  test("resumes after a real recovery process exits after ownership claim but before canonical unlink", () => withRoot(root => {
+    const inspected = crashWithLock(root);
+    const canonical = missionLockPath(root);
+    const crashedRecoverer = spawnSync(process.execPath, [self], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DEVEXEC_MISSION_RESUME_HELPER: "crash_during_recovery",
+        DEVEXEC_MISSION_RESUME_ROOT: root,
+      },
+    });
+    assert.equal(crashedRecoverer.status, 78, crashedRecoverer.stderr || crashedRecoverer.stdout);
+    assert.equal(fs.existsSync(canonical), true);
+
+    const ownerPrefix = `${path.basename(canonical)}.stale-${inspected.record.token}.recover-`;
+    const ownerFiles = fs.readdirSync(path.dirname(canonical)).filter(name => name.startsWith(ownerPrefix));
+    assert.equal(ownerFiles.length, 1);
+    assert.ok(ownerFiles[0].includes(`recover-${crashedRecoverer.pid}-`));
+
+    const recovered = recoverOrResumeStaleMissionLock(root);
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.status, "STALE_RECOVERED");
+    assert.equal(fs.existsSync(canonical), false);
+    assert.equal(fs.existsSync(path.join(path.dirname(canonical), ownerFiles[0])), false);
+    assert.equal(fs.existsSync(recovered.quarantine_file), true);
   }));
 
   test("atomically takes over a PID-bearing recovery owner left by a crashed recoverer", () => withRoot(root => {
