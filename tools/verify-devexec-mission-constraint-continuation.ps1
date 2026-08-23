@@ -24,7 +24,8 @@ $syntaxFiles = @(
     "tools/devexec-mission-recovery-interlock-probe.mjs",
     "tools/devexec-mission-recovery-entry-interlock-probe.mjs",
     "tools/devexec-mission-host-preflight.mjs",
-    "tools/devexec-mission-host-lock-acceptance.mjs"
+    "tools/devexec-mission-host-lock-acceptance.mjs",
+    "tools/devexec-mission-host-evidence-verify.mjs"
 )
 
 $testFiles = @(
@@ -54,6 +55,7 @@ $testFiles = @(
     "tools/devexec-local-agent-mission-boundary.test.mjs",
     "tools/devexec-mission-continuation-dispatch.test.mjs",
     "tools/devexec-mission-host-preflight.test.mjs",
+    "tools/devexec-mission-host-evidence-verify.test.mjs",
     "tools/devexec-mission-host-wrapper-contract.test.mjs"
 )
 
@@ -120,5 +122,6 @@ Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlin
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
 Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
-Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, and component PASS-marker requirements=PASS"
+Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit drift and writes an immutable verification receipt=PASS"
+Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, and post-write readback requirements=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
