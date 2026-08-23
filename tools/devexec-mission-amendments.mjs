@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {durableWriteJsonAtomic} from "./devexec-durable-write.mjs";
+
 const KINDS = new Set(["MISSION_AMENDMENT", "GOAL_PATCH"]);
 const APPLY_MODES = new Set(["next_safe_boundary", "after_current_goal", "supersede_current_goal"]);
 const MANUAL_DISPOSITIONS = new Set(["REJECTED", "CANCELLED"]);
@@ -172,9 +174,7 @@ export function carryAmendmentsToRun(queue, runId) {
 export function saveAmendmentQueue(file, queue) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, {recursive: true});
-  const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(temp, JSON.stringify(queue, null, 2) + "\n", "utf8");
-  fs.renameSync(temp, file);
+  durableWriteJsonAtomic(file, queue);
 }
 
 export function loadAmendmentQueue(file) {
