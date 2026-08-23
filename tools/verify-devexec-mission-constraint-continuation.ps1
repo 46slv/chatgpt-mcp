@@ -25,7 +25,8 @@ $syntaxFiles = @(
     "tools/devexec-mission-recovery-entry-interlock-probe.mjs",
     "tools/devexec-mission-host-preflight.mjs",
     "tools/devexec-mission-host-lock-acceptance.mjs",
-    "tools/devexec-mission-host-evidence-verify.mjs"
+    "tools/devexec-mission-host-evidence-verify.mjs",
+    "tools/devexec-mission-raw-tree.mjs"
 )
 
 $testFiles = @(
@@ -57,7 +58,8 @@ $testFiles = @(
     "tools/devexec-mission-host-preflight.test.mjs",
     "tools/devexec-mission-host-evidence-verify.test.mjs",
     "tools/devexec-mission-host-wrapper-contract.test.mjs",
-    "tools/devexec-mission-host-utf8-contract.test.mjs"
+    "tools/devexec-mission-host-utf8-contract.test.mjs",
+    "tools/devexec-mission-raw-tree.test.mjs"
 )
 
 $regressionProbes = @(
@@ -125,4 +127,5 @@ Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual 
 Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
 Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit drift and writes an immutable verification receipt=PASS"
 Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, BOM-free UTF-8 evidence, and post-write readback requirements=PASS"
+Write-Host "Raw snapshot source verifier reproduces canonical Git tree identity and fails on byte/path drift=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
