@@ -49,19 +49,27 @@ test("root .git metadata and empty directories do not alter the source tree iden
   assert.equal(observed.file_count, 1);
 }));
 
-test("nested .git metadata is forbidden even when git status and tree would hide it", () => withTemp(root => {
+test("nested .git metadata is forbidden even when Git status and index tree hide it", () => withTemp(root => {
   fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n");
   const expected = gitTree(root);
-  const nested = path.join(root, "sub", ".git");
-  fs.mkdirSync(nested, {recursive: true});
-  fs.writeFileSync(path.join(nested, "evil"), "hidden metadata\n");
-
-  const porcelain = execFileSync(
+  const statusBefore = execFileSync(
     "git",
     ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
     {encoding: "utf8"},
   ).trim();
-  assert.equal(porcelain, "", "Git itself hides nested .git metadata from porcelain status");
+  const nested = path.join(root, "sub", ".git");
+  fs.mkdirSync(nested, {recursive: true});
+  fs.writeFileSync(path.join(nested, "evil"), "hidden metadata\n");
+
+  const statusAfter = execFileSync(
+    "git",
+    ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+    {encoding: "utf8"},
+  ).trim();
+  assert.equal(statusAfter, statusBefore, "Git porcelain does not reveal the nested .git addition");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  const treeAfter = execFileSync("git", ["-C", root, "write-tree"], {encoding: "utf8"}).trim();
+  assert.equal(treeAfter, expected, "Git index tree does not include nested .git metadata");
 
   assert.throws(
     () => verifyRawSnapshotGitTree(root, {expectedTree: expected}),
