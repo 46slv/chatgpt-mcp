@@ -109,40 +109,76 @@ export function recoverStaleMissionLock(missionRoot) {
     throw error;
   }
 
-  // The lock file itself still excludes new acquirers while we verify that the
-  // exact dead-owner record we inspected is the one being quarantined. If a
-  // concurrent recovery replaced/removed it, fail closed rather than touching
-  // a newer owner's lock.
-  const current = readMissionLockRecord(inspection.file);
-  if (!current) {
-    return {
-      recovered: false,
-      status: "UNLOCKED",
-      recoverable: false,
-      file: inspection.file,
-      record: null,
-      quarantine_file: null,
-    };
-  }
-  if (current.token !== inspection.record.token || current.pid !== inspection.record.pid) {
-    const error = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
-    error.lock_file = inspection.file;
-    throw error;
+  // Recovery itself needs an atomic ownership claim. A plain
+  // read/compare/rename sequence allows two recoverers to validate the same
+  // stale record; after the first frees the canonical path, the second rename
+  // could target a replacement lock. Create a deterministic hard-link evidence
+  // path first. Only one recoverer can create it, and after canonical unlink
+  // this recoverer never touches the canonical path again.
+  const quarantineFile = `${inspection.file}.stale-${inspection.record.token}.json`;
+  try {
+    fs.linkSync(inspection.file, quarantineFile);
+  } catch (error) {
+    if (error?.code === "EEXIST" || fs.existsSync(quarantineFile)) {
+      const claimed = new Error("MISSION_CONTROL_LOCK_RECOVERY_ALREADY_CLAIMED");
+      claimed.lock_file = inspection.file;
+      claimed.quarantine_file = quarantineFile;
+      throw claimed;
+    }
+    if (error?.code === "ENOENT") {
+      const current = inspectMissionLock(missionRoot);
+      if (current.status === "UNLOCKED") {
+        return {recovered: false, ...current, quarantine_file: null};
+      }
+      const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
+      changed.lock_file = inspection.file;
+      changed.lock_status = current.status;
+      throw changed;
+    }
+    const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_ATOMIC_CLAIM_FAILED");
+    claimError.cause = error;
+    claimError.lock_file = inspection.file;
+    claimError.quarantine_file = quarantineFile;
+    claimError.fs_code = error?.code ?? null;
+    throw claimError;
   }
 
-  // Preserve the stale lock as evidence instead of deleting it. Renaming within
-  // the Mission directory atomically frees the canonical lock path for a later
-  // explicit acquire while retaining the dead owner's token/pid/timestamp.
-  const quarantineFile = `${inspection.file}.stale-${inspection.record.token}.json`;
-  fs.renameSync(inspection.file, quarantineFile);
-  return {
-    recovered: true,
-    status: "STALE_RECOVERED",
-    recoverable: false,
-    file: inspection.file,
-    record: inspection.record,
-    quarantine_file: quarantineFile,
-  };
+  let keepQuarantine = false;
+  try {
+    const claimed = readMissionLockRecord(quarantineFile);
+    const current = readMissionLockRecord(inspection.file);
+    if (
+      !current ||
+      claimed?.token !== inspection.record.token ||
+      claimed?.pid !== inspection.record.pid ||
+      current.token !== inspection.record.token ||
+      current.pid !== inspection.record.pid
+    ) {
+      const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
+      changed.lock_file = inspection.file;
+      throw changed;
+    }
+
+    // The quarantine hard link pins exactly the stale inode we validated. Once
+    // the canonical name is unlinked, a new owner may safely publish there; this
+    // recovery path must never rename/remove the canonical path again.
+    fs.rmSync(inspection.file);
+    keepQuarantine = true;
+    return {
+      recovered: true,
+      status: "STALE_RECOVERED",
+      recoverable: false,
+      file: inspection.file,
+      record: inspection.record,
+      quarantine_file: quarantineFile,
+    };
+  } finally {
+    // If verification or canonical unlink failed, remove only the claim created
+    // by this call. Never weaken or replace the canonical lock on an error path.
+    if (!keepQuarantine) {
+      try { fs.rmSync(quarantineFile, {force: true}); } catch {}
+    }
+  }
 }
 
 function stagingLockPath(file, pid, token) {
