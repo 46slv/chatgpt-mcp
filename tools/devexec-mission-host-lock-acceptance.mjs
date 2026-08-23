@@ -166,6 +166,7 @@ async function runThenableLifetimeCrossProcess() {
 async function childHoldLock(root, readyFile) {
   const lock = acquireMissionLock(root, {owner: "host-acceptance-holder"});
   fs.writeFileSync(readyFile, JSON.stringify({pid: process.pid, token: lock.token}) + "\n", "utf8");
+  setInterval(() => {}, 1000);
   await new Promise(() => {});
 }
 
