@@ -22,7 +22,7 @@ The production lock uses an exclusive `mission-control.lock` file and intentiona
 
 That default behavior prevents unsafe blind takeover, but it also means a single process crash can permanently block `openMissionControl()` and therefore block restart/self-launch before later replay guards can even inspect Mission state.
 
-This review adds an **explicit, conservative recovery primitive** rather than changing default acquisition behavior:
+This review adds a conservative recovery surface without changing normal lock acquisition:
 
 - new locks durably record `pid` in addition to token/owner/time;
 - `inspectMissionLock()` classifies `UNLOCKED`, `HELD`, `STALE`, `UNKNOWN_OWNER`, `INVALID`, or `PROBE_FAILED`;
@@ -34,20 +34,28 @@ This review adds an **explicit, conservative recovery primitive** rather than ch
 
 A separate real-process regression covers dead-owner quarantine + later reacquire, live-owner refusal, and legacy/no-PID fail-closed behavior.
 
-## Why recovery is not wired automatically here
+### 3. Recovery is now wired only at the pre-side-effect Mission entry boundary
 
-The correct recovery call site is a restart/heartbeat decision boundary, not generic lock acquisition. Automatic takeover inside `acquireMissionLock()` would erase the distinction between normal contention and a verified dead owner and would make every caller capable of changing recovery policy.
+Leaving the primitive completely unwired would still make unattended restart impossible. Wiring it inside generic `acquireMissionLock()` or retrying the whole Local Agent start after an arbitrary lock failure would be unsafe: a lock failure can occur after the Local Agent side effect, and a broad retry could duplicate that side effect.
 
-The next integration should therefore:
+`startMissionLocalAgent()` therefore performs one narrow entry preflight **before any Local Agent start callback can run**:
 
-1. encounter `MISSION_CONTROL_LOCKED` during an explicit restart/recovery path;
-2. inspect the lock;
-3. quarantine it only when classification is `STALE`;
-4. reopen Mission state and launch/admission journals from disk;
-5. preserve existing fail-closed behavior for `LAUNCHING`, `AMBIGUOUS`, `STARTING`, and other uncertain side-effect states;
-6. continue only through the existing typed replay/continuation guards.
+1. resolve the Mission root;
+2. inspect the current lock;
+3. if and only if it is `STALE`, quarantine that exact dead-owner lock;
+4. if it is `HELD`, leave it untouched and allow normal `MISSION_CONTROL_LOCKED` behavior;
+5. if ownership is `UNKNOWN_OWNER`, `INVALID`, or `PROBE_FAILED`, fail with `MISSION_CONTROL_LOCK_RECOVERY_UNSAFE` before invoking Local Agent;
+6. continue through normal Mission state/admission/launch guards.
 
-`UNKNOWN_OWNER`, `INVALID`, `PROBE_FAILED`, and a live owner remain human/diagnostic boundaries until a stronger ownership proof exists.
+No later lock failure is auto-recovered or retried inside the same `startMissionLocalAgent()` call. A crash after `STARTING` or another side-effect fence therefore remains protected by the existing `STARTING`/`AMBIGUOUS` replay guards rather than causing a second Local Agent start.
+
+Focused entry-runtime regressions were added for verified dead-owner recovery, live-owner refusal, and legacy/no-PID refusal. The successful result also returns `lock_recovery` evidence for handoff/diagnostics.
+
+## Recovery safety boundary
+
+PID liveness is used only to authorize availability recovery. A reused PID can conservatively make a stale lock look `HELD` and delay recovery, but it does not authorize stealing a live lock. Locks without a durable PID are deliberately not migrated or guessed.
+
+A crash in the narrow interval before a valid owner record is durably written can leave an invalid/unknown lock; that remains fail-closed and is **not** silently deleted by this change. Power-loss/fsync and stronger process-instance identity remain separate reliability work.
 
 ## Validation performed in this cloud run
 
@@ -55,7 +63,7 @@ Confirmed through GitHub readback/compare:
 
 - Worker A base remained the reviewed 8-ahead branch before B branching.
 - Review branch changes are isolated from A/main.
-- New lock/recovery source and actual-dispatcher crash regression were written and read back.
+- New lock/recovery source, Mission-entry integration, regressions, and actual-dispatcher crash regression were written and read back.
 
 Executed locally against a source-faithful reconstruction of the new lock module + recovery test:
 
@@ -70,6 +78,7 @@ Not claimed in this cloud run:
 
 - full repository checkout verifier (cloud DNS cannot resolve `github.com`);
 - GitHub CI;
+- execution of the new Mission-entry integration tests against the complete repository module graph;
 - execution of the new actual-dispatcher crash test against the complete repository module graph;
 - Windows/SHIRO-WS behavior;
 - Local Agent/Local Executor integration;
@@ -78,9 +87,11 @@ Not claimed in this cloud run:
 
 ## Exact continuation
 
-Worker A should reconcile this small review branch, run `tools/verify-devexec-mission-constraint-continuation.ps1` in a real checkout, and then wire explicit stale-lock recovery only into the restart/heartbeat recovery path. On SHIRO-WS, add two acceptance cases before broadening scope:
+Worker A should reconcile this review branch and first run `tools/verify-devexec-mission-constraint-continuation.ps1` in a real checkout. On SHIRO-WS, add these acceptance cases before broadening scope:
 
-1. kill a process while it holds `mission-control.lock`; restart must classify the recorded dead PID as stale, quarantine that exact token/PID, reopen Mission state, and continue without deleting evidence;
-2. kill the parent after the production dispatcher has emitted a successful child spawn but before receipt persistence; restart must not spawn a second child.
+1. kill a process while it holds `mission-control.lock`; a fresh Mission entry must classify the recorded dead PID as stale, quarantine that exact token/PID, reopen Mission state, and continue without deleting evidence;
+2. hold the lock from a still-live process; a second Mission entry must not recover it and must not invoke Local Agent;
+3. kill the parent after the production dispatcher has emitted a successful child spawn but before receipt persistence; restart must not spawn a second child;
+4. preserve the existing target/constraint isolation and `STARTING`/`AMBIGUOUS` crash matrix.
 
 Keep live `GOAL_PATCH / supersede_current_goal` pending until this reliability boundary is closed. Afterward, continue the staged typed Control API/service work before GUI.
