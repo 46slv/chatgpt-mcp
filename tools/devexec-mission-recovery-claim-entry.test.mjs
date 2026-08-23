@@ -14,12 +14,10 @@ function withRoot(fn) {
   return Promise.resolve(fn(root)).finally(() => fs.rmSync(root, {recursive: true, force: true}));
 }
 
-test("interrupted stale-recovery claim blocks Mission entry before Local Agent side effects", () => withRoot(root => {
-  const missionId = "MISSION-RECOVERY-CLAIM";
-  const runId = "RUN-ROOT";
+function createDeadMissionLock(root, missionId) {
   const paths = resolveMissionPaths(root, missionId);
   const canonical = missionLockPath(paths.root);
-  const tokenFile = path.join(root, "dead-token.txt");
+  const tokenFile = path.join(root, `dead-token-${missionId}.txt`);
 
   const crashed = spawnSync(process.execPath, ["-e", [
     'const fs=require("node:fs");',
@@ -30,21 +28,63 @@ test("interrupted stale-recovery claim blocks Mission entry before Local Agent s
     'const token=crypto.randomUUID();',
     'fs.mkdirSync(path.dirname(file),{recursive:true});',
     'fs.writeFileSync(file,JSON.stringify({protocol:"devexec.mission-lock",schema_version:1,token,owner:`dead-entry:${process.pid}`,pid:process.pid,acquired_at:new Date().toISOString(),publication:"hardlink-v1"},null,2)+"\\n","utf8");',
-    'fs.writeFileSync(tokenFile,token,"utf8");',
+    'fs.writeFileSync(tokenFile,JSON.stringify({token,pid:process.pid}),"utf8");',
     'process.exit(77);',
   ].join("")], {encoding: "utf8"});
   assert.equal(crashed.status, 77, crashed.stderr || crashed.stdout);
 
-  const token = fs.readFileSync(tokenFile, "utf8").trim();
-  const quarantine = `${canonical}.stale-${token}.json`;
-  fs.linkSync(canonical, quarantine);
+  const dead = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+  return {canonical, ...dead};
+}
+
+test("interrupted neutral stale-recovery claim resumes before exactly one Local Agent start", () => withRoot(root => {
+  const missionId = "MISSION-RECOVERY-CLAIM";
+  const runId = "RUN-ROOT";
+  const dead = createDeadMissionLock(root, missionId);
+  const quarantine = `${dead.canonical}.stale-${dead.token}.json`;
+
+  // Model a crash after the neutral hard-link evidence was published but before
+  // the old stale canonical pathname was removed.
+  fs.linkSync(dead.canonical, quarantine);
+
+  let calls = 0;
+  const result = startMissionLocalAgent({
+    base: root,
+    identity: {mission_id: missionId, run_id: runId, parent_run_id: null},
+    start_attempt_id: "START-RESUMED-RECOVERY",
+    start_local_agent: () => {
+      calls += 1;
+      return {run_id: "LOCAL-AGENT-ONCE", decision: "COMPLETE"};
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.agent.run_id, "LOCAL-AGENT-ONCE");
+  assert.equal(result.lock_recovery.recovered, true);
+  assert.equal(result.lock_recovery.status, "STALE_RECOVERED");
+  assert.equal(result.lock_recovery.recovery_claim_mode, "movable-owner-v1");
+  assert.equal(fs.existsSync(dead.canonical), false);
+  assert.equal(fs.existsSync(result.lock_recovery.quarantine_file), true);
+  const evidence = JSON.parse(fs.readFileSync(result.lock_recovery.quarantine_file, "utf8"));
+  assert.equal(evidence.token, dead.token);
+  assert.equal(evidence.pid, dead.pid);
+}));
+
+test("a live recovery owner still blocks Mission entry before Local Agent side effects", () => withRoot(root => {
+  const missionId = "MISSION-LIVE-RECOVERY-OWNER";
+  const runId = "RUN-ROOT";
+  const dead = createDeadMissionLock(root, missionId);
+  const neutral = `${dead.canonical}.stale-${dead.token}.json`;
+  const liveOwner = `${dead.canonical}.stale-${dead.token}.recover-${process.pid}-live-owner.json`;
+  fs.linkSync(dead.canonical, neutral);
+  fs.renameSync(neutral, liveOwner);
 
   let calls = 0;
   assert.throws(
     () => startMissionLocalAgent({
       base: root,
       identity: {mission_id: missionId, run_id: runId, parent_run_id: null},
-      start_attempt_id: "START-INTERRUPTED-RECOVERY",
+      start_attempt_id: "START-MUST-BLOCK",
       start_local_agent: () => {
         calls += 1;
         return {run_id: "MUST-NOT-RUN", decision: "COMPLETE"};
@@ -54,10 +94,6 @@ test("interrupted stale-recovery claim blocks Mission entry before Local Agent s
   );
 
   assert.equal(calls, 0);
-  assert.equal(fs.existsSync(canonical), true);
-  assert.equal(fs.existsSync(quarantine), true);
-  const canonicalRecord = JSON.parse(fs.readFileSync(canonical, "utf8"));
-  const quarantineRecord = JSON.parse(fs.readFileSync(quarantine, "utf8"));
-  assert.equal(canonicalRecord.token, token);
-  assert.equal(quarantineRecord.token, token);
+  assert.equal(fs.existsSync(dead.canonical), true);
+  assert.equal(fs.existsSync(liveOwner), true);
 }));
