@@ -104,6 +104,43 @@ test("durable constraints corruption is rejected before PENDING -> LAUNCHING", a
   assert.equal(after.launcher_request_id, null);
 });
 
+for (const [field, value, expected] of [
+  ["goal", "   ", /launch\.goal required/],
+  ["parent_run_id", "", /launch\.parent_run_id required/],
+  ["child_run_id", null, /launch\.child_run_id required/],
+]) {
+  test(`durable ${field} corruption is rejected before PENDING -> LAUNCHING`, async () => {
+    const control = controlFor();
+    const requested = request(control, "valid-target");
+    const file = path.join(control.paths.root, "launch-state.json");
+    const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+    persisted.launches[0][field] = value;
+    fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+
+    let spawnCalls = 0;
+    await assert.rejects(
+      () => dispatchMissionChildLaunch(control, requested.launch, {
+        launch_attempt_id: "ATTEMPT-IDENTITY",
+        launcher_request_id: "REQUEST-IDENTITY",
+        entry_path: "devexec-goal.mjs",
+        node_path: "node",
+        spawn_impl: () => {
+          spawnCalls += 1;
+          throw new Error("spawn must not be reached");
+        },
+      }),
+      expected,
+    );
+    assert.equal(spawnCalls, 0);
+    const after = readMissionLaunchState(control).launches[0];
+    assert.equal(after.status, "PENDING");
+    assert.equal(after.launch_attempt_id, null);
+    assert.equal(after.launcher_request_id, null);
+    assert.equal(after.lease_token, null);
+    assert.equal(after.lease_until, null);
+  });
+}
+
 test("invalid launch entry path is rejected before PENDING -> LAUNCHING", async () => {
   const control = controlFor();
   const requested = request(control, "valid-target");
