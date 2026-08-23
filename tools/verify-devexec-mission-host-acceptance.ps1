@@ -1,5 +1,5 @@
 param(
-    [string]$ExpectedHead = "",
+    [Parameter(Mandatory=$true)][string]$ExpectedHead,
     [string]$EvidenceRoot = ""
 )
 
@@ -10,6 +10,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $node = (Get-Command node -ErrorAction Stop).Source
+$ExpectedHead = $ExpectedHead.Trim()
+if ([string]::IsNullOrWhiteSpace($ExpectedHead)) {
+    throw "ExpectedHead is required for authoritative Mission host acceptance"
+}
 
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $base = $env:LOCALAPPDATA
@@ -61,15 +65,13 @@ function Invoke-AndPersist {
 
 Write-Host "=== DEV EXEC MISSION HOST ACCEPTANCE ==="
 Write-Host "Repo: $repoRoot"
+Write-Host "Expected HEAD: $ExpectedHead"
 Write-Host "Evidence: $runDir"
 
 $preflightScript = Join-Path $PSScriptRoot "devexec-mission-host-preflight.mjs"
 $preflightFile = Invoke-AndPersist -Name "00-repo-preflight" -Action {
-    $args = @($preflightScript, "--repo", $repoRoot)
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedHead)) {
-        $args += @("--expected-head", $ExpectedHead.Trim())
-    }
-    & $node @args
+    $preflightArgs = @($preflightScript, "--repo", $repoRoot, "--expected-head", $ExpectedHead)
+    & $node @preflightArgs
 }
 
 $head = (& git rev-parse HEAD).Trim()
@@ -100,7 +102,7 @@ $lockFile = Invoke-AndPersist -Name "03-host-lock-process" -Action {
 # attributable to the recorded commit if tests did not modify tracked or
 # untracked repository state while producing their evidence.
 $postflightFile = Invoke-AndPersist -Name "04-repo-postflight" -Action {
-    & $node $preflightScript --repo $repoRoot --expected-head $head
+    & $node $preflightScript --repo $repoRoot --expected-head $ExpectedHead
 }
 
 $files = @($preflightFile, $reliabilityFile, $identityFile, $lockFile, $postflightFile)
@@ -121,7 +123,7 @@ $summary = [ordered]@{
     repo = $repoRoot
     branch = $branch
     head = $head
-    expected_head = if ([string]::IsNullOrWhiteSpace($ExpectedHead)) { $null } else { $ExpectedHead.Trim() }
+    expected_head = $ExpectedHead
     evidence_root = $runDir
     checks = [ordered]@{
         source_checkout_preflight_clean = "PASS"
