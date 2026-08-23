@@ -53,7 +53,8 @@ $testFiles = @(
     "tools/devexec-target-alias.test.mjs",
     "tools/devexec-local-agent-mission-boundary.test.mjs",
     "tools/devexec-mission-continuation-dispatch.test.mjs",
-    "tools/devexec-mission-host-preflight.test.mjs"
+    "tools/devexec-mission-host-preflight.test.mjs",
+    "tools/devexec-mission-host-wrapper-contract.test.mjs"
 )
 
 $regressionProbes = @(
@@ -119,4 +120,5 @@ Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlin
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
 Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
+Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, and component PASS-marker requirements=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
