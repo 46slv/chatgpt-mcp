@@ -25,11 +25,13 @@ Source-faithful reproduction against the prior semantics produced **0/2** on the
 
 This does not make arbitrary asynchronous callbacks supported. Detached work that is not represented by the returned thenable remains outside the contract; production callers should remain synchronous.
 
-## Adjacent release-state repair
+## Adjacent release-state repairs
 
-The same review found a smaller availability defect in the lock handle itself: `release()` set its in-memory `released` flag **before** the canonical unlink. A transient filesystem error could therefore leave `mission-control.lock` intact while permanently making that handle return `false` on later release attempts.
+The same review found two additional failure-signaling problems around lock release.
 
-The handle now marks itself released only after `fs.rmSync()` succeeds. Ownership is still re-read and token/PID-checked before every attempt, so a retry cannot remove a replacement owner's lock. A targeted semantic probe injected one `EBUSY`, confirmed the canonical lock remained, then confirmed the same owner could retry successfully.
+First, `release()` set its in-memory `released` flag **before** the canonical unlink. A transient filesystem error could therefore leave `mission-control.lock` intact while permanently making that handle return `false` on later release attempts. The handle now marks itself released only after `fs.rmSync()` succeeds. Ownership is still re-read and token/PID-checked before every attempt, so a retry cannot remove a replacement owner's lock.
+
+Second, `withMissionLock()` previously suppressed a release failure whenever the protected callback was already throwing. That can hide the more severe state where the mutation failed **and** the live process still retains the canonical Mission lock. The wrapper now throws `MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED` as an `AggregateError` containing both failures plus the lock path. A normal callback failure whose release succeeds still propagates unchanged.
 
 ## Regression coverage
 
@@ -37,7 +39,8 @@ Added `tools/devexec-mission-lock-lifetime.test.mjs`:
 
 - declared async callback is rejected with callback count `0` and no lock publication;
 - Promise-returning wrapper is rejected, lock stays present while pending, its returned continuation observes `MISSION_CONTROL_LOCKED`, and the lock disappears only after settlement;
-- a simulated transient canonical-unlink failure leaves the owning handle retryable; the next verified release succeeds and post-success release remains idempotent.
+- a simulated transient canonical-unlink failure leaves the owning handle retryable; the next verified release succeeds and post-success release remains idempotent;
+- callback failure plus release failure is surfaced as `MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED` with both component errors and does not pretend the canonical lock disappeared.
 
 The Mission reliability verifier includes this test.
 
@@ -50,9 +53,10 @@ Using the fetched branch source reconstructed in the cloud Node runtime:
 - repaired module + existing `devexec-mission-lock.test.mjs` + initial lifetime test: **6/6 PASS**;
 - `node --check` passed for the repaired module and initial new test;
 - targeted release-state semantic probe: injected `EBUSY` -> canonical preserved -> same owner retry succeeds: **PASS**;
+- targeted combined-failure semantic probe: callback failure + injected unlink failure -> `MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED`, both component errors preserved, canonical still present: **PASS**;
 - GitHub branch/file/commit write and readback succeeded.
 
-The cloud container still cannot resolve `github.com`, so the full repository checkout verifier could not be executed here.
+The cloud container still cannot resolve `github.com`, so the full repository checkout verifier and the final expanded four-case test file could not be executed from a real checkout here.
 
 Not claimed: full repository checkout verifier, GitHub CI, Windows/SHIRO-WS filesystem behavior, Local Agent/Local Executor integration, forced OS kill, or power-loss durability.
 
@@ -61,6 +65,7 @@ Not claimed: full repository checkout verifier, GitHub CI, Windows/SHIRO-WS file
 Worker A should reconcile this focused diff, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-devexec-mission-constraint-continuation.ps1` on a real checkout, and keep the existing SHIRO-WS recovery/kill matrix. Add host regressions where:
 
 1. a Promise-returning wrapper is rejected and a competing Mission writer cannot acquire until that returned thenable settles;
-2. one transient canonical unlink failure leaves the still-owning lock handle able to release successfully on a verified retry.
+2. one transient canonical unlink failure leaves the still-owning lock handle able to release successfully on a verified retry;
+3. callback failure plus release failure is surfaced as the combined Mission lock error so the runtime does not continue on the mutation error alone.
 
 Keep `GOAL_PATCH / supersede_current_goal` pending until Mission reliability acceptance closes.
