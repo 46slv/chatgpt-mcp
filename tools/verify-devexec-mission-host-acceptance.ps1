@@ -36,10 +36,29 @@ function Invoke-AndPersist {
     )
 
     $outputFile = Join-Path $runDir "$Name.txt"
-    $captured = @(& $Action 2>&1 | ForEach-Object { $_.ToString() })
-    $exit = $LASTEXITCODE
+    $captured = [System.Collections.Generic.List[string]]::new()
+    $failure = $null
+    $exit = 0
+
+    try {
+        $global:LASTEXITCODE = 0
+        @(& $Action 2>&1) | ForEach-Object { $captured.Add($_.ToString()) }
+        $exit = $LASTEXITCODE
+    } catch {
+        $failure = $_
+        $exit = 1
+        $captured.Add($_.ToString())
+        if ($_.ScriptStackTrace) {
+            $captured.Add($_.ScriptStackTrace)
+        }
+    }
+
     $captured | Set-Content -LiteralPath $outputFile -Encoding UTF8
     foreach ($line in $captured) { Write-Host $line }
+
+    if ($failure) {
+        throw "$Name threw before completion; evidence: $outputFile; error: $($failure.Exception.Message)"
+    }
     if ($exit -ne 0) {
         throw "$Name failed with exit $exit; evidence: $outputFile"
     }
