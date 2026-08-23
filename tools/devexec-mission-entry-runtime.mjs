@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 
 import {openMissionControl} from "./devexec-mission-control.mjs";
-import {inspectMissionLock, recoverStaleMissionLock} from "./devexec-mission-lock.mjs";
+import {inspectMissionLock} from "./devexec-mission-lock.mjs";
+import {recoverOrResumeStaleMissionLock} from "./devexec-mission-lock-resume.mjs";
 import {reconcileMissionChildLaunches} from "./devexec-mission-launch.mjs";
 import {
   activateMissionChildRun,
@@ -30,7 +31,7 @@ function prepareMissionEntryLock(base, missionId) {
   const paths = resolveMissionPaths(base, missionId);
   const inspection = inspectMissionLock(paths.root);
   if (inspection.status === "STALE" && inspection.recoverable === true) {
-    return recoverStaleMissionLock(paths.root);
+    return recoverOrResumeStaleMissionLock(paths.root);
   }
   if (["UNKNOWN_OWNER", "INVALID", "PROBE_FAILED"].includes(inspection.status)) {
     const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_UNSAFE");
@@ -63,8 +64,10 @@ export function startMissionLocalAgent({
   if (typeof start_local_agent !== "function") throw new Error("start_local_agent required");
 
   // Recover only at the Mission entry/restart boundary and only before any
-  // Local Agent start side effect. All later lock failures stay fail-closed so
-  // a post-start ambiguity can never cause this function to replay the agent.
+  // Local Agent start side effect. The recovery wrapper supports a crashed
+  // recovery owner by atomically transferring its PID-bearing evidence link
+  // before the canonical lock can be removed. All later lock failures remain
+  // fail-closed so a post-start ambiguity can never replay the agent.
   const lockRecovery = prepareMissionEntryLock(base, missionId);
 
   if (parentRunId === null) {
