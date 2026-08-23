@@ -131,3 +131,25 @@ Authority remains:
 
 Mission primitives -> typed autonomous start -> Control Service -> loopback
 Control Server -> GUI/lifecycle.
+
+## Windows user launcher
+
+DEV-005 adds user-level installation/update packaging for the local control
+surface.
+
+`tools/install-devexec-control.ps1` creates:
+
+- a `DevExec Control.cmd` launcher for `devexec control start --open`;
+- status and stop launchers;
+- a user-level Start Menu shortcut;
+- an installation manifest recording the repository and Node paths.
+
+The installer delegates only to the production lifecycle CLI. It contains no
+Mission launch authority.
+
+Lifecycle stale-receipt behavior is covered separately: a receipt whose PID is
+no longer alive is classified as stale and can be cleared without signaling an
+unrelated process.
+
+Real user installation is performed only after the published installer bytes
+are validated.
