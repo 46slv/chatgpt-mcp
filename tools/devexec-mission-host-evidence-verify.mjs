@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
+import {TextDecoder} from "node:util";
 
 const REQUIRED_CHECKS = Object.freeze([
   "source_checkout_preflight_clean",
@@ -44,15 +45,30 @@ function sha256Bytes(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+function decodeUtf8NoBom(bytes, file) {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    throw verificationError("MISSION_HOST_EVIDENCE_UTF8_BOM_FORBIDDEN", {path: file});
+  }
+  try {
+    return new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+  } catch (cause) {
+    throw verificationError("MISSION_HOST_EVIDENCE_UTF8_INVALID", {cause, path: file});
+  }
+}
+
 function readSnapshot(file) {
   try {
     const bytes = fs.readFileSync(file);
     return {
       bytes,
-      text: bytes.toString("utf8"),
+      text: decodeUtf8NoBom(bytes, file),
       sha256: sha256Bytes(bytes),
     };
   } catch (cause) {
+    if (cause?.message === "MISSION_HOST_EVIDENCE_UTF8_BOM_FORBIDDEN" ||
+        cause?.message === "MISSION_HOST_EVIDENCE_UTF8_INVALID") {
+      throw cause;
+    }
     throw verificationError("MISSION_HOST_EVIDENCE_READ_FAILED", {cause, path: file});
   }
 }
@@ -214,7 +230,9 @@ export function verifyMissionHostEvidence(summaryPath, {
     }
 
     // Hash and inspect the PASS marker from one in-memory snapshot so both
-    // assertions are about exactly the same bytes.
+    // assertions are about exactly the same bytes. The snapshot decoder is
+    // strict UTF-8 without BOM to keep byte evidence and interpreted evidence
+    // on one canonical text contract.
     const artifactSnapshot = readSnapshot(artifactFile);
     if (artifactSnapshot.sha256 !== recordedHash) {
       throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_HASH_MISMATCH", {
