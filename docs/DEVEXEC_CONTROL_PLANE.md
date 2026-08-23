@@ -96,3 +96,18 @@ Properties:
 - no Mission launcher or process-spawn primitive exists in the server.
 
 Next boundary: thin GUI client over this transport.
+
+## Thin local GUI
+
+The GUI is served from the same loopback Control Server origin.
+
+It uses only HTTP for health, durable run-state inspection, autonomous-start
+capability inspection, and autonomous child-run submission.
+
+The GUI contains no Mission persistence access, safety derivation, Mission
+launch primitive, or process-spawn implementation.
+
+Authority chain:
+
+Mission primitives -> typed autonomous start -> Control Service -> loopback
+Control Server -> GUI.
