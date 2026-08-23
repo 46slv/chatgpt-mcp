@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Path $runDir -ErrorAction Stop | Out-Null
 function Invoke-AndPersist {
     param(
         [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$RequiredMarker,
         [Parameter(Mandatory=$true)][scriptblock]$Action
     )
 
@@ -60,6 +61,18 @@ function Invoke-AndPersist {
     if ($exit -ne 0) {
         throw "$Name failed with exit $exit; evidence: $outputFile"
     }
+
+    $markerSeen = $false
+    foreach ($line in $captured) {
+        if ($line.Trim() -eq $RequiredMarker) {
+            $markerSeen = $true
+            break
+        }
+    }
+    if (-not $markerSeen) {
+        throw "$Name exited 0 but required PASS marker '$RequiredMarker' was absent; evidence: $outputFile"
+    }
+
     return $outputFile
 }
 
@@ -69,7 +82,7 @@ Write-Host "Expected HEAD: $ExpectedHead"
 Write-Host "Evidence: $runDir"
 
 $preflightScript = Join-Path $PSScriptRoot "devexec-mission-host-preflight.mjs"
-$preflightFile = Invoke-AndPersist -Name "00-repo-preflight" -Action {
+$preflightFile = Invoke-AndPersist -Name "00-repo-preflight" -RequiredMarker "MISSION_HOST_PREFLIGHT=PASS" -Action {
     $preflightArgs = @($preflightScript, "--repo", $repoRoot, "--expected-head", $ExpectedHead)
     & $node @preflightArgs
 }
@@ -80,28 +93,28 @@ if ([string]::IsNullOrWhiteSpace($branch)) { $branch = "DETACHED" }
 Write-Host "Branch: $branch"
 Write-Host "HEAD: $head"
 
-$reliabilityFile = Invoke-AndPersist -Name "01-mission-reliability" -Action {
+$reliabilityFile = Invoke-AndPersist -Name "01-mission-reliability" -RequiredMarker "MISSION_RELIABILITY_CHECK=PASS" -Action {
     & (Join-Path $PSScriptRoot "verify-devexec-mission-constraint-continuation.ps1")
 }
 
 $previousProbeRoot = $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT
 $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $runDir
 try {
-    $identityFile = Invoke-AndPersist -Name "02-file-identity" -Action {
+    $identityFile = Invoke-AndPersist -Name "02-file-identity" -RequiredMarker "MISSION_FILE_IDENTITY_HOST_PROBE=PASS" -Action {
         & $node (Join-Path $PSScriptRoot "devexec-mission-file-identity-host-probe.mjs")
     }
 } finally {
     $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $previousProbeRoot
 }
 
-$lockFile = Invoke-AndPersist -Name "03-host-lock-process" -Action {
+$lockFile = Invoke-AndPersist -Name "03-host-lock-process" -RequiredMarker "MISSION_HOST_LOCK_ACCEPTANCE=PASS" -Action {
     & $node (Join-Path $PSScriptRoot "devexec-mission-host-lock-acceptance.mjs")
 }
 
 # Re-run the checkout guard after every component. A host packet is only
 # attributable to the recorded commit if tests did not modify tracked or
 # untracked repository state while producing their evidence.
-$postflightFile = Invoke-AndPersist -Name "04-repo-postflight" -Action {
+$postflightFile = Invoke-AndPersist -Name "04-repo-postflight" -RequiredMarker "MISSION_HOST_PREFLIGHT=PASS" -Action {
     & $node $preflightScript --repo $repoRoot --expected-head $ExpectedHead
 }
 
@@ -132,6 +145,7 @@ $summary = [ordered]@{
         real_process_live_owner_refusal_and_kill_recovery = "PASS"
         returned_thenable_cross_process_exclusion = "PASS"
         source_checkout_postflight_clean = "PASS"
+        component_pass_markers = "PASS"
     }
     host_only_remainder = @(
         "Local Agent/Local Executor end-to-end integration",
