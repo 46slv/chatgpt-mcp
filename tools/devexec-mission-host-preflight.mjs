@@ -3,6 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 
+const IN_PROGRESS_GIT_OPERATIONS = Object.freeze([
+  ["merge", "MERGE_HEAD"],
+  ["cherry-pick", "CHERRY_PICK_HEAD"],
+  ["revert", "REVERT_HEAD"],
+  ["rebase-merge", "rebase-merge"],
+  ["rebase-apply", "rebase-apply"],
+  ["sequencer", "sequencer/todo"],
+  ["bisect", "BISECT_START"],
+]);
+
 function missionHostPreflightError(code, details = {}) {
   const error = new Error(code);
   Object.assign(error, details);
@@ -49,6 +59,21 @@ function parsePorcelainZ(output) {
     .filter(Boolean);
 }
 
+function resolveGitPath(repoRoot, gitPath) {
+  const observed = runGit(repoRoot, ["rev-parse", "--git-path", gitPath]).trim();
+  return path.isAbsolute(observed) ? observed : path.resolve(repoRoot, observed);
+}
+
+function findInProgressGitOperation(repoRoot) {
+  for (const [operation, gitPath] of IN_PROGRESS_GIT_OPERATIONS) {
+    const statePath = resolveGitPath(repoRoot, gitPath);
+    if (fs.existsSync(statePath)) {
+      return {operation, git_path: gitPath, state_path: statePath};
+    }
+  }
+  return null;
+}
+
 export function inspectMissionHostCheckout(repoRoot, {expectedHead = ""} = {}) {
   if (typeof repoRoot !== "string" || !repoRoot.trim()) {
     throw missionHostPreflightError("MISSION_HOST_PREFLIGHT_REPO_REQUIRED");
@@ -74,6 +99,17 @@ export function inspectMissionHostCheckout(repoRoot, {expectedHead = ""} = {}) {
     });
   }
 
+  const gitOperation = findInProgressGitOperation(requestedRoot);
+  if (gitOperation) {
+    throw missionHostPreflightError("MISSION_HOST_PREFLIGHT_GIT_OPERATION_IN_PROGRESS", {
+      observed_head: head,
+      branch,
+      git_operation: gitOperation.operation,
+      git_operation_path: gitOperation.state_path,
+      git_operation_git_path: gitOperation.git_path,
+    });
+  }
+
   const dirtyEntries = parsePorcelainZ(
     runGit(requestedRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
   );
@@ -93,6 +129,7 @@ export function inspectMissionHostCheckout(repoRoot, {expectedHead = ""} = {}) {
     head,
     branch,
     expected_head: expected || null,
+    git_operation: null,
     worktree_clean: true,
     dirty_entries: [],
   };
@@ -134,6 +171,9 @@ if (isMain) {
       branch: error?.branch ?? null,
       requested_root: error?.requested_root ?? null,
       git_toplevel: error?.git_toplevel ?? null,
+      git_operation: error?.git_operation ?? null,
+      git_operation_path: error?.git_operation_path ?? null,
+      git_operation_git_path: error?.git_operation_git_path ?? null,
       dirty_entries: error?.dirty_entries ?? [],
       git_status: error?.git_status ?? null,
       git_stderr: error?.git_stderr ?? null,
