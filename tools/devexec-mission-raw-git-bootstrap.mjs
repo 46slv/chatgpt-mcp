@@ -39,6 +39,19 @@ function runGit(root, args, {input = null} = {}) {
   }
 }
 
+function pathEntryExists(entryPath) {
+  try {
+    fs.lstatSync(entryPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_INSPECTION_FAILED", {
+      cause: error,
+      path: entryPath,
+    });
+  }
+}
+
 function validateCommitObject(commitObject, {expectedCommit, expectedTree}) {
   const bytes = Buffer.isBuffer(commitObject) ? commitObject : Buffer.from(commitObject);
   const observedCommit = gitObjectSha1("commit", bytes);
@@ -77,7 +90,10 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     expectedTree: verified.expected_tree,
   });
   const gitDir = path.join(verified.root, ".git");
-  if (fs.existsSync(gitDir)) {
+  // existsSync follows symlinks and therefore misses a dangling .git link.
+  // Any root .git directory entry is ambiguous pre-existing authority and must
+  // be rejected before git init, including files/symlinks with missing targets.
+  if (pathEntryExists(gitDir)) {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS", {git_dir: gitDir});
   }
 
@@ -123,7 +139,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 2,
+    schema_version: 3,
     source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
@@ -131,6 +147,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     head,
     branch: "devexec-raw-snapshot",
     git_worktree_clean: true,
+    nested_git_metadata: "FORBIDDEN",
     status: "PASS",
   };
 }
@@ -171,13 +188,14 @@ if (isMain) {
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 2,
+      schema_version: 3,
       error: error?.message || String(error),
       expected_commit: error?.expected_commit ?? null,
       observed_commit: error?.observed_commit ?? null,
       expected_tree: error?.expected_tree ?? null,
       commit_tree: error?.commit_tree ?? null,
       indexed_tree: error?.indexed_tree ?? null,
+      path: error?.path ?? null,
       git_status: error?.git_status ?? null,
       git_stderr: error?.git_stderr ?? null,
     }, null, 2)}\n`);
