@@ -1,64 +1,62 @@
 # Dev Exec Mission launch preflight capability review — 2026-08-23
 
-Status: **review/repair branch; connector readback + focused semantic validation only**
+Status: **review/repair branch; connector readback + regression code committed; real-checkout/host verification still required**
 
 Base: `automation/devexec-mission-atomic-preflight-20260823@643bb10985020ea3d366cef6e1197817166d7dfe`.
 
-## Finding 1 — generic atomic-preflight callback was too broad
+## Finding 1 — callback-shaped atomic preflight was too broad
 
-Worker A correctly closed the launch-state TOCTOU by moving deterministic launch-spec validation into the same Mission lock/snapshot as `PENDING -> LAUNCHING`. The remaining review concern was the shape of that API: `beginMissionChildLaunch()` accepted an arbitrary synchronous `preflight` callback and executed it while the Mission lock was held before the durable transition.
+Worker A correctly closed the launch-state TOCTOU by moving deterministic launch-spec validation into the same Mission lock/snapshot as `PENDING -> LAUNCHING`. The remaining concern was the API shape: `beginMissionChildLaunch()` accepted an arbitrary synchronous `preflight` callback and executed caller code while the Mission lock was held before the durable transition.
 
-That callback surface was broader than the invariant it was intended to enforce. A future caller could perform unrelated filesystem/process/other side effects inside the callback and then throw, leaving the durable launch `PENDING` while an unjournaled side effect had already occurred. The current production dispatcher passed a pure spec builder, so this was a capability/safety regression risk rather than evidence that the present dispatcher had already performed such a side effect.
+A future caller could perform an unrelated filesystem/process side effect in that callback and then throw, leaving the launch `PENDING` while an unjournaled side effect had already occurred. The current Worker A dispatcher supplied a pure spec builder, so this was a capability/regression risk rather than evidence of an already-observed duplicate process.
 
-## Repair 1 — one-shot trusted dispatch capability
+## Repair 1 — declarative atomic dispatch preflight
 
-- Added `createMissionChildDispatchPreflight(control, {entry_path, node_path})` in `devexec-mission-launch.mjs`.
-- The module records factory-created callbacks in a private `WeakSet` and `beginMissionChildLaunch()` accepts only those one-shot capabilities.
-- Arbitrary synchronous or async callbacks are rejected with `MISSION_LAUNCH_UNTRUSTED_PREFLIGHT` before invocation and before any `LAUNCHING`, attempt/request, or lease metadata is written.
-- The trusted callback can only call the existing pure `buildMissionChildLaunchSpec()` against the durable launch clone.
-- `dispatchMissionChildLaunch()` now creates that trusted capability rather than supplying its own callback.
+The review first prototyped a one-shot trusted callback capability, then narrowed the surface further: callback execution was removed entirely.
 
-This keeps A's atomic snapshot/transition property while narrowing the code that may execute inside the Mission lock.
+`beginMissionChildLaunch()` now accepts only declarative `dispatch_preflight: {entry_path, node_path}` data. Under the Mission lock it runs the module-owned `buildMissionChildLaunchSpec()` against the exact durable launch snapshot immediately before writing `LAUNCHING` metadata. The legacy `preflight` callback option is explicitly rejected with `MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN`; a malformed descriptor is rejected with `MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID`.
 
-## Finding 2 — durable launch identity fields were not fully revalidated
+`dispatchMissionChildLaunch()` passes only the declarative descriptor. No caller-supplied function executes inside the atomic launch section.
 
-The atomic preflight was revalidating target alias, constraints, node path, entry path, mission equality, and status, but `buildMissionChildLaunchSpec()` still copied durable `goal`, `parent_run_id`, and `child_run_id` into argv/environment without applying the same required-string checks used at request time.
+## Finding 2 — durable launch identity fields were incompletely revalidated
 
-A corrupted or legacy `PENDING` launch could therefore keep a blank/non-string Goal or lineage ID long enough to cross `PENDING -> LAUNCHING` and reach the spawn boundary. That would manufacture an in-flight launch from invalid durable identity even though the original request contract would have rejected the value.
+The atomic preflight validated target alias, constraints, node path, entry path, mission equality, and status, but copied durable `goal`, `parent_run_id`, and `child_run_id` into argv/environment without applying the request-time identity checks.
 
-## Repair 2 — durable identity validation in the atomic spec builder
+A corrupt/legacy PENDING record could therefore carry an invalid or stale Goal/lineage far enough to create `LAUNCHING` and approach spawn even though the original request contract would have rejected it.
 
-`buildMissionChildLaunchSpec()` now validates and canonicalizes the exact durable snapshot before transition:
+## Repair 2 — durable Goal/lineage validation in the atomic spec builder
 
-- `launch.mission_id` must be a non-empty string and match the control Mission;
-- `launch.parent_run_id` must be a non-empty string;
-- `launch.child_run_id` must be a non-empty string;
-- `launch.goal` must be a non-empty string;
-- existing status/constraints/target/entry/node validation remains unchanged.
+`buildMissionChildLaunchSpec()` now validates the exact durable snapshot before transition:
 
-The validated values, rather than the raw durable fields, are used to build argv/environment.
+- `mission_id` is required and must match the control Mission;
+- `parent_run_id` is required and must equal the current Mission run;
+- `child_run_id` is required and must not already exist in `control.state.runs`;
+- `goal` is required and normalized with the same non-empty-string rule used at request time;
+- existing status, constraints, target, entry path, and node path validation remains.
+
+Only the validated values are emitted into argv/environment.
 
 ## Regression
 
 `tools/devexec-mission-target-validation.test.mjs` now covers:
 
-1. trusted dispatch preflight still rejects malformed durable constraints before `PENDING -> LAUNCHING`;
-2. arbitrary synchronous preflight is rejected without being invoked and without launch metadata mutation;
-3. arbitrary async preflight is rejected without being invoked and without transition;
-4. corrupt durable `goal`, `parent_run_id`, and `child_run_id` each remain `PENDING`, generate no attempt/request/lease metadata, and never reach `spawn()`;
-5. existing malformed target/constraints/entry and valid spawn-boundary regressions remain in the same suite.
+1. malformed durable target/constraints/entry data remains PENDING and never reaches spawn;
+2. blank durable Goal, blank/null lineage IDs, stale non-empty parent ID, and already-existing child ID remain PENDING with no attempt/request/lease metadata and zero spawn calls;
+3. declarative dispatch preflight validates the exact durable snapshot before transition;
+4. legacy synchronous and async callback preflights are rejected before invocation and before transition;
+5. malformed declarative preflight descriptors are rejected before transition;
+6. canonical target/idempotency and the valid synthetic spawn-boundary path remain covered.
 
-The existing `tools/verify-devexec-mission-constraint-continuation.ps1` already syntax-checks the modified runtime modules and runs this test file, so the real-checkout acceptance entrypoint remains unchanged.
+The existing `tools/verify-devexec-mission-constraint-continuation.ps1` already syntax-checks the modified launch/launcher modules and runs this test file, so the real-checkout acceptance entrypoint remains unchanged.
 
 ## Validation actually performed
 
-- Re-fetched Worker A head immediately before branching: exact `643bb10985020ea3d366cef6e1197817166d7dfe`.
-- Dedicated review branch created without rewriting A history.
-- GitHub file/commit readback and compare performed around writes.
-- Cloud `git clone` was retried and again failed at DNS resolution for `github.com`; therefore repository-checkout tests, GitHub CI, Windows/SHIRO-WS, real child process, and crash/restart acceptance are **not** claimed as PASS.
-- Focused review of the committed semantics confirms untrusted callbacks are gated before invocation and the trusted dispatch preflight performs launch-spec construction against the exact durable snapshot under the same Mission lock as the transition.
-- Regression code for durable Goal/lineage corruption is committed, but it still requires execution by the real-checkout verifier.
+- Worker A head was re-fetched immediately before branching and was exact `643bb10985020ea3d366cef6e1197817166d7dfe`.
+- Every GitHub write was preceded/followed by branch-head comparison/readback; no Worker A history was rewritten.
+- The cloud runtime again failed direct `git clone` at DNS resolution for `github.com`. Therefore repository-checkout tests, GitHub CI, Windows/SHIRO-WS, real child process, and process-kill/restart acceptance are **not** claimed as PASS.
+- The committed source/diff was adversarially inspected to verify the callback path is rejected before invocation and the module-owned spec builder remains inside the same lock/snapshot as the state transition.
+- Regression code for durable Goal/lineage corruption and callback prohibition is committed but still requires execution by the real-checkout verifier.
 
 ## Remaining acceptance
 
-On a real checkout run `tools/verify-devexec-mission-constraint-continuation.ps1` at this branch head. On SHIRO-WS continue the existing target/constraint/crash matrix and add malformed durable `goal` / `parent_run_id` / `child_run_id` cases, plus a regression/harness case proving no caller-controlled preflight side effect can occur while a launch remains `PENDING`. Keep live `GOAL_PATCH / supersede_current_goal` PENDING until Mission continuation reliability acceptance closes.
+On a real checkout run `tools/verify-devexec-mission-constraint-continuation.ps1` at the final review head. On SHIRO-WS continue the existing target/constraint/crash matrix and add malformed durable Goal/parent/child identity cases plus concurrent/stale-writer launch preflight. Prove invalid durable records create neither `LAUNCHING` metadata nor a child process. Keep live `GOAL_PATCH / supersede_current_goal` PENDING until Mission continuation reliability acceptance closes, then resume staged Control API/service work before GUI.
