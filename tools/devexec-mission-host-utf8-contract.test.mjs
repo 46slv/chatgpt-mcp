@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -76,13 +77,43 @@ function expectCode(fn, code) {
   });
 }
 
-test("host wrapper writes evidence with explicit UTF-8 without BOM", () => {
+test("host wrapper writes evidence with strict UTF-8 without BOM", () => {
   const text = source();
-  assert.match(text, /New-Object System\.Text\.UTF8Encoding\(\$false\)/);
+  assert.match(text, /\[System\.Text\.UTF8Encoding\]::new\(\$false, \$true\)/);
   assert.match(text, /\[System\.IO\.File\]::WriteAllText\(\$Path, \$Text, \$script:Utf8NoBom\)/);
   assert.match(text, /Write-Utf8NoBom -Path \$outputFile -Text \$outputText/);
   assert.match(text, /Write-Utf8NoBom -Path \$summaryPath -Text \(\$summaryJson \+ \[Environment\]::NewLine\)/);
   assert.doesNotMatch(text, /Set-Content[^\r\n]+-Encoding UTF8/);
+  assert.doesNotMatch(text, /UTF8Encoding\]\::new\(\$false\)/);
+});
+
+test("Windows PowerShell strict UTF-8 encoder rejects invalid UTF-16 instead of replacement-encoding it", {
+  skip: process.platform !== "win32",
+}, () => {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$enc = [System.Text.UTF8Encoding]::new($false, $true)",
+    "$file = [System.IO.Path]::GetTempFileName()",
+    "try {",
+    "  $text = [string]([char]0xD800)",
+    "  try {",
+    "    [System.IO.File]::WriteAllText($file, $text, $enc)",
+    "    Write-Output 'STRICT_ENCODER_DID_NOT_REJECT'",
+    "    exit 3",
+    "  } catch [System.Text.EncoderFallbackException] {",
+    "    Write-Output 'STRICT_ENCODER_REJECTED'",
+    "    exit 0",
+    "  }",
+    "} finally {",
+    "  [System.IO.File]::Delete($file)",
+    "}",
+  ].join("\n");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, `stdout=${result.stdout}\nstderr=${result.stderr}`);
+  assert.match(result.stdout, /STRICT_ENCODER_REJECTED/);
 });
 
 test("the Windows PowerShell 5.1 UTF-8 BOM would make Node JSON.parse reject SUMMARY bytes", () => {
