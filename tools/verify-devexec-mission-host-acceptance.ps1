@@ -205,14 +205,16 @@ $summaryHash = (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash
 
 # Validate the persisted packet after every component and SUMMARY have already
 # been written. This readback recomputes every component SHA, rechecks the exact
-# PASS marker set, pins the commit and Mission filesystem root, and writes an
-# immutable receipt that binds the exact SUMMARY bytes to the observed artifacts.
+# PASS marker set, pins the commit, repository checkout, and Mission filesystem
+# root, and writes an immutable receipt that binds the exact SUMMARY bytes to
+# the observed artifacts.
 $verificationPath = Join-Path $runDir "VERIFICATION.json"
 $evidenceVerifier = Join-Path $PSScriptRoot "devexec-mission-host-evidence-verify.mjs"
 $verificationOutput = @(
     & $node $evidenceVerifier `
         --summary $summaryPath `
         --expected-head $ExpectedHead `
+        --expected-repo-root $repoRoot `
         --expected-mission-probe-root $missionBase `
         --receipt $verificationPath 2>&1
 )
