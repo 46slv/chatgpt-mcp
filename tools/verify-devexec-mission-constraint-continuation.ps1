@@ -14,6 +14,8 @@ $syntaxFiles = @(
     "tools/devexec-mission-lock.mjs",
     "tools/devexec-mission-lock-resume.mjs",
     "tools/devexec-mission-control.mjs",
+    "tools/devexec.mjs",
+    "tools/devexec-mission-autonomous-start-cli.mjs",
     "tools/devexec-mission-autonomous-start.mjs",
     "tools/devexec-mission-launch.mjs",
     "tools/devexec-mission-launcher.mjs",
@@ -46,8 +48,10 @@ $testFiles = @(
     "tools/devexec-mission-recovery-claim-entry.test.mjs",
     "tools/devexec-mission-lock-publication.test.mjs",
     "tools/devexec-mission-control.test.mjs",
+    "tools/devexec-mission-autonomous-start-cli.test.mjs",
     "tools/devexec-mission-autonomous-start.test.mjs",
     "tools/devexec-mission-launch-review.test.mjs",
+    "tools/devexec-mission-autonomous-start-cli-real-e2e.test.mjs",
     "tools/devexec-mission-autonomous-start-real-e2e.test.mjs",
     "tools/devexec-mission-process-crash.test.mjs",
     "tools/devexec-mission-run-admission.test.mjs",
@@ -138,3 +142,4 @@ Write-Host "Mission JSON state writers fsync temporary file bytes before atomic 
 Write-Host "Forced external termination after durable LAUNCHING and real child spawn before receipt=PASS"
 Write-Host "Directory metadata durability remains host-dependent: SHIRO-WS Node directory fsync returns EPERM, so full power-loss durability remains OPEN."
 Write-Host "Local Agent/Local Executor live read-only E2E is separate host evidence and has passed on SHIRO-WS; pinned clean-checkout host acceptance remains separate."
+Write-Host "Published devexec autonomous-start CLI uses only typed Mission start API; real child start and duplicate no-replay=PASS"
