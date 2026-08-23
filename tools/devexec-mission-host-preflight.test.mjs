@@ -15,6 +15,11 @@ function git(root, ...args) {
   }).trim();
 }
 
+function resolvedGitPath(root, name) {
+  const observed = git(root, "rev-parse", "--git-path", name);
+  return path.isAbsolute(observed) ? observed : path.resolve(root, observed);
+}
+
 function withRepo(fn) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-host-preflight-"));
   try {
@@ -34,6 +39,7 @@ test("clean checkout with matching expected HEAD passes", () => withRepo((root, 
   const report = inspectMissionHostCheckout(root, {expectedHead: head});
   assert.equal(report.head, head);
   assert.equal(report.expected_head, head);
+  assert.equal(report.git_operation, null);
   assert.equal(report.worktree_clean, true);
   assert.deepEqual(report.dirty_entries, []);
 }));
@@ -58,6 +64,34 @@ test("untracked file is rejected before host acceptance", () => withRepo((root, 
     error => {
       assert.equal(error?.message, "MISSION_HOST_PREFLIGHT_DIRTY_WORKTREE");
       assert.equal(error?.dirty_entries?.some(entry => entry.includes("untracked.txt")), true);
+      return true;
+    },
+  );
+}));
+
+test("clean worktree with MERGE_HEAD is rejected as an in-progress Git operation", () => withRepo((root, head) => {
+  const mergeHead = resolvedGitPath(root, "MERGE_HEAD");
+  fs.writeFileSync(mergeHead, `${head}\n`, "utf8");
+  assert.throws(
+    () => inspectMissionHostCheckout(root, {expectedHead: head}),
+    error => {
+      assert.equal(error?.message, "MISSION_HOST_PREFLIGHT_GIT_OPERATION_IN_PROGRESS");
+      assert.equal(error?.observed_head, head);
+      assert.equal(error?.git_operation, "merge");
+      assert.equal(path.resolve(error?.git_operation_path), path.resolve(mergeHead));
+      return true;
+    },
+  );
+}));
+
+test("clean worktree with rebase state directory is rejected before host acceptance", () => withRepo((root, head) => {
+  const rebaseState = resolvedGitPath(root, "rebase-merge");
+  fs.mkdirSync(rebaseState, {recursive: true});
+  assert.throws(
+    () => inspectMissionHostCheckout(root, {expectedHead: head}),
+    error => {
+      assert.equal(error?.message, "MISSION_HOST_PREFLIGHT_GIT_OPERATION_IN_PROGRESS");
+      assert.equal(error?.git_operation, "rebase-merge");
       return true;
     },
   );
