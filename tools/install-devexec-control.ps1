@@ -55,6 +55,7 @@ $StartLauncher = Join-Path $InstallRoot "DevExec Control.cmd"
 $StatusLauncher = Join-Path $InstallRoot "DevExec Control Status.cmd"
 $StopLauncher = Join-Path $InstallRoot "DevExec Control Stop.cmd"
 $DoctorLauncher = Join-Path $InstallRoot "DevExec Control Doctor.cmd"
+$SelfCheckLauncher = Join-Path $InstallRoot "DevExec Control Self Check.cmd"
 $Manifest = Join-Path $InstallRoot "install.json"
 $Shortcut = Join-Path $ShortcutRoot "Dev Exec Control.lnk"
 
@@ -81,6 +82,7 @@ function Assert-Installed {
         $StatusLauncher,
         $StopLauncher,
         $DoctorLauncher,
+        $SelfCheckLauncher,
         $Manifest,
         $Shortcut
     )) {
@@ -157,6 +159,12 @@ $DoctorText = @"
 if errorlevel 1 pause
 "@
 
+$SelfCheckText = @"
+@echo off
+"$Node" "$RepoRoot\tools\devexec-control-install-check.mjs"
+if errorlevel 1 pause
+"@
+
 Write-Utf8NoBom `
     -Path $StartLauncher `
     -Text ($StartText.Trim() + "`r`n")
@@ -173,6 +181,10 @@ Write-Utf8NoBom `
     -Path $DoctorLauncher `
     -Text ($DoctorText.Trim() + "`r`n")
 
+Write-Utf8NoBom `
+    -Path $SelfCheckLauncher `
+    -Text ($SelfCheckText.Trim() + "`r`n")
+
 $InstallState = [ordered]@{
     protocol = "devexec.control.install"
     schema_version = 1
@@ -181,11 +193,18 @@ $InstallState = [ordered]@{
     node_path = $Node
     install_root = $InstallRoot
     shortcut = $Shortcut
+    source_fingerprint = [ordered]@{
+        devexec = (Get-FileHash -LiteralPath (Join-Path $RepoRoot "tools\devexec.mjs") -Algorithm SHA256).Hash.ToLowerInvariant()
+        lifecycle = (Get-FileHash -LiteralPath (Join-Path $RepoRoot "tools\devexec-control.mjs") -Algorithm SHA256).Hash.ToLowerInvariant()
+        ui_js = (Get-FileHash -LiteralPath (Join-Path $RepoRoot "tools\devexec-control-ui.js") -Algorithm SHA256).Hash.ToLowerInvariant()
+        installer = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     commands = [ordered]@{
         start_open = $StartLauncher
         status = $StatusLauncher
         stop = $StopLauncher
         doctor = $DoctorLauncher
+        self_check = $SelfCheckLauncher
     }
 }
 

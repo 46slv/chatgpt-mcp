@@ -168,3 +168,19 @@ existing output panels.
 All browser behavior remains same-origin HTTP against the loopback Control
 Server. Browser code contains no process management and no Mission launch
 authority.
+
+## Installation self-check
+
+DEV-005 records source fingerprints in the user-level installation manifest and
+adds a `DevExec Control Self Check` launcher.
+
+The read-only checker reports:
+
+- `NOT_INSTALLED` when the install manifest is absent;
+- `BROKEN` when required repository, Node, source, or launcher paths are missing;
+- `UPDATE_AVAILABLE` when recorded source fingerprints differ from current
+  repository files;
+- `HEALTHY` when launcher bindings and source fingerprints are current.
+
+The checker does not update files, start processes, or invoke Mission authority.
+Installation and update remain explicit through the installer.
