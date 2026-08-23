@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-file-identity-probe-"));
+const requestedBase = process.env.DEVEXEC_FILE_IDENTITY_PROBE_ROOT?.trim();
+const parent = requestedBase ? path.resolve(requestedBase) : os.tmpdir();
+if (!fs.existsSync(parent)) {
+  throw new Error(`DEVEXEC_FILE_IDENTITY_PROBE_ROOT does not exist: ${parent}`);
+}
+const root = fs.mkdtempSync(path.join(parent, ".devexec-file-identity-probe-"));
 try {
   const canonical = path.join(root, "canonical.lock");
   const hardLink = path.join(root, "evidence.lock");
@@ -20,6 +25,7 @@ try {
   const report = {
     platform: process.platform,
     node: process.version,
+    probe_parent: parent,
     canonical: {dev: a.dev.toString(), ino: a.ino.toString(), nlink: a.nlink.toString()},
     hard_link: {dev: b.dev.toString(), ino: b.ino.toString(), nlink: b.nlink.toString()},
     copied_file: {dev: c.dev.toString(), ino: c.ino.toString(), nlink: c.nlink.toString()},
