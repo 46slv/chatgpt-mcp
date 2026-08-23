@@ -245,6 +245,33 @@ test("caller can pin the Mission filesystem root used by host probes", () => {
   }
 });
 
+test("verification receipt requires external repository and Mission-root pins", () => {
+  const fx = fixture();
+  try {
+    const receipt = path.join(fx.evidenceRoot, "VERIFICATION.json");
+    expectCode(
+      () => verifyMissionHostEvidence(fx.summaryFile, {
+        expectedHead: HEAD,
+        writeReceipt: receipt,
+      }),
+      "MISSION_HOST_EVIDENCE_VERIFIER_EXPECTED_REPO_ROOT_REQUIRED",
+    );
+    assert.equal(fs.existsSync(receipt), false);
+
+    expectCode(
+      () => verifyMissionHostEvidence(fx.summaryFile, {
+        expectedHead: HEAD,
+        expectedRepoRoot: fx.repoRoot,
+        writeReceipt: receipt,
+      }),
+      "MISSION_HOST_EVIDENCE_VERIFIER_EXPECTED_MISSION_PROBE_ROOT_REQUIRED",
+    );
+    assert.equal(fs.existsSync(receipt), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("artifact set must be exact and duplicate-free", () => {
   const fx = fixture();
   try {
@@ -274,6 +301,8 @@ test("verification receipt is immutable and is never overwritten", () => {
     expectCode(
       () => verifyMissionHostEvidence(fx.summaryFile, {
         expectedHead: HEAD,
+        expectedRepoRoot: fx.repoRoot,
+        expectedMissionProbeRoot: fx.missionRoot,
         writeReceipt: receipt,
       }),
       "MISSION_HOST_EVIDENCE_RECEIPT_EXISTS",
