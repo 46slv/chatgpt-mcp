@@ -22,7 +22,8 @@ $syntaxFiles = @(
     "tools/devexec-goal.mjs",
     "tools/devexec-local-agent-goal-state.mjs",
     "tools/devexec-mission-recovery-interlock-probe.mjs",
-    "tools/devexec-mission-recovery-entry-interlock-probe.mjs"
+    "tools/devexec-mission-recovery-entry-interlock-probe.mjs",
+    "tools/devexec-mission-host-lock-acceptance.mjs"
 )
 
 $testFiles = @(
