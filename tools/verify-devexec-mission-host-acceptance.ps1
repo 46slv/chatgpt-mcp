@@ -15,11 +15,24 @@ if ([string]::IsNullOrWhiteSpace($ExpectedHead)) {
     throw "ExpectedHead is required for authoritative Mission host acceptance"
 }
 
+# Mirror devexec-goal.mjs BASE semantics. Host lock/file-identity checks must run
+# on the filesystem that actually stores Mission state, not whichever volume the
+# operator chooses for evidence output.
+$missionBase = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($missionBase)) {
+    $home = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($home)) {
+        throw "LOCALAPPDATA/USERPROFILE unavailable for Mission probe root"
+    }
+    $missionBase = Join-Path $home "AppData\Local"
+}
+if (-not (Test-Path -LiteralPath $missionBase -PathType Container)) {
+    throw "Mission probe root does not exist: $missionBase"
+}
+$missionBase = (Resolve-Path -LiteralPath $missionBase).Path
+
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
-    $base = $env:LOCALAPPDATA
-    if ([string]::IsNullOrWhiteSpace($base)) { $base = $env:TEMP }
-    if ([string]::IsNullOrWhiteSpace($base)) { throw "LOCALAPPDATA/TEMP unavailable for evidence root" }
-    $EvidenceRoot = Join-Path $base "ChatGPTMCPProbe\mission-host-acceptance"
+    $EvidenceRoot = Join-Path $missionBase "ChatGPTMCPProbe\mission-host-acceptance"
 }
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
@@ -79,6 +92,7 @@ function Invoke-AndPersist {
 Write-Host "=== DEV EXEC MISSION HOST ACCEPTANCE ==="
 Write-Host "Repo: $repoRoot"
 Write-Host "Expected HEAD: $ExpectedHead"
+Write-Host "Mission probe root: $missionBase"
 Write-Host "Evidence: $runDir"
 
 $preflightScript = Join-Path $PSScriptRoot "devexec-mission-host-preflight.mjs"
@@ -97,18 +111,24 @@ $reliabilityFile = Invoke-AndPersist -Name "01-mission-reliability" -RequiredMar
     & (Join-Path $PSScriptRoot "verify-devexec-mission-constraint-continuation.ps1")
 }
 
-$previousProbeRoot = $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT
-$env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $runDir
+$previousIdentityRoot = $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT
+$env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $missionBase
 try {
     $identityFile = Invoke-AndPersist -Name "02-file-identity" -RequiredMarker "MISSION_FILE_IDENTITY_HOST_PROBE=PASS" -Action {
         & $node (Join-Path $PSScriptRoot "devexec-mission-file-identity-host-probe.mjs")
     }
 } finally {
-    $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $previousProbeRoot
+    $env:DEVEXEC_FILE_IDENTITY_PROBE_ROOT = $previousIdentityRoot
 }
 
-$lockFile = Invoke-AndPersist -Name "03-host-lock-process" -RequiredMarker "MISSION_HOST_LOCK_ACCEPTANCE=PASS" -Action {
-    & $node (Join-Path $PSScriptRoot "devexec-mission-host-lock-acceptance.mjs")
+$previousMissionProbeRoot = $env:DEVEXEC_MISSION_HOST_PROBE_ROOT
+$env:DEVEXEC_MISSION_HOST_PROBE_ROOT = $missionBase
+try {
+    $lockFile = Invoke-AndPersist -Name "03-host-lock-process" -RequiredMarker "MISSION_HOST_LOCK_ACCEPTANCE=PASS" -Action {
+        & $node (Join-Path $PSScriptRoot "devexec-mission-host-lock-acceptance.mjs")
+    }
+} finally {
+    $env:DEVEXEC_MISSION_HOST_PROBE_ROOT = $previousMissionProbeRoot
 }
 
 # Re-run the checkout guard after every component. A host packet is only
@@ -137,13 +157,14 @@ $summary = [ordered]@{
     branch = $branch
     head = $head
     expected_head = $ExpectedHead
+    mission_probe_root = $missionBase
     evidence_root = $runDir
     checks = [ordered]@{
         source_checkout_preflight_clean = "PASS"
         mission_reliability_bundle = "PASS"
-        filesystem_hardlink_identity = "PASS"
-        real_process_live_owner_refusal_and_kill_recovery = "PASS"
-        returned_thenable_cross_process_exclusion = "PASS"
+        mission_filesystem_hardlink_identity = "PASS"
+        mission_filesystem_real_process_live_owner_refusal_and_kill_recovery = "PASS"
+        mission_filesystem_returned_thenable_cross_process_exclusion = "PASS"
         source_checkout_postflight_clean = "PASS"
         component_pass_markers = "PASS"
     }
