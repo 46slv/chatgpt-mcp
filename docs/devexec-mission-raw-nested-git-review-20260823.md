@@ -14,12 +14,12 @@ The original RAW tree verifier passed the same `ignoreNames` set through every r
 
 That is not source-neutral. A focused real-Git reproduction showed:
 
-1. commit a normal tracked file and record the Git tree;
-2. create `sub/.git/evil` after the commit;
-3. `git status --porcelain=v1 --untracked-files=all` remains empty;
+1. establish a normal indexed source tree;
+2. create `sub/.git/evil` afterward;
+3. `git status --porcelain=v1 --untracked-files=all` is unchanged by that addition;
 4. `git add -A && git write-tree` remains equal to the original tree.
 
-Therefore the previous combination of RAW tree equality + clean Git status could classify a filesystem containing extra nested Git metadata as exact/clean. Such metadata can change Git repository discovery for commands run below that path even though it is absent from the source tree and hidden by ordinary status.
+Therefore the previous combination of RAW tree equality + clean/unchanged Git status could classify a filesystem containing extra nested Git metadata as exact/clean. Such metadata can change Git repository discovery for commands run below that path even though it is absent from the source tree and hidden by ordinary status.
 
 A second ambiguity existed at the root: `fs.existsSync(root/.git)` follows symlinks, so a dangling `.git` symlink can return false even though the directory entry exists. Pre-bootstrap authority must reject any pre-existing root `.git` entry, not only entries whose targets exist.
 
@@ -36,7 +36,7 @@ A second ambiguity existed at the root: `fs.existsSync(root/.git)` follows symli
 
 Regression coverage was extended so the committed tests require:
 
-- non-empty nested `.git` metadata to be rejected even though Git porcelain status hides it;
+- non-empty nested `.git` metadata to be rejected while proving Git porcelain and index-tree observations are unchanged relative to the pre-injection baseline;
 - an empty nested `.git` directory to be rejected rather than disappearing as an empty Git-tree directory;
 - bootstrap rejection before root `.git` creation when nested metadata exists;
 - on non-Windows hosts, a dangling root `.git` symlink to be rejected as pre-existing metadata.
@@ -46,9 +46,11 @@ The existing root `.git` ignore remains necessary for the post-bootstrap exact-t
 ## Validation actually performed
 
 - GitHub source/branch readback and compare against exact Worker A head.
-- Real local Git reproduction: nested `sub/.git/evil` left porcelain status empty and left `git write-tree` unchanged.
+- Real local Git reproduction: adding nested `sub/.git/evil` did not change porcelain status and did not change `git write-tree` relative to the pre-injection baseline.
 - Focused fixed-semantics filesystem probe rejected the nested `.git` state: `NESTED_GIT_FALSE_CLEAN_REPRO=PASS`.
 - Dangling symlink probe confirmed `existsSync` returns false while `lstatSync` still sees the `.git` entry: `DANGLING_GIT_LSTAT_GUARD=PASS`.
+- A source-faithful reconstruction of the updated RAW tree module and committed regression cases passed **6/6** after correcting the regression fixture to compare Git status against its staged pre-injection baseline rather than incorrectly assuming the helper created a committed-clean worktree.
+- A source-faithful exact-bootstrap focused suite passed **3/3**: parentless exact HEAD restoration/clean status, nested `.git` rejection before root metadata creation, and dangling root `.git` symlink rejection.
 - Existing host preflight, host wrapper, and ordinary reliability orchestrator were source-reviewed for direct ancestry requirements; none of their direct Git queries require the parent object.
 
 Not claimed here: full committed Node test bundle on a repository checkout, GitHub CI, SHIRO-WS/NTFS RAW reconstruction, Windows case-insensitive nested `.git` regression, PowerShell host packet, Local Agent/Local Executor E2E, forced-kill matrix, or power-loss/fsync durability.
