@@ -184,7 +184,42 @@ $summaryPath = Join-Path $runDir "SUMMARY.json"
 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 $summaryHash = (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash
 
+# Validate the persisted packet after every component and SUMMARY have already
+# been written. This readback recomputes every component SHA, rechecks the exact
+# PASS marker set, pins the commit and Mission filesystem root, and writes an
+# immutable receipt that binds the exact SUMMARY bytes to the observed artifacts.
+$verificationPath = Join-Path $runDir "VERIFICATION.json"
+$evidenceVerifier = Join-Path $PSScriptRoot "devexec-mission-host-evidence-verify.mjs"
+$verificationOutput = @(
+    & $node $evidenceVerifier `
+        --summary $summaryPath `
+        --expected-head $ExpectedHead `
+        --expected-mission-probe-root $missionBase `
+        --receipt $verificationPath 2>&1
+)
+$verificationExit = $LASTEXITCODE
+foreach ($line in $verificationOutput) { Write-Host $line }
+if ($verificationExit -ne 0) {
+    throw "Mission host evidence readback failed with exit $verificationExit; summary: $summaryPath"
+}
+$verificationMarkerSeen = $false
+foreach ($line in $verificationOutput) {
+    if ($line.ToString().Trim() -eq "MISSION_HOST_EVIDENCE_VERIFY=PASS") {
+        $verificationMarkerSeen = $true
+        break
+    }
+}
+if (-not $verificationMarkerSeen) {
+    throw "Mission host evidence verifier exited 0 without MISSION_HOST_EVIDENCE_VERIFY=PASS; summary: $summaryPath"
+}
+if (-not (Test-Path -LiteralPath $verificationPath -PathType Leaf)) {
+    throw "Mission host evidence verifier did not persist VERIFICATION.json: $verificationPath"
+}
+$verificationHash = (Get-FileHash -LiteralPath $verificationPath -Algorithm SHA256).Hash
+
 Write-Host "SUMMARY=$summaryPath"
 Write-Host "SUMMARY_SHA256=$summaryHash"
+Write-Host "VERIFICATION=$verificationPath"
+Write-Host "VERIFICATION_SHA256=$verificationHash"
 Write-Host "MISSION_HOST_ACCEPTANCE=PASS"
 Write-Host "Local Agent/Local Executor E2E and power-loss durability remain separate acceptance boundaries."
