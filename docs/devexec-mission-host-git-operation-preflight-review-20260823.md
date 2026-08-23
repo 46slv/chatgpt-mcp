@@ -28,20 +28,18 @@ The host wrapper already calls this preflight before all Mission components and 
 
 ## Regression coverage
 
-`tools/devexec-mission-host-preflight.test.mjs` adds two clean-worktree transaction-state regressions:
+`tools/devexec-mission-host-preflight.test.mjs` covers the clean checkout plus every declared transaction marker. `MERGE_HEAD` and `rebase-merge` have dedicated cases; the table-driven regression covers cherry-pick, revert, rebase-apply, sequencer, and bisect. Every transaction fixture first proves porcelain status is empty, so the test demonstrates the gap rather than merely testing a second dirty-worktree path.
 
-1. `MERGE_HEAD` present -> preflight rejects with operation `merge`.
-2. `rebase-merge` directory present -> preflight rejects with operation `rebase-merge`.
+The existing tracked-dirty, untracked-dirty, wrong-HEAD, and nested-root cases remain covered.
 
-The existing clean, tracked-dirty, untracked-dirty, wrong-HEAD, and nested-root cases remain covered.
-
-Cloud validation actually run against the submitted/read-back source using Node and temporary real Git repositories:
+Cloud validation actually run against the submitted/read-back production source using Node and temporary real Git repositories:
 
 - `node --check tools/devexec-mission-host-preflight.mjs`: PASS.
-- `node --test tools/devexec-mission-host-preflight.test.mjs`: **7/7 PASS**, 0 failures.
+- Earlier submitted/read-back preflight suite: **7/7 PASS**, 0 failures, before the final all-marker table expansion.
 - Independent real-Git gap probe: `STATUS_BYTES=0` with `MERGE_HEAD=yes`, confirming the old status-only predicate could miss the transaction state.
+- Independent all-marker real-Git probe: merge, cherry-pick, revert, rebase-merge, rebase-apply, sequencer, and bisect each remained porcelain-clean and were rejected by the repaired production preflight; marker `MISSION_GIT_OPERATION_PREFLIGHT_PROBE=PASS`.
 
-This is not a full repository checkout verifier, GitHub CI, PowerShell host packet, or Windows/SHIRO-WS acceptance result.
+The final expanded committed test source was read back from GitHub, but a full repository checkout is unavailable in this cloud runtime. Do not represent the expanded committed suite, GitHub CI, PowerShell host packet, or Windows/SHIRO-WS acceptance as executed here.
 
 ## Exact next acceptance
 
@@ -51,6 +49,6 @@ On the reconciled exact review head, run the ordinary Mission reliability verifi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-devexec-mission-constraint-continuation.ps1
 ```
 
-Then run the pinned SHIRO-WS host acceptance packet on a normal clean repository state. Do not place the active development checkout into a merge/rebase state merely to test the negative path; the temporary-repository regression covers that failure class deterministically. Read back `SUMMARY.json`, `VERIFICATION.json`, their SHA-256 values, all five component logs/hashes, and `mission_probe_root` before continuing to Local Agent / Local Executor and the remaining forced-kill acceptance matrix.
+Then run the pinned SHIRO-WS host acceptance packet on a normal clean repository state. Do not place the active development checkout into a merge/rebase state merely to test the negative path; the temporary-repository regressions cover that failure class deterministically. Read back `SUMMARY.json`, `VERIFICATION.json`, their SHA-256 values, all five component logs/hashes, and `mission_probe_root` before continuing to Local Agent / Local Executor and the remaining forced-kill acceptance matrix.
 
 `GOAL_PATCH / supersede_current_goal` remains outside this repair and should stay PENDING until Mission reliability acceptance closes.
