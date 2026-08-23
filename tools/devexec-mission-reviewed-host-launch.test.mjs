@@ -42,6 +42,17 @@ function successfulRunner(root, calls) {
   };
 }
 
+test("programmatic use requires an explicit reviewed root and PowerShell executable", () => {
+  assert.throws(
+    () => runReviewedHostAcceptance({expectedHead: HEAD}),
+    /MISSION_REVIEWED_HOST_ROOT_REQUIRED/,
+  );
+  assert.throws(
+    () => runReviewedHostAcceptance({reviewedRoot: process.cwd(), expectedHead: HEAD, powershellExecutable: ""}),
+    /MISSION_REVIEWED_HOST_POWERSHELL_REQUIRED/,
+  );
+});
+
 test("reviewed host launch isolates Git authority for ordinary verifier and unchanged host packet", () => withReviewedRoot((root) => {
   const calls = [];
   const report = runReviewedHostAcceptance({
@@ -75,6 +86,26 @@ test("reviewed host launch isolates Git authority for ordinary verifier and unch
     assert.equal(env.GIT_ATTR_NOSYSTEM, "1");
     assert.equal(env.GIT_NO_REPLACE_OBJECTS, "1");
   }
+}));
+
+test("spawn error fails loudly instead of being misclassified as an invalid command result", () => withReviewedRoot((root) => {
+  const calls = [];
+  const runner = successfulRunner(root, calls);
+  assert.throws(() => runReviewedHostAcceptance({
+    reviewedRoot: root,
+    expectedHead: HEAD,
+    powershellExecutable: "powershell.exe",
+    commandRunner(command, args, options) {
+      if (command === "powershell.exe") {
+        calls.push({command, args: [...args], options});
+        return {status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn ENOENT"), {code: "ENOENT"})};
+      }
+      return runner(command, args, options);
+    },
+  }), (error) => error.message === "MISSION_REVIEWED_HOST_COMMAND_FAILED"
+    && error.label === "ordinary-mission-reliability"
+    && error.status === null
+    && error.cause?.code === "ENOENT");
 }));
 
 test("missing ordinary reliability PASS marker prevents host packet launch", () => withReviewedRoot((root) => {
