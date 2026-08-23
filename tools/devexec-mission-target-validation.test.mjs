@@ -7,7 +7,6 @@ import test from "node:test";
 import {openMissionControl} from "./devexec-mission-control.mjs";
 import {
   beginMissionChildLaunch,
-  createMissionChildDispatchPreflight,
   readMissionLaunchState,
   requestMissionChildLaunch,
 } from "./devexec-mission-launch.mjs";
@@ -35,6 +34,22 @@ function request(control, target_alias) {
   });
 }
 
+function corruptLaunch(control, field, value) {
+  const file = path.join(control.paths.root, "launch-state.json");
+  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+  persisted.launches[0][field] = value;
+  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+}
+
+function assertPendingWithoutAttempt(control) {
+  const after = readMissionLaunchState(control).launches[0];
+  assert.equal(after.status, "PENDING");
+  assert.equal(after.launch_attempt_id, null);
+  assert.equal(after.launcher_request_id, null);
+  assert.equal(after.lease_token, null);
+  assert.equal(after.lease_until, null);
+}
+
 for (const [label, value] of [
   ["blank", "   "],
   ["non-string", {bad: true}],
@@ -48,10 +63,7 @@ for (const [label, value] of [
   test(`legacy malformed ${label} target is rejected before PENDING -> LAUNCHING`, async () => {
     const control = controlFor();
     const requested = request(control, "valid-target");
-    const file = path.join(control.paths.root, "launch-state.json");
-    const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
-    persisted.launches[0].target_alias = value;
-    fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+    corruptLaunch(control, "target_alias", value);
 
     let spawnCalls = 0;
     await assert.rejects(
@@ -68,20 +80,14 @@ for (const [label, value] of [
       /MISSION_LAUNCH_TARGET_ALIAS_INVALID/,
     );
     assert.equal(spawnCalls, 0);
-    const after = readMissionLaunchState(control).launches[0];
-    assert.equal(after.status, "PENDING");
-    assert.equal(after.launch_attempt_id, null);
-    assert.equal(after.launcher_request_id, null);
+    assertPendingWithoutAttempt(control);
   });
 }
 
 test("durable constraints corruption is rejected before PENDING -> LAUNCHING", async () => {
   const control = controlFor();
   const requested = request(control, "valid-target");
-  const file = path.join(control.paths.root, "launch-state.json");
-  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
-  persisted.launches[0].constraints = "corrupt";
-  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+  corruptLaunch(control, "constraints", "corrupt");
 
   let spawnCalls = 0;
   await assert.rejects(
@@ -98,24 +104,20 @@ test("durable constraints corruption is rejected before PENDING -> LAUNCHING", a
     /constraints must be an array/,
   );
   assert.equal(spawnCalls, 0);
-  const after = readMissionLaunchState(control).launches[0];
-  assert.equal(after.status, "PENDING");
-  assert.equal(after.launch_attempt_id, null);
-  assert.equal(after.launcher_request_id, null);
+  assertPendingWithoutAttempt(control);
 });
 
 for (const [field, value, expected] of [
   ["goal", "   ", /launch\.goal required/],
   ["parent_run_id", "", /launch\.parent_run_id required/],
   ["child_run_id", null, /launch\.child_run_id required/],
+  ["parent_run_id", "RUN-OTHER", /STALE_PARENT_RUN_ID/],
+  ["child_run_id", "RUN-ROOT", /CHILD_RUN_ID_ALREADY_EXISTS/],
 ]) {
-  test(`durable ${field} corruption is rejected before PENDING -> LAUNCHING`, async () => {
+  test(`durable ${field}=${JSON.stringify(value)} corruption is rejected before PENDING -> LAUNCHING`, async () => {
     const control = controlFor();
     const requested = request(control, "valid-target");
-    const file = path.join(control.paths.root, "launch-state.json");
-    const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
-    persisted.launches[0][field] = value;
-    fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+    corruptLaunch(control, field, value);
 
     let spawnCalls = 0;
     await assert.rejects(
@@ -132,12 +134,7 @@ for (const [field, value, expected] of [
       expected,
     );
     assert.equal(spawnCalls, 0);
-    const after = readMissionLaunchState(control).launches[0];
-    assert.equal(after.status, "PENDING");
-    assert.equal(after.launch_attempt_id, null);
-    assert.equal(after.launcher_request_id, null);
-    assert.equal(after.lease_token, null);
-    assert.equal(after.lease_until, null);
+    assertPendingWithoutAttempt(control);
   });
 }
 
@@ -160,38 +157,27 @@ test("invalid launch entry path is rejected before PENDING -> LAUNCHING", async 
     /entry_path required/,
   );
   assert.equal(spawnCalls, 0);
-  const after = readMissionLaunchState(control).launches[0];
-  assert.equal(after.status, "PENDING");
-  assert.equal(after.launch_attempt_id, null);
-  assert.equal(after.launcher_request_id, null);
+  assertPendingWithoutAttempt(control);
 });
 
-test("trusted dispatch preflight validates the durable snapshot before launch metadata is persisted", () => {
+test("declarative dispatch preflight validates the durable snapshot before launch metadata is persisted", () => {
   const control = controlFor();
   request(control, "valid-target");
-  const file = path.join(control.paths.root, "launch-state.json");
-  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
-  persisted.launches[0].constraints = "corrupt";
-  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+  corruptLaunch(control, "constraints", "corrupt");
 
   assert.throws(() => beginMissionChildLaunch(control, "LAUNCH-1", {
     launch_attempt_id: "ATTEMPT-ATOMIC",
     launcher_request_id: "REQUEST-ATOMIC",
-    preflight: createMissionChildDispatchPreflight(control, {
+    dispatch_preflight: {
       entry_path: "devexec-goal.mjs",
       node_path: "node",
-    }),
+    },
   }), /constraints must be an array/);
 
-  const after = readMissionLaunchState(control).launches[0];
-  assert.equal(after.status, "PENDING");
-  assert.equal(after.launch_attempt_id, null);
-  assert.equal(after.launcher_request_id, null);
-  assert.equal(after.lease_token, null);
-  assert.equal(after.lease_until, null);
+  assertPendingWithoutAttempt(control);
 });
 
-test("begin rejects arbitrary synchronous preflight before invoking it or transitioning", () => {
+test("begin rejects legacy synchronous callback preflight before invoking it or transitioning", () => {
   const control = controlFor();
   request(control, "valid-target");
   let preflightCalls = 0;
@@ -202,17 +188,12 @@ test("begin rejects arbitrary synchronous preflight before invoking it or transi
       preflightCalls += 1;
       return {ok: true};
     },
-  }), /MISSION_LAUNCH_UNTRUSTED_PREFLIGHT/);
+  }), /MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN/);
   assert.equal(preflightCalls, 0);
-  const after = readMissionLaunchState(control).launches[0];
-  assert.equal(after.status, "PENDING");
-  assert.equal(after.launch_attempt_id, null);
-  assert.equal(after.launcher_request_id, null);
-  assert.equal(after.lease_token, null);
-  assert.equal(after.lease_until, null);
+  assertPendingWithoutAttempt(control);
 });
 
-test("begin rejects arbitrary asynchronous preflight before invoking it or transitioning", () => {
+test("begin rejects legacy async callback preflight before invoking it or transitioning", () => {
   const control = controlFor();
   request(control, "valid-target");
   let preflightCalls = 0;
@@ -223,12 +204,20 @@ test("begin rejects arbitrary asynchronous preflight before invoking it or trans
       preflightCalls += 1;
       return {ok: true};
     },
-  }), /MISSION_LAUNCH_UNTRUSTED_PREFLIGHT/);
+  }), /MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN/);
   assert.equal(preflightCalls, 0);
-  const after = readMissionLaunchState(control).launches[0];
-  assert.equal(after.status, "PENDING");
-  assert.equal(after.launch_attempt_id, null);
-  assert.equal(after.launcher_request_id, null);
+  assertPendingWithoutAttempt(control);
+});
+
+test("invalid declarative dispatch preflight is rejected before transition", () => {
+  const control = controlFor();
+  request(control, "valid-target");
+  assert.throws(() => beginMissionChildLaunch(control, "LAUNCH-1", {
+    launch_attempt_id: "ATTEMPT-BAD-DESCRIPTOR",
+    launcher_request_id: "REQUEST-BAD-DESCRIPTOR",
+    dispatch_preflight: () => ({bad: true}),
+  }), /MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID/);
+  assertPendingWithoutAttempt(control);
 });
 
 test("target alias is canonicalized before it becomes durable launch state", () => {
