@@ -6,20 +6,22 @@ import {fileURLToPath} from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const wrapper = path.join(HERE, "verify-devexec-mission-host-acceptance.ps1");
+const hostLockProbe = path.join(HERE, "devexec-mission-host-lock-acceptance.mjs");
+const fileIdentityProbe = path.join(HERE, "devexec-mission-file-identity-host-probe.mjs");
 
-function readWrapper() {
-  return fs.readFileSync(wrapper, "utf8");
+function read(file) {
+  return fs.readFileSync(file, "utf8");
 }
 
 test("authoritative host wrapper requires a pinned ExpectedHead", () => {
-  const source = readWrapper();
+  const source = read(wrapper);
   assert.match(source, /\[Parameter\(Mandatory=\$true\)\]\[string\]\$ExpectedHead/);
   assert.match(source, /ExpectedHead is required for authoritative Mission host acceptance/);
   assert.match(source, /--expected-head", \$ExpectedHead/);
 });
 
 test("host wrapper records clean checkout preflight and postflight", () => {
-  const source = readWrapper();
+  const source = read(wrapper);
   assert.match(source, /00-repo-preflight/);
   assert.match(source, /04-repo-postflight/);
   assert.match(source, /source_checkout_preflight_clean = "PASS"/);
@@ -27,7 +29,7 @@ test("host wrapper records clean checkout preflight and postflight", () => {
 });
 
 test("host wrapper requires explicit PASS markers for every component", () => {
-  const source = readWrapper();
+  const source = read(wrapper);
   for (const marker of [
     "MISSION_HOST_PREFLIGHT=PASS",
     "MISSION_RELIABILITY_CHECK=PASS",
@@ -41,17 +43,27 @@ test("host wrapper requires explicit PASS markers for every component", () => {
 });
 
 test("host wrapper uses non-reused evidence directory identity", () => {
-  const source = readWrapper();
+  const source = read(wrapper);
   assert.match(source, /yyyyMMdd-HHmmss-fff/);
   assert.match(source, /\[Guid\]::NewGuid\(\)/);
   assert.doesNotMatch(source, /New-Item[^\r\n]+-Force[^\r\n]+\$runDir/);
 });
 
 test("filesystem-sensitive probes are pinned to Mission base rather than EvidenceRoot", () => {
-  const source = readWrapper();
+  const source = read(wrapper);
   assert.match(source, /\$missionBase = \$env:LOCALAPPDATA/);
   assert.match(source, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT = \$missionBase/);
   assert.match(source, /DEVEXEC_MISSION_HOST_PROBE_ROOT = \$missionBase/);
   assert.match(source, /mission_probe_root = \$missionBase/);
   assert.doesNotMatch(source, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT = \$runDir/);
+
+  const lockSource = read(hostLockProbe);
+  assert.match(lockSource, /DEVEXEC_MISSION_HOST_PROBE_ROOT/);
+  assert.match(lockSource, /path\.join\(probeParent, "\.devexec-mission-host-live-kill-"\)/);
+  assert.match(lockSource, /path\.join\(probeParent, "\.devexec-mission-host-thenable-"\)/);
+  assert.match(lockSource, /probe_parent: probeParent/);
+
+  const identitySource = read(fileIdentityProbe);
+  assert.match(identitySource, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT/);
+  assert.match(identitySource, /path\.join\(parent, "\.devexec-file-identity-probe-"\)/);
 });
