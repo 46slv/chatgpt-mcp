@@ -88,5 +88,5 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "MISSION_RELIABILITY_CHECK=PASS"
 Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
 Write-Host "Cross-process Mission lock exclusion plus explicit dead-owner quarantine/recovery regression=PASS"
-Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash,=PASS"
+Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
