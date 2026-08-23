@@ -34,6 +34,7 @@ $testFiles = @(
     "tools/devexec-mission-lock-process.test.mjs",
     "tools/devexec-mission-lock-recovery.test.mjs",
     "tools/devexec-mission-lock-resume.test.mjs",
+    "tools/devexec-mission-recovery-api-boundary.test.mjs",
     "tools/devexec-mission-recovery-claim-entry.test.mjs",
     "tools/devexec-mission-lock-publication.test.mjs",
     "tools/devexec-mission-control.test.mjs",
@@ -108,7 +109,7 @@ Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
 Write-Host "Cross-process Mission lock exclusion plus atomic stale-recovery claim/concurrent-recoverer regression=PASS"
 Write-Host "Interrupted neutral or PID-bearing stale-recovery claim resumes through movable-owner file identity proof=PASS"
 Write-Host "Recovery owner+neutral mixed state preserves canonical lock and blocks Mission entry before Local Agent side effects=PASS"
-Write-Host "Independent legacy stale-lock mutator is retired; resumable arbiter is the sole mutating recovery surface=PASS"
+Write-Host "Independent legacy stale-lock mutator is retired; static API-boundary test prevents production runtime reuse=PASS"
 Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlink=PASS"
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
