@@ -106,6 +106,30 @@ if (helperMode === "crash_before_publish") {
     next.release();
   }));
 
+  test("atomic publish failure leaves no canonical lock or staging artifact", () => withRoot(root => {
+    const originalLinkSync = fs.linkSync;
+    fs.linkSync = () => {
+      const error = new Error("hard links unavailable");
+      error.code = "EPERM";
+      throw error;
+    };
+    try {
+      assert.throws(
+        () => acquireMissionLock(root, {owner: "unsupported-hardlink"}),
+        error => {
+          assert.equal(error?.message, "MISSION_CONTROL_LOCK_ATOMIC_PUBLISH_FAILED");
+          assert.equal(error?.fs_code, "EPERM");
+          return true;
+        },
+      );
+    } finally {
+      fs.linkSync = originalLinkSync;
+    }
+    assert.equal(fs.existsSync(missionLockPath(root)), false);
+    assert.deepEqual(stagingFiles(root), []);
+    assert.equal(inspectMissionLock(root).status, "UNLOCKED");
+  }));
+
   test("normal acquisition removes its staging alias after publication", () => withRoot(root => {
     const lock = acquireMissionLock(root, {owner: "normal-publish"});
     const inspected = inspectMissionLock(root);
