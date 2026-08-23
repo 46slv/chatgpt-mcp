@@ -14,7 +14,7 @@ Current reviewed continuation authority at implementation start:
 - commit tree: `ddc1f9ed6b09421b441f14a4afdc0137d68ba148`
 - source branch: `automation/devexec-mission-host-writer-strict-utf8-reconciled-20260823`
 
-The commit/tree pair above was read from GitHub immediately before this dedicated branch was created.
+The commit/tree pair above was read from GitHub immediately before this dedicated branch was created. A recursive GitHub tree readback for `ddc1f9ed...` was also checked for executable-file (`100755`) and symlink (`120000`) entries and neither mode is present. Therefore the current reviewed tree is compatible with Windows RAW reconstruction where ordinary files are materialized as `100644`.
 
 ## Implementation
 
@@ -46,7 +46,17 @@ node tools/devexec-mission-raw-tree.mjs --root <RAW_MIRROR_ROOT> --expected-comm
 - one changed byte fails closed;
 - the CLI emits the exact PASS marker only for a matching tree.
 
-Cloud validation on Node v22.16.0 + Git reported 4/4 PASS and both files passed `node --check` before publication.
+The ordinary Mission reliability wrapper now syntax-checks this module and runs the raw-tree regression alongside the existing Mission test bundle.
+
+Cloud validation actually performed:
+
+- Node v22.16.0 `node --check` for module and test: PASS.
+- Focused committed-source equivalent test run: **4/4 PASS**.
+- Independent randomized Git oracle probe: **100/100 generated directory trees matched `git write-tree` exactly**.
+- GitHub source/readback for the published module and test: PASS.
+- Current reviewed commit tree mode scan: no `100755` or `120000` entries.
+
+The randomized probe is supplemental diagnostic evidence and is not itself part of the committed test suite.
 
 ## Boundary: what this does not prove
 
