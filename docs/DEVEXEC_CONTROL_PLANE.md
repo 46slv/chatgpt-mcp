@@ -1,4 +1,4 @@
-﻿# Dev Exec Control Plane
+# Dev Exec Control Plane
 
 Status: DEV-004
 
@@ -198,3 +198,21 @@ bindings.
 Runtime packaging is explicit and versioned. Existing runtime directories are
 not reused as mutable development workspaces. The packaged Control Plane
 preserves loopback-only transport and the existing Mission authority chain.
+
+## DEV-006 user-logon bootstrap
+
+DEV-003 autonomous new-RUN, DEV-004 Control Plane / GUI-serverization, and
+DEV-005 operational productization are closed. Final DEV-005 published authority
+is `7ae22906e77ae83d6125e419b2b3bf5b268562b6`.
+
+DEV-006 removes normal-path manual first launch. A non-admin Windows user Startup
+shortcut invokes a headless launcher bound only to the versioned stable runtime.
+It delegates to the existing `control start` lifecycle, preserving single-instance
+behavior, loopback-only networking, and the existing Mission authority chain.
+
+Manual Start Menu and shell entrypoints remain recovery fallbacks.
+
+Automated acceptance covers install/status/disable, exact launcher execution,
+duplicate-start dedupe, Doctor health, stable-runtime binding, and the full
+Control Plane regression. A literal future Windows sign-in occurrence remains
+an environmental observation rather than a code-path gap.
