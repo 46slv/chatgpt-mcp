@@ -42,10 +42,12 @@ test("host wrapper requires explicit PASS markers for every component", () => {
   assert.match(source, /component_pass_markers = "PASS"/);
 });
 
-test("host wrapper uses non-reused evidence directory identity", () => {
+test("host wrapper creates evidence parent but never reuses a run directory", () => {
   const source = read(wrapper);
   assert.match(source, /yyyyMMdd-HHmmss-fff/);
   assert.match(source, /\[Guid\]::NewGuid\(\)/);
+  assert.match(source, /New-Item -ItemType Directory -Path \$EvidenceRoot -Force -ErrorAction Stop/);
+  assert.match(source, /New-Item -ItemType Directory -Path \$runDir -ErrorAction Stop/);
   assert.doesNotMatch(source, /New-Item[^\r\n]+-Force[^\r\n]+\$runDir/);
 });
 
