@@ -7,7 +7,6 @@ import {loadMissionState} from "./devexec-mission-state.mjs";
 import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
 
 const ACTIVE = new Set(["PENDING", "LAUNCHING", "LAUNCHED", "AMBIGUOUS"]);
-const TRUSTED_DISPATCH_PREFLIGHTS = new WeakSet();
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -162,32 +161,14 @@ export function requestMissionChildLaunch(control, input, {
   });
 }
 
-// Produce the only preflight capability accepted by beginMissionChildLaunch().
-// The callback is deliberately not caller-supplied: it can only perform the
-// pure launch-spec construction that must share the same lock/snapshot as the
-// PENDING -> LAUNCHING transition. This prevents arbitrary synchronous side
-// effects from being smuggled into the atomic section while retaining a narrow
-// compatibility seam for direct begin callers.
-export function createMissionChildDispatchPreflight(control, {
-  entry_path,
-  node_path = process.execPath,
-} = {}) {
-  if (!control?.state?.mission_id) throw new Error("mission control required");
-  const preflight = durableLaunch => buildMissionChildLaunchSpec(control, durableLaunch, {
-    entry_path,
-    node_path,
-  });
-  TRUSTED_DISPATCH_PREFLIGHTS.add(preflight);
-  return preflight;
-}
-
 export function beginMissionChildLaunch(control, launchId, {
   launch_attempt_id,
   launcher_request_id,
   lease_token = crypto.randomUUID(),
   lease_ms = 120000,
   now = new Date().toISOString(),
-  preflight = null,
+  dispatch_preflight = null,
+  preflight = undefined,
 } = {}) {
   return withLaunchStateLock(control, () => {
     const state = loadLaunchState(control);
@@ -203,20 +184,22 @@ export function beginMissionChildLaunch(control, launchId, {
     }
     if (launch.status !== "PENDING") throw new Error(`launch not pending: ${launch.status}`);
 
-    // Deterministic dispatch validation must share the same Mission lock and
-    // durable snapshot as PENDING -> LAUNCHING. Only a one-shot capability
-    // created by createMissionChildDispatchPreflight() is accepted here; an
-    // arbitrary callback could perform unrelated side effects before the
-    // launch transition and leave them unjournaled if it later throws.
+    // Do not execute caller-supplied code while the Mission lock is held. The
+    // old callback-shaped preflight could perform an unrelated side effect and
+    // then throw while durable launch state remained PENDING. Atomic dispatch
+    // validation is declarative: only entry/node inputs are accepted here and
+    // the module itself runs the pure launch-spec builder against this exact
+    // durable snapshot immediately before PENDING -> LAUNCHING.
+    if (preflight !== undefined) throw new Error("MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN");
     let preflightResult = null;
-    if (preflight != null) {
-      if (typeof preflight !== "function" || !TRUSTED_DISPATCH_PREFLIGHTS.delete(preflight)) {
-        throw new Error("MISSION_LAUNCH_UNTRUSTED_PREFLIGHT");
+    if (dispatch_preflight != null) {
+      if (typeof dispatch_preflight !== "object" || Array.isArray(dispatch_preflight)) {
+        throw new Error("MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID");
       }
-      preflightResult = preflight(clone(launch));
-      if (preflightResult && typeof preflightResult.then === "function") {
-        throw new Error("mission launch preflight must be synchronous");
-      }
+      preflightResult = buildMissionChildLaunchSpec(control, clone(launch), {
+        entry_path: dispatch_preflight.entry_path,
+        node_path: dispatch_preflight.node_path ?? process.execPath,
+      });
     }
 
     launch.status = "LAUNCHING";
@@ -318,7 +301,9 @@ export function buildMissionChildLaunchSpec(control, launch, {
   if (missionId !== control.state.mission_id) throw new Error("launch/control mission mismatch");
   if (!["PENDING", "LAUNCHING"].includes(launch.status)) throw new Error("launch not dispatchable");
   const parentRunId = required(launch.parent_run_id, "launch.parent_run_id");
+  if (parentRunId !== control.state.current_run_id) throw new Error("STALE_PARENT_RUN_ID");
   const childRunId = required(launch.child_run_id, "launch.child_run_id");
+  if (control.state.runs.some(run => run.run_id === childRunId)) throw new Error("CHILD_RUN_ID_ALREADY_EXISTS");
   const goal = required(launch.goal, "launch.goal");
   const constraints = normalizeConstraints(launch.constraints);
   const targetAlias = normalizeDurableTargetAlias(launch.target_alias);
