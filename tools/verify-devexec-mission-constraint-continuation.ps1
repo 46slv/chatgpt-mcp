@@ -30,6 +30,7 @@ $testFiles = @(
     "tools/devexec-mission-lock.test.mjs",
     "tools/devexec-mission-lock-process.test.mjs",
     "tools/devexec-mission-lock-recovery.test.mjs",
+    "tools/devexec-mission-lock-publication.test.mjs",
     "tools/devexec-mission-control.test.mjs",
     "tools/devexec-mission-launch-review.test.mjs",
     "tools/devexec-mission-process-crash.test.mjs",
@@ -88,5 +89,6 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "MISSION_RELIABILITY_CHECK=PASS"
 Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
 Write-Host "Cross-process Mission lock exclusion plus explicit dead-owner quarantine/recovery regression=PASS"
+Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
