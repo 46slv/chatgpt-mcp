@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import {durableWriteJsonAtomic} from "./devexec-durable-write.mjs";
 import {withMissionLock} from "./devexec-mission-lock.mjs";
 import {loadMissionState} from "./devexec-mission-state.mjs";
 import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
@@ -76,9 +77,7 @@ function loadLaunchState(control) {
 function saveLaunchState(control, state) {
   const file = launchStateFile(control);
   fs.mkdirSync(path.dirname(file), {recursive: true});
-  const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(temp, JSON.stringify(state, null, 2) + "\n", "utf8");
-  fs.renameSync(temp, file);
+  durableWriteJsonAtomic(file, state);
 }
 
 function semanticRequest(control, input) {
