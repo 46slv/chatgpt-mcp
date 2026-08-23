@@ -210,24 +210,72 @@ export function acquireMissionLock(missionRoot, {
   };
 }
 
+function callbackIsIntrinsicallyAsync(fn) {
+  const kind = fn?.constructor?.name;
+  return kind === "AsyncFunction" || kind === "AsyncGeneratorFunction";
+}
+
+function isThenable(value) {
+  return Boolean(
+    value != null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof value.then === "function"
+  );
+}
+
+function deferLockReleaseUntilSettled(lock, thenable) {
+  Promise.resolve(thenable).then(
+    () => {
+      try { lock.release(); } catch (error) {
+        process.emitWarning(`Mission lock deferred release failed: ${error?.message || String(error)}`);
+      }
+    },
+    () => {
+      try { lock.release(); } catch (error) {
+        process.emitWarning(`Mission lock deferred release failed: ${error?.message || String(error)}`);
+      }
+    },
+  );
+}
+
 export function withMissionLock(missionRoot, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("mission lock callback required");
+
+  // A declared async callback is identifiable before invocation. Reject it before
+  // acquiring the lock so none of its body can begin and later escape the
+  // synchronous critical section after an await.
+  if (callbackIsIntrinsicallyAsync(fn)) {
+    throw new Error("MISSION_LOCK_ASYNC_CALLBACK_UNSUPPORTED");
+  }
+
   const lock = acquireMissionLock(missionRoot, options);
   let callbackError = null;
+  let releaseDeferred = false;
   try {
     const result = fn(lock);
-    if (result && typeof result.then === "function") {
-      throw new Error("MISSION_LOCK_ASYNC_CALLBACK_UNSUPPORTED");
+    if (isThenable(result)) {
+      // A synchronous wrapper can still return a Promise/thenable after it has
+      // already been invoked, so it cannot be safely "un-called". Keep the lock
+      // held until that thenable settles; otherwise its continuation would run
+      // after the synchronous finally released the lock. The API still fails
+      // closed to the caller because async callbacks remain unsupported.
+      releaseDeferred = true;
+      deferLockReleaseUntilSettled(lock, result);
+      const unsupported = new Error("MISSION_LOCK_ASYNC_CALLBACK_UNSUPPORTED");
+      unsupported.lock_release_deferred = true;
+      throw unsupported;
     }
     return result;
   } catch (error) {
     callbackError = error;
     throw error;
   } finally {
-    try {
-      lock.release();
-    } catch (releaseError) {
-      if (!callbackError) throw releaseError;
+    if (!releaseDeferred) {
+      try {
+        lock.release();
+      } catch (releaseError) {
+        if (!callbackError) throw releaseError;
+      }
     }
   }
 }
