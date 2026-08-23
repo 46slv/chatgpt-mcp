@@ -40,20 +40,21 @@ function canonicalPath(value) {
   return process.platform === "win32" ? real.toLowerCase() : real;
 }
 
-function sha256File(file) {
-  const hash = crypto.createHash("sha256");
-  const fd = fs.openSync(file, "r");
+function sha256Bytes(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function readSnapshot(file) {
   try {
-    const buffer = Buffer.allocUnsafe(1024 * 128);
-    while (true) {
-      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
-      if (read === 0) break;
-      hash.update(buffer.subarray(0, read));
-    }
-  } finally {
-    fs.closeSync(fd);
+    const bytes = fs.readFileSync(file);
+    return {
+      bytes,
+      text: bytes.toString("utf8"),
+      sha256: sha256Bytes(bytes),
+    };
+  } catch (cause) {
+    throw verificationError("MISSION_HOST_EVIDENCE_READ_FAILED", {cause, path: file});
   }
-  return hash.digest("hex");
 }
 
 function hasExactMarker(text, marker) {
@@ -86,9 +87,13 @@ export function verifyMissionHostEvidence(summaryPath, {
 } = {}) {
   const summaryFile = canonicalPath(summaryPath);
   const summaryDir = canonicalPath(path.dirname(summaryFile));
+  const summarySnapshot = readSnapshot(summaryFile);
   let summary;
   try {
-    summary = JSON.parse(fs.readFileSync(summaryFile, "utf8"));
+    // Parse and hash one immutable in-memory byte snapshot. Parsing the file and
+    // hashing it through separate filesystem reads would allow a concurrent
+    // rewrite to make the receipt hash refer to bytes other than those verified.
+    summary = JSON.parse(summarySnapshot.text);
   } catch (cause) {
     throw verificationError("MISSION_HOST_EVIDENCE_SUMMARY_INVALID", {cause, summary_file: summaryFile});
   }
@@ -207,16 +212,18 @@ export function verifyMissionHostEvidence(summaryPath, {
         sha256: recordedHash,
       });
     }
-    const actualHash = sha256File(artifactFile);
-    if (actualHash !== recordedHash) {
+
+    // Hash and inspect the PASS marker from one in-memory snapshot so both
+    // assertions are about exactly the same bytes.
+    const artifactSnapshot = readSnapshot(artifactFile);
+    if (artifactSnapshot.sha256 !== recordedHash) {
       throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_HASH_MISMATCH", {
         artifact: name,
         expected_sha256: recordedHash,
-        actual_sha256: actualHash,
+        actual_sha256: artifactSnapshot.sha256,
       });
     }
-    const text = fs.readFileSync(artifactFile, "utf8");
-    if (!hasExactMarker(text, requiredMarker)) {
+    if (!hasExactMarker(artifactSnapshot.text, requiredMarker)) {
       throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_MARKER_MISSING", {
         artifact: name,
         marker: requiredMarker,
@@ -225,7 +232,7 @@ export function verifyMissionHostEvidence(summaryPath, {
     validatedArtifacts.push({
       name,
       path: artifactFile,
-      sha256: actualHash,
+      sha256: artifactSnapshot.sha256,
       marker: requiredMarker,
     });
   }
@@ -241,7 +248,7 @@ export function verifyMissionHostEvidence(summaryPath, {
     schema_version: 1,
     verified_at: new Date().toISOString(),
     summary_file: summaryFile,
-    summary_sha256: sha256File(summaryFile),
+    summary_sha256: summarySnapshot.sha256,
     expected_head: expected,
     recorded_head: recordedHead,
     mission_probe_root: missionProbeRoot,
@@ -308,7 +315,7 @@ export function verifyMissionHostEvidence(summaryPath, {
     try { fs.rmSync(tmp, {force: true}); } catch {}
 
     report.receipt_file = receiptPath;
-    report.receipt_sha256 = sha256File(receiptPath);
+    report.receipt_sha256 = readSnapshot(receiptPath).sha256;
   }
 
   return report;
