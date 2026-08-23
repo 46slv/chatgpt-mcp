@@ -28,6 +28,7 @@ $testFiles = @(
     "tools/devexec-mission-loop-boundary.test.mjs",
     "tools/devexec-mission-constraint-continuation.test.mjs",
     "tools/devexec-mission-lock.test.mjs",
+    "tools/devexec-mission-lock-process.test.mjs",
     "tools/devexec-mission-control.test.mjs",
     "tools/devexec-mission-launch-review.test.mjs",
     "tools/devexec-mission-process-crash.test.mjs",
@@ -85,5 +86,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "MISSION_RELIABILITY_CHECK=PASS"
 Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
+Write-Host "Cross-process Mission lock exclusion/stale-lock fail-closed regression=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard and pre-receipt child-side-effect exactly-once regression=PASS"
-Write-Host "Forced OS kill, concurrent external writers, Local Agent/Local Executor, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
+Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
