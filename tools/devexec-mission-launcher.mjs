@@ -5,7 +5,6 @@ import {
   buildMissionChildLaunchSpec,
   completeMissionChildLaunch,
   markMissionChildLaunchAmbiguous,
-  readMissionLaunchState,
 } from "./devexec-mission-launch.mjs";
 
 function required(value, name) {
@@ -48,22 +47,16 @@ export async function dispatchMissionChildLaunch(control, launch, {
   const attemptId = required(launch_attempt_id, "launch_attempt_id");
   const launcherRequestId = required(launcher_request_id, "launcher_request_id");
 
-  // The caller's launch object can be stale. Re-read the durable record and run
-  // every deterministic launch-spec validation before PENDING -> LAUNCHING.
-  // Otherwise a corrupted durable target/constraint/goal (or invalid entry path)
-  // can be discovered only after beginMissionChildLaunch() has persisted an
-  // in-flight attempt, leaving a false LAUNCHING record despite no spawn call.
-  const durableState = readMissionLaunchState(control);
-  const durableLaunch = durableState.launches.find(item => item.launch_id === launchId);
-  if (!durableLaunch) throw new Error("launch not found");
-  buildMissionChildLaunchSpec(control, durableLaunch, {entry_path, node_path});
-
+  // Deterministic spec validation and PENDING -> LAUNCHING must use the same
+  // durable snapshot under the same Mission lock. A separate pre-read can be
+  // invalidated by a concurrent writer before begin persists the attempt.
   const begun = beginMissionChildLaunch(control, launchId, {
     launch_attempt_id: attemptId,
     launcher_request_id: launcherRequestId,
     lease_token,
     lease_ms,
     now,
+    preflight: durableLaunch => buildMissionChildLaunchSpec(control, durableLaunch, {entry_path, node_path}),
   });
   if (begun.deduplicated) {
     // A durable LAUNCHING record with the same attempt means a previous dispatcher
@@ -71,7 +64,8 @@ export async function dispatchMissionChildLaunch(control, launch, {
     // would turn an ambiguous restart into a duplicate child RUN.
     throw new Error("MISSION_LAUNCH_DISPATCH_ALREADY_IN_FLIGHT");
   }
-  const spec = buildMissionChildLaunchSpec(control, begun.launch, {entry_path, node_path});
+  const spec = begun.preflight;
+  if (!spec) throw new Error("MISSION_LAUNCH_PREFLIGHT_RESULT_MISSING");
   const childEnv = {...spawn_env, ...spec.env};
   // target_alias:null is an explicit request to use normal/default routing for
   // this child. Because spawn_env may be inherited from a targeted parent,
