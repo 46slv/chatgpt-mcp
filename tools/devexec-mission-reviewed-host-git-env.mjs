@@ -22,24 +22,47 @@ export const GIT_CONFIG_AUTHORITY_ENV_KEYS = Object.freeze([
   "GIT_DEFAULT_REF_FORMAT",
 ]);
 
+const GIT_SAFE_OVERRIDE_ENV_KEYS = Object.freeze([
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_ATTR_NOSYSTEM",
+  "GIT_NO_REPLACE_OBJECTS",
+]);
+
+const AUTHORITY_KEYS = new Set(
+  [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS].map((key) => key.toUpperCase()),
+);
+const SAFE_OVERRIDE_KEYS = new Set(GIT_SAFE_OVERRIDE_ENV_KEYS.map((key) => key.toUpperCase()));
+
 function authorityError(code, details = {}) {
   const error = new Error(code);
   Object.assign(error, details);
   return error;
 }
 
+function upperEnvKey(key) {
+  return String(key).toUpperCase();
+}
+
+function isConfigPairKey(key) {
+  return /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(upperEnvKey(key));
+}
+
 export function inheritedGitEnvironmentContamination(env = process.env) {
   const contaminated = [];
-  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) {
-    if (Object.hasOwn(env, key)) contaminated.push(key);
+  for (const [key, value] of Object.entries(env)) {
+    const upper = upperEnvKey(key);
+    if (AUTHORITY_KEYS.has(upper)) {
+      contaminated.push(key);
+      continue;
+    }
+    if (upper === "GIT_CONFIG_COUNT" && String(value) !== "0") {
+      contaminated.push(key);
+      continue;
+    }
+    if (isConfigPairKey(key)) contaminated.push(key);
   }
-  if (Object.hasOwn(env, "GIT_CONFIG_COUNT") && env.GIT_CONFIG_COUNT !== "0") {
-    contaminated.push("GIT_CONFIG_COUNT");
-  }
-  for (const key of Object.keys(env)) {
-    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) contaminated.push(key);
-  }
-  return [...new Set(contaminated)].sort();
+  return [...new Set(contaminated)].sort((a, b) => a.localeCompare(b));
 }
 
 export function assertSafeInheritedGitEnvironment(env = process.env) {
@@ -58,9 +81,13 @@ export function buildIsolatedGitEnvironment(baseEnv = process.env, {
     throw authorityError("MISSION_GIT_ISOLATION_GLOBAL_CONFIG_PATH_REQUIRED");
   }
   const env = {...baseEnv};
-  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) delete env[key];
   for (const key of Object.keys(env)) {
-    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete env[key];
+    const upper = upperEnvKey(key);
+    if (AUTHORITY_KEYS.has(upper)
+      || SAFE_OVERRIDE_KEYS.has(upper)
+      || isConfigPairKey(key)) {
+      delete env[key];
+    }
   }
   env.GIT_CONFIG_COUNT = "0";
   env.GIT_CONFIG_NOSYSTEM = "1";
