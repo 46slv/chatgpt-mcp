@@ -20,7 +20,9 @@ $syntaxFiles = @(
     "tools/devexec-mission-constraint-envelope.mjs",
     "tools/devexec-target-alias.mjs",
     "tools/devexec-goal.mjs",
-    "tools/devexec-local-agent-goal-state.mjs"
+    "tools/devexec-local-agent-goal-state.mjs",
+    "tools/devexec-mission-recovery-interlock-probe.mjs",
+    "tools/devexec-mission-recovery-entry-interlock-probe.mjs"
 )
 
 $testFiles = @(
@@ -47,6 +49,11 @@ $testFiles = @(
     "tools/devexec-target-alias.test.mjs",
     "tools/devexec-local-agent-mission-boundary.test.mjs",
     "tools/devexec-mission-continuation-dispatch.test.mjs"
+)
+
+$regressionProbes = @(
+    "tools/devexec-mission-recovery-interlock-probe.mjs",
+    "tools/devexec-mission-recovery-entry-interlock-probe.mjs"
 )
 
 $realProcessProbe = "tools/devexec-mission-launch-real-e2e.mjs"
@@ -76,6 +83,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Mission reliability test bundle failed with exit $LASTEXITCODE"
 }
 
+foreach ($probe in $regressionProbes) {
+    & $node $probe
+    if ($LASTEXITCODE -ne 0) {
+        throw "Mission reliability regression probe failed: $probe exit $LASTEXITCODE"
+    }
+}
+
 if (-not (Test-Path $realProcessProbe)) {
     throw "Required real-process probe missing: $realProcessProbe"
 }
@@ -93,7 +107,8 @@ Write-Host "MISSION_RELIABILITY_CHECK=PASS"
 Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
 Write-Host "Cross-process Mission lock exclusion plus atomic stale-recovery claim/concurrent-recoverer regression=PASS"
 Write-Host "Interrupted neutral or PID-bearing stale-recovery claim resumes through movable-owner file identity proof=PASS"
-Write-Host "Live recovery owner remains fail-closed before Local Agent side effects=PASS"
+Write-Host "Recovery owner+neutral mixed state preserves canonical lock and blocks Mission entry before Local Agent side effects=PASS"
+Write-Host "Independent legacy stale-lock mutator is retired; resumable arbiter is the sole mutating recovery surface=PASS"
 Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlink=PASS"
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
