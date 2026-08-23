@@ -16,10 +16,11 @@ if ([string]::IsNullOrWhiteSpace($ExpectedHead)) {
 }
 
 # Windows PowerShell 5.1's Set-Content -Encoding UTF8 emits a UTF-8 BOM.
-# Node's JSON.parse rejects that BOM, so all persisted host-evidence text is
-# written explicitly as UTF-8 without BOM for consistent pwsh/Windows
-# PowerShell behavior and deterministic verifier input.
-$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+# Persist host evidence as BOM-free UTF-8 and also fail closed on invalid
+# UTF-16 input (for example an unpaired surrogate) so the writer cannot
+# replacement-encode text that the strict Node verifier would later accept as
+# canonical UTF-8 evidence.
+$script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false, $true)
 function Write-Utf8NoBom {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
