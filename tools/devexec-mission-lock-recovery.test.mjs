@@ -161,6 +161,50 @@ if (helperMode === "crash_with_lock") {
     assert.equal(quarantined.pid, inspected.record.pid);
   }));
 
+  test("a replacement published before recovery claim validation is never removed", () => withRoot(root => {
+    const inspected = crashWithLock(root);
+    assert.equal(inspected.status, "STALE");
+    const canonical = missionLockPath(root);
+    const quarantine = `${canonical}.stale-${inspected.record.token}.json`;
+    const originalLinkSync = fs.linkSync;
+    let replacement = null;
+    let injected = false;
+
+    const patchedLinkSync = (from, to) => {
+      if (
+        !injected &&
+        path.resolve(String(from)) === path.resolve(canonical) &&
+        path.resolve(String(to)) === path.resolve(quarantine)
+      ) {
+        injected = true;
+        fs.rmSync(canonical);
+        fs.linkSync = originalLinkSync;
+        try {
+          replacement = acquireMissionLock(root, {owner: "replacement-before-recovery-claim"});
+        } finally {
+          fs.linkSync = patchedLinkSync;
+        }
+      }
+      return originalLinkSync(from, to);
+    };
+
+    fs.linkSync = patchedLinkSync;
+    try {
+      assert.throws(
+        () => recoverStaleMissionLock(root),
+        /MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY/,
+      );
+      assert.equal(injected, true);
+      const current = inspectMissionLock(root);
+      assert.equal(current.status, "HELD");
+      assert.equal(current.record.token, replacement.token);
+      assert.equal(fs.existsSync(quarantine), false);
+    } finally {
+      fs.linkSync = originalLinkSync;
+      replacement?.release();
+    }
+  }));
+
   test("an interrupted recovery claim remains fail-closed instead of risking a replacement lock", () => withRoot(root => {
     const inspected = crashWithLock(root);
     assert.equal(inspected.status, "STALE");
