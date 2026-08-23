@@ -24,6 +24,11 @@ function sha256(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
+function canonical(file) {
+  const real = fs.realpathSync(file);
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-host-evidence-verify-"));
   const evidenceRoot = path.join(root, "evidence");
@@ -116,14 +121,14 @@ test("valid host evidence verifies and writes immutable receipt bound to SUMMARY
     });
     assert.equal(report.status, "PASS");
     assert.equal(report.summary_sha256, sha256(fx.summaryFile));
-    assert.equal(report.repo_root, fs.realpathSync(fx.repoRoot));
+    assert.equal(report.repo_root, canonical(fx.repoRoot));
     assert.equal(report.validated_artifacts.length, REQUIRED.length);
     assert.equal(fs.existsSync(receipt), true);
 
     const persisted = JSON.parse(fs.readFileSync(receipt, "utf8"));
     assert.equal(persisted.status, "PASS");
     assert.equal(persisted.summary_sha256, sha256(fx.summaryFile));
-    assert.equal(persisted.repo_root, fs.realpathSync(fx.repoRoot));
+    assert.equal(persisted.repo_root, canonical(fx.repoRoot));
     assert.equal(persisted.validated_artifacts.length, REQUIRED.length);
     assert.equal(report.receipt_sha256, sha256(receipt));
   } finally {
@@ -217,7 +222,7 @@ test("caller can pin the reviewed repository root recorded in SUMMARY", () => {
       expectedHead: HEAD,
       expectedRepoRoot: fx.repoRoot,
     });
-    assert.equal(report.repo_root, fs.realpathSync(fx.repoRoot));
+    assert.equal(report.repo_root, canonical(fx.repoRoot));
   } finally {
     fx.cleanup();
   }
@@ -296,7 +301,7 @@ test("competing verifier processes cannot replace the winning receipt", async ()
     const persisted = JSON.parse(fs.readFileSync(receipt, "utf8"));
     assert.equal(persisted.status, "PASS");
     assert.equal(persisted.summary_sha256, sha256(fx.summaryFile));
-    assert.equal(persisted.repo_root, fs.realpathSync(fx.repoRoot));
+    assert.equal(persisted.repo_root, canonical(fx.repoRoot));
   } finally {
     fx.cleanup();
   }
