@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import {openMissionControl} from "./devexec-mission-control.mjs";
+import {inspectMissionLock, recoverStaleMissionLock} from "./devexec-mission-lock.mjs";
 import {reconcileMissionChildLaunches} from "./devexec-mission-launch.mjs";
 import {
   activateMissionChildRun,
@@ -11,6 +12,7 @@ import {
   markMissionRootRunAmbiguous,
   reserveMissionChildRun,
 } from "./devexec-mission-run-admission.mjs";
+import {resolveMissionPaths} from "./devexec-mission-state.mjs";
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -22,6 +24,29 @@ function assertAgentResult(agent) {
     throw new Error("LOCAL_AGENT_START_RESULT_INVALID");
   }
   return agent;
+}
+
+function prepareMissionEntryLock(base, missionId) {
+  const paths = resolveMissionPaths(base, missionId);
+  const inspection = inspectMissionLock(paths.root);
+  if (inspection.status === "STALE" && inspection.recoverable === true) {
+    return recoverStaleMissionLock(paths.root);
+  }
+  if (["UNKNOWN_OWNER", "INVALID", "PROBE_FAILED"].includes(inspection.status)) {
+    const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_UNSAFE");
+    error.lock_file = inspection.file;
+    error.lock_status = inspection.status;
+    throw error;
+  }
+  // A live lock stays untouched. The normal open/acquire path will raise
+  // MISSION_CONTROL_LOCKED. This pre-entry hook only recovers a verified dead
+  // owner before any Local Agent side effect can occur.
+  return {
+    recovered: false,
+    status: inspection.status,
+    file: inspection.file,
+    quarantine_file: null,
+  };
 }
 
 export function startMissionLocalAgent({
@@ -36,6 +61,11 @@ export function startMissionLocalAgent({
   const runId = required(identity.run_id, "run_id");
   const parentRunId = identity.parent_run_id == null ? null : required(identity.parent_run_id, "parent_run_id");
   if (typeof start_local_agent !== "function") throw new Error("start_local_agent required");
+
+  // Recover only at the Mission entry/restart boundary and only before any
+  // Local Agent start side effect. All later lock failures stay fail-closed so
+  // a post-start ambiguity can never cause this function to replay the agent.
+  const lockRecovery = prepareMissionEntryLock(base, missionId);
 
   if (parentRunId === null) {
     const opened = openMissionControl({base, mission_id: missionId, run_id: runId, now});
@@ -74,7 +104,7 @@ export function startMissionLocalAgent({
     });
     const mission = openMissionControl({base, mission_id: missionId, run_id: runId, now});
     mission.created = opened.created;
-    return {mission, agent, start_attempt_id, launch_reconciled: false};
+    return {mission, agent, start_attempt_id, launch_reconciled: false, lock_recovery: lockRecovery};
   }
 
   reserveMissionChildRun({base, mission_id: missionId, run_id: runId, parent_run_id: parentRunId, now});
@@ -122,5 +152,11 @@ export function startMissionLocalAgent({
     now,
   });
   const reconciliation = reconcileMissionChildLaunches(mission, {now});
-  return {mission, agent, start_attempt_id, launch_reconciled: reconciliation.changed};
+  return {
+    mission,
+    agent,
+    start_attempt_id,
+    launch_reconciled: reconciliation.changed,
+    lock_recovery: lockRecovery,
+  };
 }
