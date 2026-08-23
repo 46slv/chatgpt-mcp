@@ -11,6 +11,7 @@ import {prepareRawSnapshotExactGitWorkspace} from "./devexec-mission-raw-git-boo
 
 const toolsDir = path.dirname(fileURLToPath(import.meta.url));
 const reviewedCommitObject = path.join(toolsDir, "devexec-reviewed-commit-3778734.commit");
+const hostPreflight = path.join(toolsDir, "devexec-mission-host-preflight.mjs");
 
 function makeOriginal() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mission-raw-exact-git-"));
@@ -77,6 +78,26 @@ test("exact commit object restores reviewed HEAD without requiring parent object
       {encoding: "utf8"},
     );
     assert.notEqual(parentProbe.status, 0);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("exact raw bootstrap satisfies the existing clean-checkout host preflight", () => {
+  const fixture = makeOriginal();
+  try {
+    prepareRawSnapshotExactGitWorkspace(fixture.root, {
+      expectedTree: fixture.tree,
+      expectedCommit: fixture.head,
+      commitObject: fixture.commitObject,
+    });
+    const preflight = spawnSync(
+      process.execPath,
+      [hostPreflight, "--repo", fixture.root, "--expected-head", fixture.head],
+      {encoding: "utf8"},
+    );
+    assert.equal(preflight.status, 0, `${preflight.stdout}\n${preflight.stderr}`);
+    assert.match(preflight.stdout, /^MISSION_HOST_PREFLIGHT=PASS$/m);
   } finally {
     cleanup(fixture);
   }
