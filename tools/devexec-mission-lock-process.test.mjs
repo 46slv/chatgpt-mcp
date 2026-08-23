@@ -56,6 +56,9 @@ if (helperMode) {
   }
 
   function waitForExit(child, timeoutMs = 5000) {
+    if (child.exitCode != null || child.signalCode != null) {
+      return Promise.resolve({code: child.exitCode, signal: child.signalCode});
+    }
     return new Promise((resolve, reject) => {
       let timer = null;
       const finish = (fn, value) => {
