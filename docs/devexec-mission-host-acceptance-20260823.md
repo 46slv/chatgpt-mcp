@@ -10,8 +10,8 @@ The packet is intended to run after the Mission lock/recovery/lifetime repair re
 
 1. **source checkout preflight**: the requested directory is the actual Git toplevel, the required `ExpectedHead` matches, and tracked/untracked worktree state is clean;
 2. the existing repository Mission reliability bundle, including focused tests, recovery regressions, and the existing real Node child launch/receipt/reconciliation probe;
-3. filesystem hard-link/file-identity behavior on the actual host volume used for evidence;
-4. new real-process Mission lock checks that prove a live lock owner blocks recovery, forced owner termination leaves recoverable durable evidence, recovery permits a new owner, and a rejected Promise-returning lock callback continues to exclude a competing Node process until its thenable settles;
+3. filesystem hard-link/file-identity behavior on the **actual Mission-state filesystem** derived from the same `LOCALAPPDATA` base used by `devexec-goal.mjs`;
+4. real-process Mission lock checks on that same Mission-state filesystem: live owner refusal, forced owner death/recovery, and returned-thenable cross-process exclusion;
 5. **source checkout postflight**: the reviewed HEAD and clean worktree state are rechecked after all components so a PASS cannot be attributed to a commit if the test run modified repository source/state.
 
 The real-process lock probe only spawns the current Node executable and disposable child processes it owns. It does not invoke Local Executor, Resolve, network publication, credentials, or unrelated user data.
@@ -26,7 +26,9 @@ Host evidence must be attributable to an explicitly reviewed Git commit. `HEAD` 
 - invocation from a nested path that is not the Git toplevel;
 - Git inspection failure.
 
-The same guard is run before and after the acceptance components. Evidence directories use a millisecond timestamp plus random suffix so repeated or concurrent runs do not silently reuse a prior run directory.
+The same guard is run before and after the acceptance components. Evidence directories use a millisecond timestamp plus random suffix so repeated or concurrent runs do not silently reuse a prior run directory. Every component must both exit successfully and emit its exact declared PASS marker; exit code 0 alone is not enough for the summary to claim PASS.
+
+Filesystem-sensitive evidence is intentionally decoupled from `EvidenceRoot`. The operator may store logs on another volume, but the hard-link identity and real-process lock probes remain bound to the Mission runtime base (`LOCALAPPDATA`, with the same user-home fallback semantics as `devexec-goal.mjs`). `SUMMARY.json` records that `mission_probe_root` explicitly.
 
 ## Exact host command
 
@@ -38,18 +40,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-devexec-missi
 
 The wrapper intentionally does not provide an authoritative acceptance mode without a pinned commit. If exploratory testing of another checkout is useful, obtain/review that commit first and pass its exact SHA rather than self-blessing an arbitrary current HEAD.
 
-A successful run emits `MISSION_HOST_ACCEPTANCE=PASS` and persists a unique evidence directory under `%LOCALAPPDATA%\ChatGPTMCPProbe\mission-host-acceptance` by default. Component output is retained and SHA-256 hashed; `SUMMARY.json` schema v2 records checkout HEAD, machine, checks, artifact hashes, and explicit remainder.
+A successful run emits `MISSION_HOST_ACCEPTANCE=PASS` and persists a unique evidence directory under `%LOCALAPPDATA%\ChatGPTMCPProbe\mission-host-acceptance` by default. Component output is retained and SHA-256 hashed; `SUMMARY.json` schema v2 records checkout HEAD, machine, Mission probe root, checks, artifact hashes, and explicit remainder.
 
-A failing component is persisted before the wrapper fails, so a regression does not disappear behind the first thrown PowerShell error.
+A failing component or missing PASS marker is persisted before the wrapper fails, so a regression does not disappear behind the first thrown PowerShell error.
 
 ## Host probe contracts
 
-`tools/devexec-mission-host-lock-acceptance.mjs` performs two real-process checks:
+`tools/devexec-mission-host-lock-acceptance.mjs` performs two real-process checks under `DEVEXEC_MISSION_HOST_PROBE_ROOT`, which the authoritative wrapper pins to the Mission base:
 
 - **Live owner -> forced death -> recovery:** a child owns the canonical Mission lock, recovery must fail with `MISSION_CONTROL_LOCK_OWNER_ALIVE`, the owned child is force-terminated, the canonical lock must remain as durable evidence, `recoverOrResumeStaleMissionLock()` must recover it, and a new owner must then acquire/release successfully.
 - **Returned thenable cross-process exclusion:** `withMissionLock()` must reject the unsupported Promise-returning callback while retaining the canonical lock; an independently spawned Node competitor must see `MISSION_CONTROL_LOCKED`; after the returned thenable settles, its continuation must have observed the canonical lock still present, then the lock must release and a new competitor must acquire successfully.
 
-The ordinary Mission reliability verifier syntax-checks the host-lock probe and runs the host-preflight unit tests, but deliberately does not execute the forced-kill host-lock scenario as part of the normal cloud/repository test bundle.
+`tools/devexec-mission-file-identity-host-probe.mjs` similarly runs under `DEVEXEC_FILE_IDENTITY_PROBE_ROOT=$missionBase`; a custom evidence directory cannot redirect this filesystem proof to a different volume.
+
+The ordinary Mission reliability verifier syntax-checks the host-lock/preflight modules and runs the host-preflight plus host-wrapper contract tests, but deliberately does not execute the forced-kill host-lock scenario as part of the normal cloud/repository test bundle.
 
 ## Safety and evidence boundaries
 
@@ -66,14 +70,15 @@ Because older already-running Node processes can retain legacy recovery code in 
 ## Cloud validation completed while preparing/reviewing this packet
 
 - GitHub branch/file/commit readback and compare succeeded.
-- The new checkout-preflight contract has focused clean/dirty/untracked/wrong-HEAD/nested-root regression coverage using disposable Git repositories.
+- The checkout-preflight contract has focused clean/dirty/untracked/wrong-HEAD/nested-root regression coverage using disposable Git repositories.
 - The focused preflight suite ran source-faithfully under Node v22.16.0 + Git 2.47.3 with **5/5 PASS**; a separate CLI probe confirmed dirty tracked state exits nonzero with `MISSION_HOST_PREFLIGHT_DIRTY_WORKTREE`.
+- Static wrapper-contract coverage guards pinned HEAD, pre/postflight, unique evidence directory identity, component PASS markers, and binding of filesystem-sensitive probes to the Mission base.
 - The cloud container has no `powershell`/`pwsh`, so the PowerShell wrapper and full Windows host packet are **not executed here**.
 - Windows/SHIRO-WS filesystem semantics, forced-kill behavior, Local Agent/Local Executor integration, and power-loss remain host-only until evidence is produced.
 
 ## Next acceptance sequence
 
-1. Run the ordinary Mission reliability verifier from a clean real checkout and confirm the new host-preflight tests pass.
-2. Run the host wrapper pinned to the exact reviewed branch HEAD and read back `SUMMARY.json` plus all five component logs/hashes.
+1. Run the ordinary Mission reliability verifier from a clean real checkout and confirm the new host-preflight/wrapper-contract tests pass.
+2. Run the host wrapper pinned to the exact reviewed branch HEAD and read back `SUMMARY.json` plus all five component logs/hashes. Confirm `mission_probe_root` is the intended Mission runtime base even if evidence is redirected elsewhere.
 3. If PASS, continue the remaining Local Agent/Local Executor and Mission child-launch kill/restart matrix without broadening into live Goal replacement.
 4. Only after Mission reliability acceptance is closed should the project proceed to the typed local Control API/service and then the Operator Console/GUI, per the current requirements.
