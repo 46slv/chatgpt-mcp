@@ -170,6 +170,22 @@ export function beginMissionChildLaunch(control, launchId, {
   dispatch_preflight = null,
   preflight = undefined,
 } = {}) {
+  // Normalize all caller-controlled preflight input before acquiring the Mission
+  // lock. Even a nominally declarative object can carry accessors/Proxy traps;
+  // property access under the lock would reintroduce caller-code execution in
+  // the atomic section. Only plain primitive strings cross the lock boundary.
+  if (preflight !== undefined) throw new Error("MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN");
+  let normalizedDispatchPreflight = null;
+  if (dispatch_preflight != null) {
+    if (typeof dispatch_preflight !== "object" || Array.isArray(dispatch_preflight)) {
+      throw new Error("MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID");
+    }
+    normalizedDispatchPreflight = {
+      entry_path: required(dispatch_preflight.entry_path, "entry_path"),
+      node_path: required(dispatch_preflight.node_path ?? process.execPath, "node_path"),
+    };
+  }
+
   return withLaunchStateLock(control, () => {
     const state = loadLaunchState(control);
     const launch = state.launches.find(item => item.launch_id === launchId);
@@ -184,23 +200,12 @@ export function beginMissionChildLaunch(control, launchId, {
     }
     if (launch.status !== "PENDING") throw new Error(`launch not pending: ${launch.status}`);
 
-    // Do not execute caller-supplied code while the Mission lock is held. The
-    // old callback-shaped preflight could perform an unrelated side effect and
-    // then throw while durable launch state remained PENDING. Atomic dispatch
-    // validation is declarative: only entry/node inputs are accepted here and
-    // the module itself runs the pure launch-spec builder against this exact
-    // durable snapshot immediately before PENDING -> LAUNCHING.
-    if (preflight !== undefined) throw new Error("MISSION_LAUNCH_CALLBACK_PREFLIGHT_FORBIDDEN");
-    let preflightResult = null;
-    if (dispatch_preflight != null) {
-      if (typeof dispatch_preflight !== "object" || Array.isArray(dispatch_preflight)) {
-        throw new Error("MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID");
-      }
-      preflightResult = buildMissionChildLaunchSpec(control, clone(launch), {
-        entry_path: dispatch_preflight.entry_path,
-        node_path: dispatch_preflight.node_path ?? process.execPath,
-      });
-    }
+    // The module itself performs deterministic spec construction against this
+    // exact durable snapshot immediately before PENDING -> LAUNCHING. No caller
+    // function/property access occurs while the Mission lock is held.
+    const preflightResult = normalizedDispatchPreflight == null
+      ? null
+      : buildMissionChildLaunchSpec(control, clone(launch), normalizedDispatchPreflight);
 
     launch.status = "LAUNCHING";
     launch.launch_attempt_id = attemptId;
