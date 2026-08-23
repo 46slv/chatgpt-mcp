@@ -4,9 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import {fileURLToPath} from "node:url";
 
 import {computeRawSnapshotGitTree} from "./devexec-mission-raw-tree.mjs";
 import {prepareRawSnapshotExactGitWorkspace} from "./devexec-mission-raw-git-bootstrap.mjs";
+
+const toolsDir = path.dirname(fileURLToPath(import.meta.url));
+const reviewedCommitObject = path.join(toolsDir, "devexec-reviewed-commit-3778734.commit");
 
 function makeOriginal() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mission-raw-exact-git-"));
@@ -39,6 +43,18 @@ function cleanup(fixture) {
 function git(root, args) {
   return execFileSync("git", ["-C", root, ...args], {encoding: "utf8"}).trim();
 }
+
+test("reviewed continuation commit artifact hashes to its exact GitHub commit and tree", () => {
+  const hash = execFileSync(
+    "git",
+    ["hash-object", "-t", "commit", reviewedCommitObject],
+    {encoding: "utf8"},
+  ).trim();
+  assert.equal(hash, "3778734b6fc1a9e22b59adaa49803ac1daca49e2");
+  const bytes = fs.readFileSync(reviewedCommitObject, "utf8");
+  assert.match(bytes, /^tree ddc1f9ed6b09421b441f14a4afdc0137d68ba148\n/);
+  assert.equal(bytes.endsWith("\n"), false);
+});
 
 test("exact commit object restores reviewed HEAD without requiring parent object", () => {
   const fixture = makeOriginal();
