@@ -23,6 +23,7 @@ $syntaxFiles = @(
     "tools/devexec-local-agent-goal-state.mjs",
     "tools/devexec-mission-recovery-interlock-probe.mjs",
     "tools/devexec-mission-recovery-entry-interlock-probe.mjs",
+    "tools/devexec-mission-host-preflight.mjs",
     "tools/devexec-mission-host-lock-acceptance.mjs"
 )
 
@@ -51,7 +52,8 @@ $testFiles = @(
     "tools/devexec-mission-target-validation.test.mjs",
     "tools/devexec-target-alias.test.mjs",
     "tools/devexec-local-agent-mission-boundary.test.mjs",
-    "tools/devexec-mission-continuation-dispatch.test.mjs"
+    "tools/devexec-mission-continuation-dispatch.test.mjs",
+    "tools/devexec-mission-host-preflight.test.mjs"
 )
 
 $regressionProbes = @(
@@ -116,4 +118,5 @@ Write-Host "Independent legacy stale-lock mutator is retired; static API-boundar
 Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlink=PASS"
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
+Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
 Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
