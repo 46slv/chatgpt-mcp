@@ -167,6 +167,7 @@ export function beginMissionChildLaunch(control, launchId, {
   lease_token = crypto.randomUUID(),
   lease_ms = 120000,
   now = new Date().toISOString(),
+  preflight = null,
 } = {}) {
   return withLaunchStateLock(control, () => {
     const state = loadLaunchState(control);
@@ -176,11 +177,25 @@ export function beginMissionChildLaunch(control, launchId, {
     const launcherRequestId = required(launcher_request_id, "launcher_request_id");
     if (launch.status === "LAUNCHING") {
       if (launch.launch_attempt_id === attemptId && launch.launcher_request_id === launcherRequestId) {
-        return {state, launch, deduplicated: true};
+        return {state, launch, deduplicated: true, preflight: null};
       }
       throw new Error("MISSION_LAUNCH_IN_FLIGHT");
     }
     if (launch.status !== "PENDING") throw new Error(`launch not pending: ${launch.status}`);
+
+    // Deterministic dispatch validation must share the same Mission lock and
+    // durable snapshot as PENDING -> LAUNCHING. A separate pre-read leaves a
+    // TOCTOU window where another writer can alter the launch after validation
+    // but before begin persists an in-flight attempt.
+    let preflightResult = null;
+    if (preflight != null) {
+      if (typeof preflight !== "function") throw new Error("mission launch preflight must be a function");
+      preflightResult = preflight(clone(launch));
+      if (preflightResult && typeof preflightResult.then === "function") {
+        throw new Error("mission launch preflight must be synchronous");
+      }
+    }
+
     launch.status = "LAUNCHING";
     launch.launch_attempt_id = attemptId;
     launch.launcher_request_id = launcherRequestId;
@@ -188,7 +203,7 @@ export function beginMissionChildLaunch(control, launchId, {
     launch.lease_until = new Date(Date.parse(now) + lease_ms).toISOString();
     state.revision += 1;
     saveLaunchState(control, state);
-    return {state, launch, deduplicated: false};
+    return {state, launch, deduplicated: false, preflight: preflightResult};
   });
 }
 
