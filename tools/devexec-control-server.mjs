@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import http from "node:http";
 import {URL} from "node:url";
 
@@ -11,6 +12,22 @@ const HOST = "127.0.0.1";
 const MAX_BODY_BYTES = 64 * 1024;
 const PROTOCOL = "devexec.control.http";
 const SCHEMA_VERSION = 1;
+
+const UI_HTML_PATH =
+  new URL("./devexec-control-ui.html", import.meta.url);
+
+const UI_JS_PATH =
+  new URL("./devexec-control-ui.js", import.meta.url);
+
+function sendText(response, status, contentType, body) {
+  response.writeHead(status, {
+    "content-type": contentType,
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "no-store",
+  });
+
+  response.end(body);
+}
 
 function sendJson(response, status, value) {
   const body = JSON.stringify(value);
@@ -187,6 +204,26 @@ export function createDevExecControlServer({
         request.url ?? "/",
         "http://127.0.0.1",
       );
+
+      if (method === "GET" && url.pathname === "/ui") {
+        sendText(
+          response,
+          200,
+          "text/html; charset=utf-8",
+          fs.readFileSync(UI_HTML_PATH, "utf8"),
+        );
+        return;
+      }
+
+      if (method === "GET" && url.pathname === "/ui/app.js") {
+        sendText(
+          response,
+          200,
+          "text/javascript; charset=utf-8",
+          fs.readFileSync(UI_JS_PATH, "utf8"),
+        );
+        return;
+      }
 
       if (
         method === "GET" &&
