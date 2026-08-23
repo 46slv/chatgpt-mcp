@@ -14,6 +14,7 @@ import {runAutonomousStartCli} from "./devexec-mission-autonomous-start-cli.mjs"
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const targetCli = path.join(here, "devexec-target.mjs");
+const controlCli = path.join(here, "devexec-control.mjs");
 const localAgentCli = path.join(here, "local-agent-facade.mjs");
 const goalCli = path.join(here, "devexec-goal.mjs");
 const runner = process.env.DEV_EXEC_RUNNER_PATH || path.join(here, "dev-exec-loop.mjs");
@@ -85,6 +86,10 @@ function usage() {
 const args = process.argv.slice(2);
 const command = args.shift();
 
+if (command === "control") {
+  const code = await runNode(controlCli, args, process.env);
+  process.exit(code);
+}
 if (command === "target") {
  const code = await runNode(targetCli, args);
  process.exit(code);
@@ -199,5 +204,4 @@ if (command !== "autonomous-start") {
   usage();
   process.exit(2);
 }
-
 
