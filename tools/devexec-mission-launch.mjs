@@ -313,17 +313,22 @@ export function buildMissionChildLaunchSpec(control, launch, {
   node_path = process.execPath,
   entry_path,
 } = {}) {
-  if (!launch || launch.mission_id !== control.state.mission_id) throw new Error("launch/control mission mismatch");
+  if (!launch) throw new Error("launch required");
+  const missionId = required(launch.mission_id, "launch.mission_id");
+  if (missionId !== control.state.mission_id) throw new Error("launch/control mission mismatch");
   if (!["PENDING", "LAUNCHING"].includes(launch.status)) throw new Error("launch not dispatchable");
+  const parentRunId = required(launch.parent_run_id, "launch.parent_run_id");
+  const childRunId = required(launch.child_run_id, "launch.child_run_id");
+  const goal = required(launch.goal, "launch.goal");
   const constraints = normalizeConstraints(launch.constraints);
   const targetAlias = normalizeDurableTargetAlias(launch.target_alias);
   return {
     command: required(node_path, "node_path"),
-    args: [required(entry_path, "entry_path"), launch.goal],
+    args: [required(entry_path, "entry_path"), goal],
     env: {
-      DEV_EXEC_MISSION_ID: launch.mission_id,
-      DEV_EXEC_PARENT_RUN_ID: launch.parent_run_id,
-      DEV_EXEC_RUN_ID: launch.child_run_id,
+      DEV_EXEC_MISSION_ID: missionId,
+      DEV_EXEC_PARENT_RUN_ID: parentRunId,
+      DEV_EXEC_RUN_ID: childRunId,
       // Always write these inherited-control keys, including explicit empty
       // values, so ambient state from the parent process cannot leak into an
       // unrelated child continuation.
