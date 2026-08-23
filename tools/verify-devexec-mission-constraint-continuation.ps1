@@ -31,6 +31,7 @@ $testFiles = @(
     "tools/devexec-mission-loop-boundary.test.mjs",
     "tools/devexec-mission-constraint-continuation.test.mjs",
     "tools/devexec-mission-lock.test.mjs",
+    "tools/devexec-mission-lock-lifetime.test.mjs",
     "tools/devexec-mission-lock-process.test.mjs",
     "tools/devexec-mission-lock-recovery.test.mjs",
     "tools/devexec-mission-lock-resume.test.mjs",
@@ -107,6 +108,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "MISSION_RELIABILITY_CHECK=PASS"
 Write-Host "Real Node child spawn/receipt/reconciliation probe=PASS"
 Write-Host "Cross-process Mission lock exclusion plus atomic stale-recovery claim/concurrent-recoverer regression=PASS"
+Write-Host "Synchronous Mission lock callback contract prevents declared async execution and keeps unexpected thenables locked until settlement=PASS"
 Write-Host "Interrupted neutral or PID-bearing stale-recovery claim resumes through movable-owner file identity proof=PASS"
 Write-Host "Recovery owner+neutral mixed state preserves canonical lock and blocks Mission entry before Local Agent side effects=PASS"
 Write-Host "Independent legacy stale-lock mutator is retired; static API-boundary test prevents production runtime reuse=PASS"
