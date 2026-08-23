@@ -29,7 +29,9 @@ The five artifacts remain:
 4. `03-host-lock-process.txt` — `MISSION_HOST_LOCK_ACCEPTANCE=PASS`
 5. `04-repo-postflight.txt` — `MISSION_HOST_PREFLIGHT=PASS`
 
-When `--receipt` is supplied, the verifier writes `VERIFICATION.json` using a unique temporary file, fsync, and atomic rename. An existing receipt is never overwritten. The receipt records the SHA-256 of the exact persisted `SUMMARY.json` plus the independently recomputed component hashes and markers. It intentionally does not self-hash inside its own payload; the wrapper reports the receipt SHA-256 separately.
+When `--receipt` is supplied, the verifier writes the complete receipt to a unique temporary file, fsyncs it, then atomically publishes `VERIFICATION.json` with a create-if-absent hard link. It never falls back to replacement semantics. If a competing verifier has already published the receipt, the loser fails with `MISSION_HOST_EVIDENCE_RECEIPT_EXISTS`; an unsupported hard-link boundary fails closed as `MISSION_HOST_EVIDENCE_RECEIPT_ATOMIC_PUBLISH_FAILED`. Temporary cleanup after successful publication is best-effort because the canonical receipt is already complete.
+
+The receipt records the SHA-256 of the exact persisted `SUMMARY.json` plus the independently recomputed component hashes and markers. It intentionally does not self-hash inside its own payload; the wrapper reports the receipt SHA-256 separately.
 
 ## Host packet integration
 
@@ -49,9 +51,11 @@ A successful run must now read back both `SUMMARY.json` and `VERIFICATION.json` 
 
 ## Cloud validation performed
 
-The evidence verifier and focused fixture test were executed under Node v22.16.0 in the cloud reconstruction. The focused suite passed **8/8** and covers valid verification/receipt creation, byte tampering, marker loss with matching hash, artifact path escape, commit pin mismatch, Mission-root mismatch, duplicate/incomplete artifact sets, and immutable receipt behavior. `node --check` for the verifier passed.
+The evidence verifier and focused fixture test were executed under Node v22.16.0 in the cloud reconstruction before GitHub publication. The initial focused suite passed **8/8** and covered valid verification/receipt creation, byte tampering, marker loss with matching hash, artifact path escape, commit pin mismatch, Mission-root mismatch, duplicate/incomplete artifact sets, and immutable pre-existing receipt behavior. `node --check` for the verifier passed.
 
-The real PowerShell wrapper, full repository checkout bundle, Windows/SHIRO-WS filesystem semantics, Local Agent/Local Executor integration, forced-kill timing beyond the existing probes, and power-loss/fsync durability are not claimed by this cloud validation.
+During self-review, the initial `renameSync()` receipt publication was rejected because POSIX rename can replace a destination created after the pre-check. The committed implementation now uses hard-link create-if-absent publication, and the committed test suite adds a ninth real-process case where two verifier processes compete for one receipt; exactly one must succeed and the loser must fail without replacing the winner. This new ninth case still requires real-checkout execution before being claimed as PASS.
+
+The real PowerShell wrapper, full repository checkout bundle, final committed 9-case suite, Windows/SHIRO-WS filesystem semantics, Local Agent/Local Executor integration, forced-kill timing beyond the existing probes, and power-loss/fsync durability are not claimed by this cloud validation.
 
 ## Exact next host acceptance
 
