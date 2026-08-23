@@ -6,7 +6,9 @@ Base reviewed: `automation/devexec-mission-host-evidence-verifier-20260823@85e1d
 
 ## Finding
 
-The SHIRO-WS acceptance command intentionally invokes `powershell`, which is Windows PowerShell 5.1 on the current host unless explicitly replaced. In Windows PowerShell 5.1, `Set-Content -Encoding UTF8` writes a UTF-8 BOM. The reviewed host wrapper wrote `SUMMARY.json` with that form, while `devexec-mission-host-evidence-verify.mjs` decodes the file as UTF-8 and passes the resulting string directly to `JSON.parse()`.
+The SHIRO-WS acceptance command intentionally invokes `powershell`, which is Windows PowerShell 5.1 on the current host unless explicitly replaced. Microsoft documents that Windows PowerShell's Unicode encodings create a BOM and that PowerShell 5.1 `UTF8` means UTF-8 **with BOM**: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_character_encoding
+
+The reviewed host wrapper wrote `SUMMARY.json` with `Set-Content -Encoding UTF8`, while `devexec-mission-host-evidence-verify.mjs` decodes the file as UTF-8 and passes the resulting string directly to `JSON.parse()`.
 
 Node does not accept U+FEFF at the beginning of a JSON string. Therefore a fully successful host component run could still fail at the persisted evidence readback step solely because the wrapper emitted the Windows PowerShell 5.1 BOM. This is a false-negative host-acceptance defect, not a host-runtime failure.
 
@@ -22,6 +24,7 @@ A new `tools/devexec-mission-host-utf8-contract.test.mjs` guards the wrapper sou
 
 Actually checked in this cloud run:
 
+- Microsoft PowerShell encoding documentation for Windows PowerShell 5.1 BOM behavior.
 - GitHub base/head/readback and diff review.
 - Node v22.16.0 semantic probe showing BOM-prefixed JSON parse failure and BOM-free JSON parse success.
 - GitHub readback confirms the wrapper uses `UTF8Encoding($false)` / `File.WriteAllText` and no longer uses `Set-Content -Encoding UTF8` for persisted host evidence.
