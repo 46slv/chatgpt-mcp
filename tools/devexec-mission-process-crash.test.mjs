@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {spawnSync} from "node:child_process";
+import {spawn, spawnSync} from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,16 +17,16 @@ import {dispatchMissionChildLaunch} from "./devexec-mission-launcher.mjs";
 const self = fileURLToPath(import.meta.url);
 const helperMode = process.env.DEVEXEC_MISSION_CRASH_HELPER ?? "";
 
-function createPendingLaunch(control) {
+function createPendingLaunch(control, {goal = "continue mission after crash"} = {}) {
   return requestMissionChildLaunch(control, {
     launch_id: "LAUNCH-CRASH-001",
     idempotency_key: "MISSION-CRASH:launch:001",
     child_run_id: "RUN-CHILD",
-    goal: "continue mission after crash",
+    goal,
   }, {boundary: {safe: true}}).launch;
 }
 
-function runCrashHelper(mode) {
+async function runCrashHelper(mode) {
   const root = process.env.DEVEXEC_MISSION_CRASH_ROOT;
   if (!root) process.exit(91);
 
@@ -35,6 +35,33 @@ function runCrashHelper(mode) {
     mission_id: "MISSION-CRASH",
     run_id: "RUN-ROOT",
   });
+
+  if (mode === "during_dispatch_after_spawn") {
+    const marker = process.env.DEVEXEC_MISSION_CRASH_MARKER;
+    if (!marker) process.exit(92);
+    const childEntry = path.join(root, "child-side-effect.mjs");
+    fs.writeFileSync(childEntry, [
+      'import fs from "node:fs";',
+      'fs.appendFileSync(process.argv[2], "child-once\\n");',
+    ].join("\n") + "\n", "utf8");
+    const launch = createPendingLaunch(control, {goal: marker});
+
+    await dispatchMissionChildLaunch(control, launch, {
+      launch_attempt_id: "ATTEMPT-CRASH-001",
+      launcher_request_id: "REQ-CRASH-001",
+      entry_path: childEntry,
+      spawn_impl: (command, args, options) => {
+        const child = spawn(command, args, options);
+        // Register before dispatchMissionChildLaunch installs its own `spawn`
+        // observer. A successful real spawn therefore terminates this parent
+        // in the exact window before the launcher can persist its receipt.
+        child.once("spawn", () => process.exit(75));
+        return child;
+      },
+    });
+    process.exit(95);
+  }
+
   const launch = createPendingLaunch(control);
   beginMissionChildLaunch(control, launch.launch_id, {
     launch_attempt_id: "ATTEMPT-CRASH-001",
@@ -61,7 +88,7 @@ function runCrashHelper(mode) {
 }
 
 if (helperMode) {
-  runCrashHelper(helperMode);
+  await runCrashHelper(helperMode);
 } else {
   function withRoot(fn) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-process-crash-"));
@@ -78,6 +105,15 @@ if (helperMode) {
         ...extraEnv,
       },
     });
+  }
+
+  async function waitForText(file, expected, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === expected) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null, expected);
   }
 
   async function assertRestartCannotRespawn(root) {
@@ -128,6 +164,21 @@ if (helperMode) {
     const launch = await assertRestartCannotRespawn(root);
     assert.equal(launch.status, "LAUNCHING");
     assert.equal(launch.receipt, null);
+    assert.equal(fs.readFileSync(marker, "utf8"), "child-once\n");
+  }));
+
+  test("real dispatcher spawn followed by parent exit before receipt never replays the child", () => withRoot(async root => {
+    const marker = path.join(root, "dispatcher-child-side-effect.txt");
+    const crashed = runHelper(root, "during_dispatch_after_spawn", {
+      DEVEXEC_MISSION_CRASH_MARKER: marker,
+    });
+    assert.equal(crashed.status, 75, crashed.stderr || crashed.stdout);
+    await waitForText(marker, "child-once\n");
+
+    const launch = await assertRestartCannotRespawn(root);
+    assert.equal(launch.status, "LAUNCHING");
+    assert.equal(launch.receipt, null);
+    await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(fs.readFileSync(marker, "utf8"), "child-once\n");
   }));
 }
