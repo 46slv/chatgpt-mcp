@@ -1,4 +1,4 @@
-# Dev Exec Mission RAW nested Git metadata review — 2026-08-23
+# Dev Exec Mission RAW nested Git metadata / Git authority review — 2026-08-23
 
 Status: dedicated Worker B adversarial review; SHIRO-WS host acceptance still required.
 
@@ -8,7 +8,7 @@ Reviewed Worker A head: `automation/devexec-mission-raw-snapshot-tree-20260823@a
 
 The RAW bootstrap is intentionally designed to reconstruct the exact reviewed source tree and exact reviewed commit `3778734b6fc1a9e22b59adaa49803ac1daca49e2` / tree `ddc1f9ed6b09421b441f14a4afdc0137d68ba148`, then reuse the unchanged clean-checkout Mission host preflight. Direct inspection of `devexec-mission-host-preflight.mjs`, the host PowerShell packet, and the ordinary Mission verifier found no required parent-history traversal in those orchestration layers; their direct Git queries are HEAD/top-level/branch/status only. The parentless exact-commit contract therefore remains viable for the current packet, subject to real-host execution.
 
-## New false-clean finding
+## False-clean finding 1 — nested `.git`
 
 The original RAW tree verifier passed the same `ignoreNames` set through every recursive directory walk. With the default `ignoreNames=[".git"]`, this silently ignored **every nested `.git` entry**, not only the bootstrap-owned root `.git` metadata directory.
 
@@ -23,6 +23,19 @@ Therefore the previous combination of RAW tree equality + clean/unchanged Git st
 
 A second ambiguity existed at the root: `fs.existsSync(root/.git)` follows symlinks, so a dangling `.git` symlink can return false even though the directory entry exists. Pre-bootstrap authority must reject any pre-existing root `.git` entry, not only entries whose targets exist.
 
+## Authority finding 2 — inherited Git environment can redirect `git -C`
+
+`execFileSync("git", ["-C", root, ...])` inherited the worker/operator process environment. A real Git reproduction confirmed that setting `GIT_DIR` to another repository causes `git -C <requested-root> rev-parse HEAD` to resolve the foreign repository's HEAD. Related variables such as `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-directory variables, and `GIT_CONFIG_COUNT` injection can similarly change which repository/index/object/config authority Git uses.
+
+This matters twice: bootstrap itself must never mutate an unrelated repository, and a bootstrap that silently sanitizes only its own child commands would still leave the subsequent ordinary host packet running in a contaminated operator environment.
+
+The bootstrap now therefore does both:
+
+- **precheck:** non-empty repository-routing variables or non-zero/config-key injection cause `MISSION_RAW_SNAPSHOT_INHERITED_GIT_ENV_FORBIDDEN` before source verification or any Git mutation;
+- **child isolation:** all bootstrap Git children additionally strip routing/config-injection variables, disable system/global Git config and system attributes, and disable replace objects.
+
+A successful bootstrap can consequently be followed by the unchanged host packet in the same operator shell without silently switching Git authority through these inherited variables. Host-specific execution still has to prove this on SHIRO-WS.
+
 ## Repair
 
 `tools/devexec-mission-raw-tree.mjs` now distinguishes root metadata from nested filesystem content:
@@ -32,14 +45,20 @@ A second ambiguity existed at the root: `fs.existsSync(root/.git)` follows symli
 - Windows comparison is case-insensitive for the nested `.git` name;
 - the result explicitly records `nested_git_metadata: FORBIDDEN`.
 
-`tools/devexec-mission-raw-git-bootstrap.mjs` now uses `lstatSync` semantics to detect any pre-existing root `.git` directory entry, including a dangling symlink, before `git init`.
+`tools/devexec-mission-raw-git-bootstrap.mjs` now:
+
+- uses `lstatSync` semantics to detect any pre-existing root `.git` directory entry, including a dangling symlink, before `git init`;
+- rejects inherited Git routing/config-injection authority before mutation;
+- runs its own Git children with isolated config/object-routing semantics;
+- records `git_environment: PRECHECKED_AND_SANITIZED` on success.
 
 Regression coverage was extended so the committed tests require:
 
 - non-empty nested `.git` metadata to be rejected while proving Git porcelain and index-tree observations are unchanged relative to the pre-injection baseline;
 - an empty nested `.git` directory to be rejected rather than disappearing as an empty Git-tree directory;
 - bootstrap rejection before root `.git` creation when nested metadata exists;
-- on non-Windows hosts, a dangling root `.git` symlink to be rejected as pre-existing metadata.
+- on non-Windows hosts, a dangling root `.git` symlink to be rejected as pre-existing metadata;
+- inherited `GIT_DIR` / worktree / index / object / config injection to fail before root bootstrap mutation while the foreign repository remains unchanged.
 
 The existing root `.git` ignore remains necessary for the post-bootstrap exact-tree check and is intentionally not removed.
 
@@ -51,12 +70,13 @@ The existing root `.git` ignore remains necessary for the post-bootstrap exact-t
 - Dangling symlink probe confirmed `existsSync` returns false while `lstatSync` still sees the `.git` entry: `DANGLING_GIT_LSTAT_GUARD=PASS`.
 - A source-faithful reconstruction of the updated RAW tree module and committed regression cases passed **6/6** after correcting the regression fixture to compare Git status against its staged pre-injection baseline rather than incorrectly assuming the helper created a committed-clean worktree.
 - A source-faithful exact-bootstrap focused suite passed **3/3**: parentless exact HEAD restoration/clean status, nested `.git` rejection before root metadata creation, and dangling root `.git` symlink rejection.
+- Real Git proved `GIT_DIR=<foreign> git -C <requested-root> rev-parse HEAD` resolves the foreign HEAD. A source-faithful fail-closed regression then passed **1/1**, proving contaminated Git routing is rejected before root `.git` creation.
 - Existing host preflight, host wrapper, and ordinary reliability orchestrator were source-reviewed for direct ancestry requirements; none of their direct Git queries require the parent object.
 
-Not claimed here: full committed Node test bundle on a repository checkout, GitHub CI, SHIRO-WS/NTFS RAW reconstruction, Windows case-insensitive nested `.git` regression, PowerShell host packet, Local Agent/Local Executor E2E, forced-kill matrix, or power-loss/fsync durability.
+Not claimed here: full committed Node test bundle on a repository checkout, GitHub CI, SHIRO-WS/NTFS RAW reconstruction, Windows case-insensitive nested `.git` regression, PowerShell host packet, Local Agent/Local Executor E2E, forced-kill matrix, or power-loss/fsync durability. Global/system Git configuration isolation in the unchanged `3778734...` host packet itself is also not claimed; the authoritative host run should follow the successful bootstrap from the same operator shell and must not add Git routing/config-injection variables afterward.
 
 ## Exact next action
 
-Worker A should reconcile this focused review branch, run the full ordinary Mission reliability verifier on a real checkout, and preserve the exact reviewed source commit/tree contract. Then on SHIRO-WS reconstruct the isolated RAW mirror, require tree `ddc1f9ed6b09421b441f14a4afdc0137d68ba148`, restore exact HEAD `3778734b6fc1a9e22b59adaa49803ac1daca49e2`, verify clean status, run the unchanged host packet, and read back `SUMMARY.json`, `VERIFICATION.json`, hashes/logs, and Mission probe root. A mirror containing any nested `.git` metadata must fail before bootstrap.
+Worker A should reconcile this focused review branch and run the full ordinary Mission reliability verifier on a real checkout. Then on SHIRO-WS, from a shell with no Git routing/config-injection variables, reconstruct the isolated RAW mirror, require tree `ddc1f9ed6b09421b441f14a4afdc0137d68ba148`, restore exact HEAD `3778734b6fc1a9e22b59adaa49803ac1daca49e2`, verify clean status, and run the unchanged host packet from that same shell. Read back `SUMMARY.json`, `VERIFICATION.json`, hashes/logs, and Mission probe root. A mirror containing any nested `.git` metadata or a contaminated Git routing environment must fail before bootstrap.
 
 Keep `GOAL_PATCH / supersede_current_goal`, Control API/service, and GUI behind DEV-002 reliability closure.
