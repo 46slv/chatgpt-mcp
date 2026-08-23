@@ -93,6 +93,27 @@ test("the Windows PowerShell 5.1 UTF-8 BOM would make Node JSON.parse reject SUM
   assert.throws(() => JSON.parse(bomJson), SyntaxError);
 });
 
+test("runtime verifier accepts valid non-ASCII UTF-8 and Windows CRLF markers", () => {
+  const fx = fixture();
+  try {
+    const artifact = fx.summary.artifacts[1];
+    fs.writeFileSync(
+      artifact.path,
+      "進捗: 正常\r\nMISSION_RELIABILITY_CHECK=PASS\r\n",
+      "utf8",
+    );
+    artifact.sha256 = sha256(artifact.path);
+    fs.writeFileSync(fx.summaryFile, `${JSON.stringify(fx.summary, null, 2)}\n`, "utf8");
+    const report = verifyMissionHostEvidence(fx.summaryFile, {
+      expectedHead: HEAD,
+      expectedMissionProbeRoot: fx.missionRoot,
+    });
+    assert.equal(report.status, "PASS");
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("runtime verifier rejects BOM-prefixed SUMMARY before semantic JSON verification", () => {
   const fx = fixture();
   try {
