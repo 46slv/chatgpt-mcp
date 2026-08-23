@@ -15,6 +15,19 @@ if ([string]::IsNullOrWhiteSpace($ExpectedHead)) {
     throw "ExpectedHead is required for authoritative Mission host acceptance"
 }
 
+# Windows PowerShell 5.1's Set-Content -Encoding UTF8 emits a UTF-8 BOM.
+# Node's JSON.parse rejects that BOM, so all persisted host-evidence text is
+# written explicitly as UTF-8 without BOM for consistent pwsh/Windows
+# PowerShell behavior and deterministic verifier input.
+$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Text
+    )
+    [System.IO.File]::WriteAllText($Path, $Text, $script:Utf8NoBom)
+}
+
 # Mirror devexec-goal.mjs BASE semantics. Host lock/file-identity checks must run
 # on the filesystem that actually stores Mission state, not whichever volume the
 # operator chooses for evidence output.
@@ -69,7 +82,12 @@ function Invoke-AndPersist {
         }
     }
 
-    $captured | Set-Content -LiteralPath $outputFile -Encoding UTF8
+    $outputText = if ($captured.Count -gt 0) {
+        [string]::Join([Environment]::NewLine, $captured) + [Environment]::NewLine
+    } else {
+        ""
+    }
+    Write-Utf8NoBom -Path $outputFile -Text $outputText
     foreach ($line in $captured) { Write-Host $line }
 
     if ($failure) {
@@ -181,7 +199,8 @@ $summary = [ordered]@{
 }
 
 $summaryPath = Join-Path $runDir "SUMMARY.json"
-$summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+$summaryJson = $summary | ConvertTo-Json -Depth 8
+Write-Utf8NoBom -Path $summaryPath -Text ($summaryJson + [Environment]::NewLine)
 $summaryHash = (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash
 
 # Validate the persisted packet after every component and SUMMARY have already
