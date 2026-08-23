@@ -79,3 +79,20 @@ First server version must:
 - call only the Control Service.
 
 After transport E2E passes, build the GUI as a thin client.
+
+## Localhost transport
+
+Implemented as a loopback-only HTTP adapter over the Control Service.
+
+Properties:
+
+- binds only `127.0.0.1`;
+- health endpoint;
+- durable run-state endpoint;
+- autonomous-start capability endpoint;
+- autonomous-start JSON endpoint;
+- unsafe/in-flight parent remains fail-closed;
+- duplicate request remains no-replay;
+- no Mission launcher or process-spawn primitive exists in the server.
+
+Next boundary: thin GUI client over this transport.
