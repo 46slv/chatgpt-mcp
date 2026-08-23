@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {execFileSync} from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -11,13 +12,21 @@ function bootstrapError(code, details = {}) {
   return error;
 }
 
-function runGit(root, args, {env = {}} = {}) {
+function gitObjectSha1(type, bytes) {
+  const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return crypto.createHash("sha1")
+    .update(Buffer.from(`${type} ${payload.length}\0`, "utf8"))
+    .update(payload)
+    .digest("hex");
+}
+
+function runGit(root, args, {input = null} = {}) {
   try {
     return execFileSync("git", ["-C", root, ...args], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      input,
+      stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
-      env: {...process.env, ...env},
     }).trim();
   } catch (cause) {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_COMMAND_FAILED", {
@@ -30,8 +39,43 @@ function runGit(root, args, {env = {}} = {}) {
   }
 }
 
-export function prepareRawSnapshotGitWorkspace(root, {expectedTree, expectedCommit} = {}) {
+function validateCommitObject(commitObject, {expectedCommit, expectedTree}) {
+  const bytes = Buffer.isBuffer(commitObject) ? commitObject : Buffer.from(commitObject);
+  const observedCommit = gitObjectSha1("commit", bytes);
+  if (observedCommit !== expectedCommit) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_OBJECT_MISMATCH", {
+      expected_commit: expectedCommit,
+      observed_commit: observedCommit,
+    });
+  }
+  const firstNewline = bytes.indexOf(0x0a);
+  if (firstNewline <= 0) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_OBJECT_INVALID");
+  }
+  const firstHeader = bytes.subarray(0, firstNewline).toString("ascii");
+  const match = /^tree ([0-9a-f]{40})$/.exec(firstHeader);
+  if (!match) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_TREE_HEADER_INVALID", {header: firstHeader});
+  }
+  if (match[1] !== expectedTree) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_TREE_MISMATCH", {
+      expected_tree: expectedTree,
+      commit_tree: match[1],
+    });
+  }
+  return {bytes};
+}
+
+export function prepareRawSnapshotExactGitWorkspace(root, {
+  expectedTree,
+  expectedCommit,
+  commitObject,
+} = {}) {
   const verified = verifyRawSnapshotGitTree(root, {expectedTree, expectedCommit});
+  const commit = validateCommitObject(commitObject, {
+    expectedCommit: verified.expected_commit,
+    expectedTree: verified.expected_tree,
+  });
   const gitDir = path.join(verified.root, ".git");
   if (fs.existsSync(gitDir)) {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS", {git_dir: gitDir});
@@ -49,15 +93,25 @@ export function prepareRawSnapshotGitWorkspace(root, {expectedTree, expectedComm
     });
   }
 
-  const syntheticHead = runGit(verified.root, [
-    "-c", "user.name=Dev Exec Raw Snapshot",
-    "-c", "user.email=devexec-raw-snapshot@invalid",
-    "commit-tree", indexedTree,
-    "-m", `Synthetic local carrier for reviewed source ${verified.expected_commit ?? "unknown"}`,
-  ]);
-  runGit(verified.root, ["update-ref", "refs/heads/devexec-raw-snapshot", syntheticHead]);
+  const storedCommit = runGit(verified.root, ["hash-object", "-t", "commit", "-w", "--stdin"], {
+    input: commit.bytes,
+  });
+  if (storedCommit !== verified.expected_commit) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_STORED_COMMIT_MISMATCH", {
+      expected_commit: verified.expected_commit,
+      stored_commit: storedCommit,
+    });
+  }
+  runGit(verified.root, ["update-ref", "refs/heads/devexec-raw-snapshot", storedCommit]);
   runGit(verified.root, ["symbolic-ref", "HEAD", "refs/heads/devexec-raw-snapshot"]);
 
+  const head = runGit(verified.root, ["rev-parse", "HEAD"]);
+  if (head !== verified.expected_commit) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_HEAD_MISMATCH", {
+      expected_commit: verified.expected_commit,
+      head,
+    });
+  }
   const status = runGit(verified.root, ["status", "--porcelain=v1", "--untracked-files=all"]);
   if (status !== "") {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_WORKTREE_DIRTY_AFTER_BOOTSTRAP", {status});
@@ -69,13 +123,13 @@ export function prepareRawSnapshotGitWorkspace(root, {expectedTree, expectedComm
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 1,
-    source_mode: "raw_snapshot",
+    schema_version: 2,
+    source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
     post_bootstrap_tree: postTree.observed_tree,
-    synthetic_head: syntheticHead,
-    synthetic_branch: "devexec-raw-snapshot",
+    head,
+    branch: "devexec-raw-snapshot",
     git_worktree_clean: true,
     status: "PASS",
   };
@@ -85,14 +139,23 @@ function parseCli(argv) {
   let root = "";
   let expectedTree = "";
   let expectedCommit = "";
+  let commitObjectPath = "";
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--root") root = argv[++i] ?? "";
     else if (arg === "--expected-tree") expectedTree = argv[++i] ?? "";
     else if (arg === "--expected-commit") expectedCommit = argv[++i] ?? "";
+    else if (arg === "--commit-object") commitObjectPath = argv[++i] ?? "";
     else throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_BOOTSTRAP_UNKNOWN_ARGUMENT", {argument: arg});
   }
-  return {root, expectedTree, expectedCommit};
+  if (!commitObjectPath) throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_OBJECT_PATH_REQUIRED");
+  let commitObject;
+  try {
+    commitObject = fs.readFileSync(path.resolve(commitObjectPath));
+  } catch (cause) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_COMMIT_OBJECT_READ_FAILED", {cause, path: commitObjectPath});
+  }
+  return {root, expectedTree, expectedCommit, commitObject};
 }
 
 const isMain = process.argv[1]
@@ -102,15 +165,18 @@ const isMain = process.argv[1]
 if (isMain) {
   try {
     const options = parseCli(process.argv.slice(2));
-    const report = prepareRawSnapshotGitWorkspace(options.root, options);
+    const report = prepareRawSnapshotExactGitWorkspace(options.root, options);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     process.stdout.write("MISSION_RAW_SNAPSHOT_GIT_BOOTSTRAP=PASS\n");
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 1,
+      schema_version: 2,
       error: error?.message || String(error),
+      expected_commit: error?.expected_commit ?? null,
+      observed_commit: error?.observed_commit ?? null,
       expected_tree: error?.expected_tree ?? null,
+      commit_tree: error?.commit_tree ?? null,
       indexed_tree: error?.indexed_tree ?? null,
       git_status: error?.git_status ?? null,
       git_stderr: error?.git_stderr ?? null,
