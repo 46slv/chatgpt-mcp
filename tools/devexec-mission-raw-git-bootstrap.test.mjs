@@ -83,7 +83,7 @@ test("exact commit object restores reviewed HEAD without requiring parent object
     });
     assert.equal(result.status, "PASS");
     assert.equal(result.head, fixture.head);
-    assert.equal(result.git_environment, "PRECHECKED_AND_SANITIZED");
+    assert.equal(result.git_environment, "PRECHECKED_AND_SANITIZED_SHARED_CONTRACT");
     assert.equal(git(fixture.root, ["rev-parse", "HEAD"]), fixture.head);
     assert.equal(git(fixture.root, ["write-tree"]), fixture.tree);
     assert.equal(git(fixture.root, ["status", "--porcelain=v1", "--untracked-files=all"]), "");
