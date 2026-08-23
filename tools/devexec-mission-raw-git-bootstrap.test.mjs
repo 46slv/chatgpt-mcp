@@ -83,7 +83,7 @@ test("exact commit object restores reviewed HEAD without requiring parent object
     });
     assert.equal(result.status, "PASS");
     assert.equal(result.head, fixture.head);
-    assert.equal(result.git_environment, "SANITIZED");
+    assert.equal(result.git_environment, "PRECHECKED_AND_SANITIZED");
     assert.equal(git(fixture.root, ["rev-parse", "HEAD"]), fixture.head);
     assert.equal(git(fixture.root, ["write-tree"]), fixture.tree);
     assert.equal(git(fixture.root, ["status", "--porcelain=v1", "--untracked-files=all"]), "");
@@ -213,7 +213,7 @@ test("dangling root .git symlink is rejected as pre-existing metadata", {skip: p
   }
 });
 
-test("inherited Git routing and config injection cannot redirect exact bootstrap", () => {
+test("inherited Git routing and config injection fail before bootstrap mutation", () => {
   const fixture = makeOriginal();
   const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "mission-raw-foreign-git-"));
   try {
@@ -226,24 +226,26 @@ test("inherited Git routing and config injection cannot redirect exact bootstrap
     foreignGit(["commit", "-q", "-m", "foreign"]);
     const foreignHead = foreignGit(["rev-parse", "HEAD"]);
 
-    const result = withGitEnvironment({
-      GIT_DIR: path.join(foreign, ".git"),
-      GIT_WORK_TREE: foreign,
-      GIT_INDEX_FILE: path.join(foreign, ".git", "index"),
-      GIT_OBJECT_DIRECTORY: path.join(foreign, ".git", "objects"),
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "core.worktree",
-      GIT_CONFIG_VALUE_0: foreign,
-    }, () => prepareRawSnapshotExactGitWorkspace(fixture.root, {
-      expectedTree: fixture.tree,
-      expectedCommit: fixture.head,
-      commitObject: fixture.commitObject,
-    }));
+    assert.throws(
+      () => withGitEnvironment({
+        GIT_DIR: path.join(foreign, ".git"),
+        GIT_WORK_TREE: foreign,
+        GIT_INDEX_FILE: path.join(foreign, ".git", "index"),
+        GIT_OBJECT_DIRECTORY: path.join(foreign, ".git", "objects"),
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.worktree",
+        GIT_CONFIG_VALUE_0: foreign,
+      }, () => prepareRawSnapshotExactGitWorkspace(fixture.root, {
+        expectedTree: fixture.tree,
+        expectedCommit: fixture.head,
+        commitObject: fixture.commitObject,
+      })),
+      error => error?.message === "MISSION_RAW_SNAPSHOT_INHERITED_GIT_ENV_FORBIDDEN"
+        && error?.git_environment_variables?.includes("GIT_DIR")
+        && error?.git_environment_variables?.includes("GIT_CONFIG_COUNT"),
+    );
 
-    assert.equal(result.status, "PASS");
-    assert.equal(result.git_environment, "SANITIZED");
-    assert.equal(fs.statSync(path.join(fixture.root, ".git")).isDirectory(), true);
-    assert.equal(git(fixture.root, ["rev-parse", "HEAD"]), fixture.head);
+    assert.equal(fs.existsSync(path.join(fixture.root, ".git")), false);
     assert.equal(foreignGit(["rev-parse", "HEAD"]), foreignHead);
   } finally {
     cleanup(fixture);
