@@ -41,6 +41,43 @@ test("inherited Git routing/config/init authority is detected even when values a
   );
 });
 
+test("authority matching and safe overrides are case-insensitive for Windows-compatible child environments", () => {
+  const contaminated = inheritedGitEnvironmentContamination({
+    git_dir: "C:/foreign/.git",
+    Git_Template_Dir: "C:/template",
+    git_config_count: "1",
+    git_config_key_0: "core.hooksPath",
+    git_config_value_0: "C:/hooks",
+  });
+  assert.deepEqual(contaminated, [
+    "git_config_count",
+    "git_config_key_0",
+    "git_config_value_0",
+    "git_dir",
+    "Git_Template_Dir",
+  ]);
+
+  const isolated = buildIsolatedGitEnvironment({
+    PATH: "x",
+    git_dir: "C:/foreign/.git",
+    Git_Template_Dir: "C:/template",
+    git_config_count: "1",
+    git_config_key_0: "core.hooksPath",
+    git_config_value_0: "C:/hooks",
+    git_config_nosystem: "0",
+    git_no_replace_objects: "0",
+  });
+  for (const key of Object.keys(isolated)) {
+    const upper = key.toUpperCase();
+    assert.notEqual(upper, "GIT_DIR");
+    assert.notEqual(upper, "GIT_TEMPLATE_DIR");
+    assert.equal(/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(upper), false);
+  }
+  assert.equal(isolated.GIT_CONFIG_COUNT, "0");
+  assert.equal(isolated.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(isolated.GIT_NO_REPLACE_OBJECTS, "1");
+});
+
 test("GIT_CONFIG_COUNT=0 is allowed only when no injected key/value variables exist", () => {
   assert.deepEqual(inheritedGitEnvironmentContamination({GIT_CONFIG_COUNT: "0"}), []);
   assert.deepEqual(
