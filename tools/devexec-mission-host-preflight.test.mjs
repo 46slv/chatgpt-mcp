@@ -133,6 +133,41 @@ test("all declared Git transaction markers fail closed even when porcelain statu
   }
 });
 
+test("linked worktree uses its own Git operation state rather than the primary worktree state", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-host-worktree-"));
+  const main = path.join(parent, "main");
+  const linked = path.join(parent, "linked");
+  fs.mkdirSync(main);
+  try {
+    git(main, "init", "-q");
+    git(main, "config", "user.email", "devexec-test@example.invalid");
+    git(main, "config", "user.name", "DevExec Test");
+    fs.writeFileSync(path.join(main, "tracked.txt"), "v1\n", "utf8");
+    git(main, "add", "tracked.txt");
+    git(main, "commit", "-q", "-m", "initial");
+    git(main, "worktree", "add", "-q", "-b", "linked-probe", linked);
+
+    const head = git(linked, "rev-parse", "HEAD");
+    const linkedMergeHead = resolvedGitPath(linked, "MERGE_HEAD");
+    const primaryMergeHead = resolvedGitPath(main, "MERGE_HEAD");
+    fs.writeFileSync(linkedMergeHead, `${head}\n`, "utf8");
+
+    assert.equal(git(linked, "status", "--porcelain=v1", "--untracked-files=all"), "");
+    assert.equal(fs.existsSync(primaryMergeHead), false);
+    assert.throws(
+      () => inspectMissionHostCheckout(linked, {expectedHead: head}),
+      error => {
+        assert.equal(error?.message, "MISSION_HOST_PREFLIGHT_GIT_OPERATION_IN_PROGRESS");
+        assert.equal(error?.git_operation, "merge");
+        assert.equal(path.resolve(error?.git_operation_path), path.resolve(linkedMergeHead));
+        return true;
+      },
+    );
+  } finally {
+    fs.rmSync(parent, {recursive: true, force: true});
+  }
+});
+
 test("expected HEAD mismatch is rejected", () => withRepo((root) => {
   const impossible = "0".repeat(40);
   assert.throws(
