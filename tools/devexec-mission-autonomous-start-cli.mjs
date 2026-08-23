@@ -24,6 +24,63 @@ function readValue(args, index, flag) {
   return value.trim();
 }
 
+export function deriveAutonomousStartBoundary({
+  base,
+  parent_run_id,
+  env = process.env,
+} = {}) {
+  const parentRunId = required(parent_run_id, "parent_run_id");
+
+  if (typeof base !== "string" || !base.trim()) {
+    throw new Error("MISSION_AUTONOMOUS_START_BOUNDARY_BASE_REQUIRED");
+  }
+
+  const stateDir =
+    env.DEV_EXEC_STATE_DIR ??
+    path.join(base, "ChatGPTMCPProbe", "dev-exec-state");
+
+  const statePath = path.join(stateDir, `${parentRunId}.json`);
+
+  if (!fs.existsSync(statePath)) {
+    throw new Error("MISSION_AUTONOMOUS_START_BOUNDARY_STATE_MISSING");
+  }
+
+  let state;
+
+  try {
+    state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  } catch (error) {
+    const wrapped = new Error(
+      "MISSION_AUTONOMOUS_START_BOUNDARY_STATE_INVALID"
+    );
+    wrapped.cause = error;
+    throw wrapped;
+  }
+
+  if (!state || state.run_id !== parentRunId) {
+    throw new Error("MISSION_AUTONOMOUS_START_BOUNDARY_STATE_MISMATCH");
+  }
+
+  const currentGoalComplete = state.phase === "COMPLETE";
+
+  const pendingAction =
+    state.pending !== null &&
+    state.pending !== undefined &&
+    state.pending !== false;
+
+  const ambiguousAction =
+    pendingAction ||
+    state.ambiguous_action === true ||
+    state.pending_ambiguous === true;
+
+  return {
+    safe: currentGoalComplete,
+    pending_action: pendingAction,
+    ambiguous_action: ambiguousAction,
+    current_goal_complete: currentGoalComplete,
+  };
+}
+
 function stableRequestId({
   mission_id,
   parent_run_id,
@@ -159,18 +216,21 @@ export async function runAutonomousStartCli(args, {
   env = process.env,
   base = env.LOCALAPPDATA,
   start = startMissionRunAutonomously,
+  resolve_boundary = deriveAutonomousStartBoundary,
   stdout = process.stdout,
 } = {}) {
   const parsed = parseAutonomousStartArgs(args, {env});
 
+  const boundary = resolve_boundary({
+    base,
+    parent_run_id: parsed.parent_run_id,
+    env,
+  });
+
   const result = await start({
     base,
     ...parsed,
-    boundary: {
-      safe: true,
-      pending_action: false,
-      ambiguous_action: false,
-    },
+    boundary,
   });
 
   const receipt = {
