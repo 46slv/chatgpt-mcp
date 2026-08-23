@@ -34,6 +34,10 @@ $missionBase = (Resolve-Path -LiteralPath $missionBase).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $EvidenceRoot = Join-Path $missionBase "ChatGPTMCPProbe\mission-host-acceptance"
 }
+if (-not (Test-Path -LiteralPath $EvidenceRoot -PathType Container)) {
+    New-Item -ItemType Directory -Path $EvidenceRoot -Force -ErrorAction Stop | Out-Null
+}
+$EvidenceRoot = (Resolve-Path -LiteralPath $EvidenceRoot).Path
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
 $suffix = [Guid]::NewGuid().ToString("N").Substring(0, 8)
