@@ -1,0 +1,48 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import {fileURLToPath} from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const wrapper = path.join(HERE, "verify-devexec-mission-host-acceptance.ps1");
+
+function readWrapper() {
+  return fs.readFileSync(wrapper, "utf8");
+}
+
+test("authoritative host wrapper requires a pinned ExpectedHead", () => {
+  const source = readWrapper();
+  assert.match(source, /\[Parameter\(Mandatory=\$true\)\]\[string\]\$ExpectedHead/);
+  assert.match(source, /ExpectedHead is required for authoritative Mission host acceptance/);
+  assert.match(source, /--expected-head", \$ExpectedHead/);
+});
+
+test("host wrapper records clean checkout preflight and postflight", () => {
+  const source = readWrapper();
+  assert.match(source, /00-repo-preflight/);
+  assert.match(source, /04-repo-postflight/);
+  assert.match(source, /source_checkout_preflight_clean = "PASS"/);
+  assert.match(source, /source_checkout_postflight_clean = "PASS"/);
+});
+
+test("host wrapper requires explicit PASS markers for every component", () => {
+  const source = readWrapper();
+  for (const marker of [
+    "MISSION_HOST_PREFLIGHT=PASS",
+    "MISSION_RELIABILITY_CHECK=PASS",
+    "MISSION_FILE_IDENTITY_HOST_PROBE=PASS",
+    "MISSION_HOST_LOCK_ACCEPTANCE=PASS",
+  ]) {
+    assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(source, /required PASS marker/);
+  assert.match(source, /component_pass_markers = "PASS"/);
+});
+
+test("host wrapper uses non-reused evidence directory identity", () => {
+  const source = readWrapper();
+  assert.match(source, /yyyyMMdd-HHmmss-fff/);
+  assert.match(source, /\[Guid\]::NewGuid\(\)/);
+  assert.doesNotMatch(source, /New-Item[^\r\n]+-Force[^\r\n]+\$runDir/);
+});
