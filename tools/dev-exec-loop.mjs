@@ -13,6 +13,7 @@ import { parseNaturalDirective } from "./dev-exec-natural-protocol.mjs";
 import { loadMissionEscalation, appendMissionEscalationToReport } from "./devexec-mission-supervisor-envelope.mjs";
 import { loadOpsSyncPacket, appendOpsSyncToReport } from "./devexec-ops-sync-envelope.mjs";
 import { loadStopAlert, appendStopAlertToReport } from "./devexec-stop-alert-envelope.mjs";
+import { classifyPersistedSupervisorInflight, classifySupervisorTransportError } from "./dev-exec-supervisor-transport-recovery.mjs";
 import { inspectLocalAgentGoalCompletion } from "./devexec-local-agent-goal-state.mjs";
 
 const RUN_ID =
@@ -39,6 +40,7 @@ const MAX_STEPS = Number.parseInt(
 );
 
 const MAX_SUPERVISOR_RETRIES = Number.parseInt(process.env.DEV_EXEC_MAX_SUPERVISOR_RETRIES || "3", 10);
+const MAX_SUPERVISOR_TRANSPORT_RETRIES = Number.parseInt(process.env.DEV_EXEC_MAX_SUPERVISOR_TRANSPORT_RETRIES || "6", 10);
 
 const DEV_EXEC_PURPOSE =
   process.env.DEV_EXEC_PURPOSE ||
@@ -272,7 +274,42 @@ async function sendSupervisor(state, round, report) {
       return existing.response;
     }
     if (existing.send_state === "IN_FLIGHT") {
-      throw new Error(`BLOCKED_IN_FLIGHT: supervisor round ${round}`);
+      const transportPhase =
+        readTransportPhase(
+          transportStateFile(round)
+        );
+
+      const recovery =
+        classifyPersistedSupervisorInflight({
+          send_state: existing.send_state,
+          transport_phase: transportPhase,
+        });
+
+      if (!recovery.retryable) {
+        throw new Error(
+          `BLOCKED_IN_FLIGHT: supervisor round ${round} transport_phase=${transportPhase}`
+        );
+      }
+
+      existing.send_state =
+        "RETRYABLE_TRANSPORT_FAILURE";
+
+      existing.transport_recovery = {
+        reason: recovery.reason,
+        transport_phase: transportPhase,
+        recovered_at: nowIso(),
+      };
+
+      state.phase =
+        `SUPERVISOR_ROUND_${round}_PRE_SUBMIT_RETRYABLE`;
+
+      state.error = null;
+      Reflect.deleteProperty(state, "failed_at");
+      saveState(state);
+
+      console.warn(
+        `[supervisor:r${round}] PRE_SUBMIT_IN_FLIGHT_RECOVERED phase=${transportPhase}; local_exec_replay=NO`
+      );
     }
   }
 
@@ -333,6 +370,15 @@ async function sendSupervisor(state, round, report) {
 
     state.rounds[key].response = envelope.response;
     state.rounds[key].send_state = "COMPLETED";
+
+    if (
+      state.supervisor_transport_retries?.[key]
+    ) {
+      Reflect.deleteProperty(
+        state.supervisor_transport_retries,
+        key
+      );
+    }
     state.phase = `SUPERVISOR_ROUND_${round}_RECEIVED`;
     saveState(state);
     console.log(`[supervisor:r${round}] COMPLETED`);
@@ -804,7 +850,83 @@ async function main() {
   let round = state.step + 1;
 
   while (state.step < MAX_STEPS) {
-    const response = await sendSupervisor(state, round, report);
+    let response;
+
+    try {
+      response =
+        await sendSupervisor(
+          state,
+          round,
+          report
+        );
+    } catch (error) {
+      const key = String(round);
+
+      const transportPhase =
+        readTransportPhase(
+          transportStateFile(round)
+        );
+
+      const recovery =
+        classifySupervisorTransportError({
+          transport_phase: transportPhase,
+          error_message:
+            error?.message || String(error),
+        });
+
+      if (recovery.retryable) {
+        state.supervisor_transport_retries ||= {};
+
+        const retryCount =
+          (
+            state.supervisor_transport_retries[key] || 0
+          ) + 1;
+
+        state.supervisor_transport_retries[key] =
+          retryCount;
+
+        if (state.rounds?.[key]) {
+          state.rounds[key].send_state =
+            "RETRYABLE_TRANSPORT_FAILURE";
+
+          state.rounds[key].transport_recovery = {
+            reason: recovery.reason,
+            transport_phase: transportPhase,
+            retry_count: retryCount,
+            recovered_at: nowIso(),
+          };
+        }
+
+        state.phase =
+          `SUPERVISOR_ROUND_${round}_PRE_SUBMIT_RETRYABLE`;
+
+        state.error = null;
+        Reflect.deleteProperty(state, "failed_at");
+        saveState(state);
+
+        if (
+          retryCount <
+          MAX_SUPERVISOR_TRANSPORT_RETRIES
+        ) {
+          console.warn(
+            `[supervisor:r${round}] PRE_SUBMIT_RETRY retry=${retryCount}/${MAX_SUPERVISOR_TRANSPORT_RETRIES}; local_exec_replay=NO`
+          );
+
+          await new Promise(
+            resolve => setTimeout(resolve, 5000)
+          );
+
+          continue;
+        }
+
+        console.warn(
+          `[supervisor:r${round}] PRE_SUBMIT_RETRY_EXHAUSTED retry=${retryCount}; state remains retryable; local_exec_replay=NO`
+        );
+      }
+
+      throw error;
+    }
+
     let directive;
     try {
       directive = parseDirective(response);
