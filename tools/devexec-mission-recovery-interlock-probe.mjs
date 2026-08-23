@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,16 +19,15 @@ function makeStaleLock(root) {
     protocol: "devexec.mission-lock",
     schema_version: 1,
     token,
-    owner: "interlock-probe:dead-owner",
+    owner: "interlock-regression:dead-owner",
     pid: 2147483000,
     acquired_at: new Date().toISOString(),
-    publication: "probe",
+    publication: "regression",
   };
   fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", "utf8");
   const inspection = inspectMissionLock(root);
-  if (inspection.status !== "STALE" || inspection.recoverable !== true) {
-    throw new Error(`probe requires a definitely absent PID; observed ${inspection.status}`);
-  }
+  assert.equal(inspection.status, "STALE");
+  assert.equal(inspection.recoverable, true);
   return {file, token, record};
 }
 
@@ -50,13 +50,10 @@ function withRoot(name, fn) {
 
 const results = [];
 
-// Mixed state: a live movable owner exists, but a neutral arbitration link is
-// also present. claimRecoveryOwnership() currently consumes the neutral link
-// before checking the live owner claim, so the live-owner fence can be bypassed.
 results.push(withRoot("movable", root => {
   const stale = makeStaleLock(root);
   const neutral = neutralClaim(stale.file, stale.token);
-  const liveOwner = liveOwnerClaim(stale.file, stale.token, "live-owner-bypass");
+  const liveOwner = liveOwnerClaim(stale.file, stale.token, "live-owner");
   fs.linkSync(stale.file, liveOwner);
   fs.linkSync(stale.file, neutral);
 
@@ -67,24 +64,16 @@ results.push(withRoot("movable", root => {
     error = caught;
   }
 
-  return {
-    case: "movable_owner_plus_neutral",
-    expected_after_repair: "fail closed while a live movable owner exists",
-    current_error: error?.message ?? null,
-    canonical_exists: fs.existsSync(stale.file),
-    live_owner_exists: fs.existsSync(liveOwner),
-    neutral_exists: fs.existsSync(neutral),
-    bug_reproduced: error == null && !fs.existsSync(stale.file),
-  };
+  assert.equal(error?.message, "MISSION_CONTROL_LOCK_RECOVERY_MIXED_CLAIMS");
+  assert.equal(fs.existsSync(stale.file), true);
+  assert.equal(fs.existsSync(liveOwner), true);
+  assert.equal(fs.existsSync(neutral), true);
+  return {case: "movable_owner_plus_neutral", error: error.message, canonical_intact: true};
 }));
 
-// Cross-protocol state: the movable protocol owns the recovery via a live
-// PID-bearing hard link. The older exported recoverStaleMissionLock() does not
-// inspect movable-owner claims, recreates the neutral link, and can remove the
-// canonical stale lock underneath that live owner.
 results.push(withRoot("legacy", root => {
   const stale = makeStaleLock(root);
-  const liveOwner = liveOwnerClaim(stale.file, stale.token, "legacy-bypass");
+  const liveOwner = liveOwnerClaim(stale.file, stale.token, "legacy-blocked");
   fs.linkSync(stale.file, liveOwner);
 
   let error = null;
@@ -94,23 +83,11 @@ results.push(withRoot("legacy", root => {
     error = caught;
   }
 
-  return {
-    case: "legacy_recovery_vs_movable_owner",
-    expected_after_repair: "recovery protocols share one arbitration domain",
-    current_error: error?.message ?? null,
-    canonical_exists: fs.existsSync(stale.file),
-    live_owner_exists: fs.existsSync(liveOwner),
-    bug_reproduced: error == null && !fs.existsSync(stale.file),
-  };
+  assert.equal(error?.message, "MISSION_CONTROL_LOCK_RECOVERY_LEGACY_MUTATOR_RETIRED");
+  assert.equal(fs.existsSync(stale.file), true);
+  assert.equal(fs.existsSync(liveOwner), true);
+  return {case: "legacy_mutator_retired", error: error.message, canonical_intact: true};
 }));
 
-for (const result of results) {
-  console.log(JSON.stringify(result));
-}
-
-if (!results.every(result => result.bug_reproduced === true)) {
-  console.error("MIXED_RECOVERY_INTERLOCK_PROBE=NOT_REPRODUCED");
-  process.exitCode = 2;
-} else {
-  console.log("MIXED_RECOVERY_INTERLOCK_PROBE=REPRODUCED");
-}
+for (const result of results) console.log(JSON.stringify(result));
+console.log("MIXED_RECOVERY_INTERLOCK_REGRESSION=PASS");
