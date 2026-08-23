@@ -6,11 +6,12 @@ import path from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
+import {recoverOrResumeStaleMissionLock} from "./devexec-mission-lock-resume.mjs";
+
 import {
   acquireMissionLock,
   inspectMissionLock,
   missionLockPath,
-  recoverStaleMissionLock,
 } from "./devexec-mission-lock.mjs";
 
 const self = fileURLToPath(import.meta.url);
@@ -97,7 +98,7 @@ if (helperMode === "crash_before_publish") {
     assert.match(inspected.record.owner, /^after-publish:/);
     assert.equal(stagingFiles(root).length, 1);
 
-    const recovered = recoverStaleMissionLock(root);
+    const recovered = recoverOrResumeStaleMissionLock(root);
     assert.equal(recovered.recovered, true);
     assert.equal(fs.existsSync(missionLockPath(root)), false);
     assert.equal(fs.existsSync(recovered.quarantine_file), true);
