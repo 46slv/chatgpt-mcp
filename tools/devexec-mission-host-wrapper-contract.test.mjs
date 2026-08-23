@@ -76,6 +76,7 @@ test("overall host PASS is gated by persisted evidence readback and immutable re
   assert.match(source, /devexec-mission-host-evidence-verify\.mjs/);
   assert.match(source, /--summary \$summaryPath/);
   assert.match(source, /--expected-head \$ExpectedHead/);
+  assert.match(source, /--expected-repo-root \$repoRoot/);
   assert.match(source, /--expected-mission-probe-root \$missionBase/);
   assert.match(source, /--receipt \$verificationPath/);
   assert.match(source, /MISSION_HOST_EVIDENCE_VERIFY=PASS/);
@@ -86,6 +87,7 @@ test("overall host PASS is gated by persisted evidence readback and immutable re
   assert.ok(verifierOffset >= 0 && overallPassOffset > verifierOffset);
 
   const verifierSource = read(evidenceVerifier);
+  assert.match(verifierSource, /MISSION_HOST_EVIDENCE_REPO_ROOT_MISMATCH/);
   assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_HASH_MISMATCH/);
   assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_MARKER_MISSING/);
   assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_OUTSIDE_ROOT/);
