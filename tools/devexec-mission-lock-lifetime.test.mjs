@@ -62,3 +62,30 @@ test("promise-returning wrapper keeps lock held until continuation settles", () 
   assert.equal(competingAcquire, false, "async continuation must not observe an unlocked Mission state");
   assert.equal(fs.existsSync(missionLockPath(root)), false, "lock should release only after continuation settles");
 }));
+
+test("transient canonical unlink failure leaves release retryable", () => withRoot(root => {
+  const lock = acquireMissionLock(root, {owner: "retryable-release"});
+  const canonical = path.resolve(missionLockPath(root));
+  const originalRmSync = fs.rmSync;
+  let injected = false;
+
+  fs.rmSync = (target, ...args) => {
+    if (!injected && path.resolve(String(target)) === canonical) {
+      injected = true;
+      const error = new Error("simulated transient unlink failure");
+      error.code = "EBUSY";
+      throw error;
+    }
+    return originalRmSync(target, ...args);
+  };
+
+  try {
+    assert.throws(() => lock.release(), error => error?.code === "EBUSY");
+    assert.equal(fs.existsSync(canonical), true, "failed unlink must preserve the canonical lock");
+    assert.equal(lock.release(), true, "still-owning caller must be able to retry release safely");
+    assert.equal(fs.existsSync(canonical), false);
+    assert.equal(lock.release(), false, "successful release remains idempotent");
+  } finally {
+    fs.rmSync = originalRmSync;
+  }
+}));
