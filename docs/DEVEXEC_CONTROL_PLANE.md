@@ -154,7 +154,7 @@ unrelated process.
 Real user installation is performed only after the published installer bytes
 are validated.
 
-## Thin GUI Operational UX
+## Thin GUI operational UX
 
 DEV-005 improves the existing thin browser client without extending authority.
 
@@ -184,3 +184,17 @@ The read-only checker reports:
 
 The checker does not update files, start processes, or invoke Mission authority.
 Installation and update remain explicit through the installer.
+
+## Stable user runtime
+
+DEV-005 packages the validated Control Plane into a versioned user-level runtime
+under `%LOCALAPPDATA%\ChatGPTMCPProbe\control-runtime\<authority-head>`.
+
+The Windows Start Menu launchers bind to that packaged runtime rather than to a
+development or verifier workspace. The installation manifest records the
+packaged authority head, source repository, stable runtime root, and launcher
+bindings.
+
+Runtime packaging is explicit and versioned. Existing runtime directories are
+not reused as mutable development workspaces. The packaged Control Plane
+preserves loopback-only transport and the existing Mission authority chain.
