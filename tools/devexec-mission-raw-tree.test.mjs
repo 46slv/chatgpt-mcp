@@ -40,13 +40,45 @@ test("filesystem Git tree hash matches git write-tree for exact bytes and names"
   assert.equal(observed.file_count, 4);
 }));
 
-test(".git metadata and empty directories do not alter the source tree identity", () => withTemp(root => {
+test("root .git metadata and empty directories do not alter the source tree identity", () => withTemp(root => {
   fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n");
   const expected = gitTree(root);
   fs.mkdirSync(path.join(root, "empty"));
   const observed = verifyRawSnapshotGitTree(root, {expectedTree: expected});
   assert.equal(observed.tree_identity, "PASS");
   assert.equal(observed.file_count, 1);
+}));
+
+test("nested .git metadata is forbidden even when git status and tree would hide it", () => withTemp(root => {
+  fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n");
+  const expected = gitTree(root);
+  const nested = path.join(root, "sub", ".git");
+  fs.mkdirSync(nested, {recursive: true});
+  fs.writeFileSync(path.join(nested, "evil"), "hidden metadata\n");
+
+  const porcelain = execFileSync(
+    "git",
+    ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"],
+    {encoding: "utf8"},
+  ).trim();
+  assert.equal(porcelain, "", "Git itself hides nested .git metadata from porcelain status");
+
+  assert.throws(
+    () => verifyRawSnapshotGitTree(root, {expectedTree: expected}),
+    error => error?.message === "MISSION_RAW_SNAPSHOT_NESTED_GIT_METADATA_FORBIDDEN"
+      && error?.path === nested,
+  );
+}));
+
+test("empty nested .git directory is forbidden rather than disappearing as an empty Git tree directory", () => withTemp(root => {
+  fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n");
+  const expected = gitTree(root);
+  const nested = path.join(root, "sub", ".git");
+  fs.mkdirSync(nested, {recursive: true});
+  assert.throws(
+    () => verifyRawSnapshotGitTree(root, {expectedTree: expected}),
+    error => error?.message === "MISSION_RAW_SNAPSHOT_NESTED_GIT_METADATA_FORBIDDEN",
+  );
 }));
 
 test("one extra or changed byte fails closed", () => withTemp(root => {
