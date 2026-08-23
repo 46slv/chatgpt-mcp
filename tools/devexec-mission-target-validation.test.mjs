@@ -5,7 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {openMissionControl} from "./devexec-mission-control.mjs";
-import {readMissionLaunchState, requestMissionChildLaunch} from "./devexec-mission-launch.mjs";
+import {
+  beginMissionChildLaunch,
+  buildMissionChildLaunchSpec,
+  readMissionLaunchState,
+  requestMissionChildLaunch,
+} from "./devexec-mission-launch.mjs";
 import {dispatchMissionChildLaunch} from "./devexec-mission-launcher.mjs";
 
 function tempBase() {
@@ -118,6 +123,45 @@ test("invalid launch entry path is rejected before PENDING -> LAUNCHING", async 
     /entry_path required/,
   );
   assert.equal(spawnCalls, 0);
+  const after = readMissionLaunchState(control).launches[0];
+  assert.equal(after.status, "PENDING");
+  assert.equal(after.launch_attempt_id, null);
+  assert.equal(after.launcher_request_id, null);
+});
+
+test("begin preflight validates the durable snapshot before launch metadata is persisted", () => {
+  const control = controlFor();
+  request(control, "valid-target");
+  const file = path.join(control.paths.root, "launch-state.json");
+  const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+  persisted.launches[0].constraints = "corrupt";
+  fs.writeFileSync(file, JSON.stringify(persisted, null, 2) + "\n", "utf8");
+
+  assert.throws(() => beginMissionChildLaunch(control, "LAUNCH-1", {
+    launch_attempt_id: "ATTEMPT-ATOMIC",
+    launcher_request_id: "REQUEST-ATOMIC",
+    preflight: durableLaunch => buildMissionChildLaunchSpec(control, durableLaunch, {
+      entry_path: "devexec-goal.mjs",
+      node_path: "node",
+    }),
+  }), /constraints must be an array/);
+
+  const after = readMissionLaunchState(control).launches[0];
+  assert.equal(after.status, "PENDING");
+  assert.equal(after.launch_attempt_id, null);
+  assert.equal(after.launcher_request_id, null);
+  assert.equal(after.lease_token, null);
+  assert.equal(after.lease_until, null);
+});
+
+test("begin rejects asynchronous preflight before PENDING -> LAUNCHING", () => {
+  const control = controlFor();
+  request(control, "valid-target");
+  assert.throws(() => beginMissionChildLaunch(control, "LAUNCH-1", {
+    launch_attempt_id: "ATTEMPT-ASYNC",
+    launcher_request_id: "REQUEST-ASYNC",
+    preflight: async () => ({ok: true}),
+  }), /mission launch preflight must be synchronous/);
   const after = readMissionLaunchState(control).launches[0];
   assert.equal(after.status, "PENDING");
   assert.equal(after.launch_attempt_id, null);
