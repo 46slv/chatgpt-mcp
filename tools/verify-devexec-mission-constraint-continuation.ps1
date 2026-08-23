@@ -36,6 +36,7 @@ $testFiles = @(
     "tools/devexec-mission-lock.test.mjs",
     "tools/devexec-mission-lock-lifetime.test.mjs",
     "tools/devexec-mission-lock-process.test.mjs",
+    "tools/devexec-mission-process-hard-termination.test.mjs",
     "tools/devexec-mission-lock-recovery.test.mjs",
     "tools/devexec-mission-lock-resume.test.mjs",
     "tools/devexec-mission-recovery-api-boundary.test.mjs",
@@ -122,7 +123,8 @@ Write-Host "Independent legacy stale-lock mutator is retired; static API-boundar
 Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlink=PASS"
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
+Write-Host "External hard termination after durable LAUNCHING and real child spawn before receipt does not replay the child=PASS"
 Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
 Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit drift and writes an immutable verification receipt=PASS"
 Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, BOM-free UTF-8 evidence, and post-write readback requirements=PASS"
-Write-Host "Forced OS kill timing, Local Agent/Local Executor integration, power-loss durability, and SHIRO-WS integration acceptance remain separate and are NOT proven by this script."
+Write-Host "Local Agent/Local Executor integration, power-loss durability, and pinned SHIRO-WS clean-checkout host acceptance remain separate and are NOT proven by this script."
