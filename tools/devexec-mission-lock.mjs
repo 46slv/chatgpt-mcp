@@ -242,6 +242,18 @@ function deferLockReleaseUntilSettled(lock, thenable) {
   );
 }
 
+function combinedCallbackReleaseError(callbackError, releaseError, lock) {
+  const error = new AggregateError(
+    [callbackError, releaseError],
+    `MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED: ${callbackError?.message || String(callbackError)}`,
+  );
+  error.code = "MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED";
+  error.callback_error = callbackError?.message || String(callbackError);
+  error.release_error = releaseError?.message || String(releaseError);
+  error.lock_file = lock.file;
+  return error;
+}
+
 export function withMissionLock(missionRoot, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("mission lock callback required");
 
@@ -278,7 +290,12 @@ export function withMissionLock(missionRoot, fn, options = {}) {
       try {
         lock.release();
       } catch (releaseError) {
-        if (!callbackError) throw releaseError;
+        // A failed callback plus failed lock release is more severe than the
+        // mutation failure alone: the live process may now retain a canonical
+        // Mission lock that cannot be stale-recovered. Surface both failures so
+        // callers cannot continue while believing only the callback failed.
+        if (callbackError) throw combinedCallbackReleaseError(callbackError, releaseError, lock);
+        throw releaseError;
       }
     }
   }
