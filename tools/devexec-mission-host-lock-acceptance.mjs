@@ -9,6 +9,11 @@ import {acquireMissionLock, missionLockPath, withMissionLock} from "./devexec-mi
 import {recoverOrResumeStaleMissionLock} from "./devexec-mission-lock-resume.mjs";
 
 const self = fileURLToPath(import.meta.url);
+const requestedProbeParent = process.env.DEVEXEC_MISSION_HOST_PROBE_ROOT?.trim();
+const probeParent = requestedProbeParent ? path.resolve(requestedProbeParent) : os.tmpdir();
+if (!fs.existsSync(probeParent)) {
+  throw new Error(`DEVEXEC_MISSION_HOST_PROBE_ROOT does not exist: ${probeParent}`);
+}
 
 function writeJsonLine(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -63,7 +68,7 @@ function runTryLockChild(root) {
 }
 
 async function runLiveOwnerKillRecovery() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-host-live-kill-"));
+  const root = fs.mkdtempSync(path.join(probeParent, ".devexec-mission-host-live-kill-"));
   const readyFile = path.join(root, "holder-ready.json");
   const holder = spawn(process.execPath, [self, "--child-hold-lock", root, readyFile], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -120,7 +125,7 @@ async function runLiveOwnerKillRecovery() {
 }
 
 async function runThenableLifetimeCrossProcess() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-mission-host-thenable-"));
+  const root = fs.mkdtempSync(path.join(probeParent, ".devexec-mission-host-thenable-"));
   let releaseGate;
   let continuationSawCanonical = null;
   const gate = new Promise(resolve => { releaseGate = resolve; });
@@ -202,6 +207,7 @@ if (mode === "--child-hold-lock") {
     host: os.hostname(),
     platform: process.platform,
     node: process.version,
+    probe_parent: probeParent,
     results,
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
