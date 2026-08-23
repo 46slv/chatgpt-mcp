@@ -8,6 +8,8 @@ The Mission host acceptance packet already pins `ExpectedHead` and runs a clean-
 
 A host packet attributed to an exact reviewed commit should not begin while one of those operations is still in progress, even if HEAD matches and the worktree currently appears clean. Treating that state as authoritative evidence risks binding the packet to a repository whose transactional state has not settled.
 
+A focused real-Git probe reproduced the exact gap: after creating a normal commit, writing only the repository's resolved `MERGE_HEAD` state file left `git status --porcelain=v1 -z --untracked-files=all` at **0 bytes** while `MERGE_HEAD` was present. The prior clean-worktree criterion therefore accepted a state that still carried merge-transaction metadata.
+
 ## Repair
 
 `tools/devexec-mission-host-preflight.mjs` now checks the following Git state paths with `git rev-parse --git-path` after exact HEAD validation and before accepting the worktree:
@@ -37,6 +39,7 @@ Cloud validation actually run against the submitted/read-back source using Node 
 
 - `node --check tools/devexec-mission-host-preflight.mjs`: PASS.
 - `node --test tools/devexec-mission-host-preflight.test.mjs`: **7/7 PASS**, 0 failures.
+- Independent real-Git gap probe: `STATUS_BYTES=0` with `MERGE_HEAD=yes`, confirming the old status-only predicate could miss the transaction state.
 
 This is not a full repository checkout verifier, GitHub CI, PowerShell host packet, or Windows/SHIRO-WS acceptance result.
 
