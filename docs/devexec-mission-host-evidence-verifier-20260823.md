@@ -21,6 +21,8 @@ This change adds a separate verifier so `MISSION_HOST_ACCEPTANCE=PASS` is emitte
 - every recorded SHA-256 matches the bytes reopened from disk;
 - every component contains its exact declared PASS marker.
 
+The summary is parsed and SHA-256 hashed from one in-memory byte snapshot, and each component's hash and PASS marker are likewise checked from one byte snapshot. This prevents the verifier itself from binding a hash to different bytes than those whose structure/marker it actually inspected if another process rewrites a file between separate reads.
+
 The five artifacts remain:
 
 1. `00-repo-preflight.txt` — `MISSION_HOST_PREFLIGHT=PASS`
@@ -53,7 +55,7 @@ A successful run must now read back both `SUMMARY.json` and `VERIFICATION.json` 
 
 The evidence verifier and focused fixture test were executed under Node v22.16.0 in the cloud reconstruction before GitHub publication. The initial focused suite passed **8/8** and covered valid verification/receipt creation, byte tampering, marker loss with matching hash, artifact path escape, commit pin mismatch, Mission-root mismatch, duplicate/incomplete artifact sets, and immutable pre-existing receipt behavior. `node --check` for the verifier passed.
 
-During self-review, the initial `renameSync()` receipt publication was rejected because POSIX rename can replace a destination created after the pre-check. The committed implementation now uses hard-link create-if-absent publication, and the committed test suite adds a ninth real-process case where two verifier processes compete for one receipt; exactly one must succeed and the loser must fail without replacing the winner. This new ninth case still requires real-checkout execution before being claimed as PASS.
+During self-review, the initial `renameSync()` receipt publication was rejected because POSIX rename can replace a destination created after the pre-check. The committed implementation now uses hard-link create-if-absent publication, and the committed test suite adds a ninth real-process case where two verifier processes compete for one receipt; exactly one must succeed and the loser must fail without replacing the winner. A focused hard-link no-replace semantic probe passed in the cloud (`EEXIST` for the loser and winner bytes unchanged). The later single-byte-snapshot hardening was source-reviewed/read back but the final committed 9-case suite still requires real-checkout execution before being claimed as PASS.
 
 The real PowerShell wrapper, full repository checkout bundle, final committed 9-case suite, Windows/SHIRO-WS filesystem semantics, Local Agent/Local Executor integration, forced-kill timing beyond the existing probes, and power-loss/fsync durability are not claimed by this cloud validation.
 
