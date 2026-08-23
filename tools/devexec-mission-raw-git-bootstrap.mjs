@@ -13,6 +13,40 @@ function bootstrapError(code, details = {}) {
   return error;
 }
 
+const GIT_ROUTING_ENV_KEYS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+];
+
+function inheritedGitEnvironmentContamination() {
+  const contaminated = [];
+  for (const key of GIT_ROUTING_ENV_KEYS) {
+    if (typeof process.env[key] === "string" && process.env[key] !== "") contaminated.push(key);
+  }
+  const configCount = process.env.GIT_CONFIG_COUNT;
+  if (typeof configCount === "string" && configCount !== "" && configCount !== "0") {
+    contaminated.push("GIT_CONFIG_COUNT");
+  }
+  for (const key of Object.keys(process.env)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key) && process.env[key] !== "") contaminated.push(key);
+  }
+  return [...new Set(contaminated)].sort();
+}
+
+function assertSafeInheritedGitEnvironment() {
+  const contaminated = inheritedGitEnvironmentContamination();
+  if (contaminated.length > 0) {
+    throw bootstrapError("MISSION_RAW_SNAPSHOT_INHERITED_GIT_ENV_FORBIDDEN", {
+      git_environment_variables: contaminated,
+    });
+  }
+}
+
 function gitObjectSha1(type, bytes) {
   const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   return crypto.createHash("sha1")
@@ -23,17 +57,7 @@ function gitObjectSha1(type, bytes) {
 
 function sanitizedGitEnvironment() {
   const env = {...process.env};
-  for (const key of [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE",
-  ]) {
-    delete env[key];
-  }
+  for (const key of GIT_ROUTING_ENV_KEYS) delete env[key];
   for (const key of Object.keys(env)) {
     if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete env[key];
   }
@@ -110,6 +134,12 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
   expectedCommit,
   commitObject,
 } = {}) {
+  // A successful bootstrap is later followed by ordinary Git-based host checks
+  // in the same operator environment. Reject repository-routing/config-injection
+  // variables up front instead of merely sanitizing this function's children and
+  // leaving the subsequent host packet exposed to a different Git authority.
+  assertSafeInheritedGitEnvironment();
+
   const verified = verifyRawSnapshotGitTree(root, {expectedTree, expectedCommit});
   const commit = validateCommitObject(commitObject, {
     expectedCommit: verified.expected_commit,
@@ -123,9 +153,9 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS", {git_dir: gitDir});
   }
 
-  // Do not let an inherited Git routing/config environment redirect bootstrap
-  // mutations to some other repository or inject host-specific object/config
-  // semantics. Every Git command below runs in an explicitly sanitized env.
+  // Also isolate Git children from host global/system config, replacement refs,
+  // and repository-routing variables. The precheck above ensures the operator
+  // shell is safe for the unchanged host packet that follows this bootstrap.
   runGit(verified.root, ["init", "-q"]);
   runGit(verified.root, ["config", "core.autocrlf", "false"]);
   runGit(verified.root, ["config", "core.filemode", "false"]);
@@ -168,7 +198,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 4,
+    schema_version: 5,
     source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
@@ -176,7 +206,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     head,
     branch: "devexec-raw-snapshot",
     git_worktree_clean: true,
-    git_environment: "SANITIZED",
+    git_environment: "PRECHECKED_AND_SANITIZED",
     nested_git_metadata: "FORBIDDEN",
     status: "PASS",
   };
@@ -218,7 +248,7 @@ if (isMain) {
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 4,
+      schema_version: 5,
       error: error?.message || String(error),
       expected_commit: error?.expected_commit ?? null,
       observed_commit: error?.observed_commit ?? null,
@@ -226,6 +256,7 @@ if (isMain) {
       commit_tree: error?.commit_tree ?? null,
       indexed_tree: error?.indexed_tree ?? null,
       path: error?.path ?? null,
+      git_environment_variables: error?.git_environment_variables ?? [],
       git_status: error?.git_status ?? null,
       git_stderr: error?.git_stderr ?? null,
     }, null, 2)}\n`);
