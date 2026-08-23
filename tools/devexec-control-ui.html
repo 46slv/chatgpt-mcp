@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -83,6 +83,27 @@
       height: 8px;
       border-radius: 50%;
       background: currentColor;
+    }
+
+    .connection-detail {
+      margin: -12px 0 18px;
+      color: #929cab;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .notice {
+      margin: 0 0 18px;
+      padding: 11px 13px;
+      border: 1px solid #573232;
+      border-radius: 10px;
+      background: #1c1113;
+      line-height: 1.45;
+      font-size: 13px;
+    }
+
+    .notice[hidden] {
+      display: none;
     }
 
     .grid {
@@ -261,7 +282,23 @@
       </div>
     </header>
 
-    <div class="grid">
+        <div
+      id="connection-detail"
+      class="connection-detail"
+      aria-live="polite"
+    >
+      Waiting for loopback health check.
+    </div>
+
+    <div
+      id="operational-error"
+      class="notice error"
+      role="alert"
+      aria-live="assertive"
+      hidden
+    ></div>
+
+<div class="grid">
       <section class="card">
         <h2>Parent run</h2>
 
@@ -287,22 +324,22 @@
         <div class="summary">
           <div class="metric">
             <small>Phase</small>
-            <strong id="phase">—</strong>
+            <strong id="phase">窶・/strong>
           </div>
 
           <div class="metric">
             <small>Can start</small>
-            <strong id="can-start">—</strong>
+            <strong id="can-start">窶・/strong>
           </div>
 
           <div class="metric">
             <small>Pending</small>
-            <strong id="pending">—</strong>
+            <strong id="pending">窶・/strong>
           </div>
 
           <div class="metric">
             <small>Ambiguous</small>
-            <strong id="ambiguous">—</strong>
+            <strong id="ambiguous">窶・/strong>
           </div>
         </div>
 

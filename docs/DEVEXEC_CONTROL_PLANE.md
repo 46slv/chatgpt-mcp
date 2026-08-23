@@ -1,4 +1,4 @@
-# Dev Exec Control Plane
+﻿# Dev Exec Control Plane
 
 Status: DEV-004
 
@@ -153,3 +153,18 @@ unrelated process.
 
 Real user installation is performed only after the published installer bytes
 are validated.
+
+## Thin GUI Operational UX
+
+DEV-005 improves the existing thin browser client without extending authority.
+
+The GUI presents loopback connection detail, server availability, actionable
+operation errors, Start Menu recovery guidance, and Control Doctor guidance.
+
+Errors from durable run-state reads, capability checks, and child-run requests
+are surfaced visibly while their structured response remains available in the
+existing output panels.
+
+All browser behavior remains same-origin HTTP against the loopback Control
+Server. Browser code contains no process management and no Mission launch
+authority.

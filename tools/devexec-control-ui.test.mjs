@@ -213,3 +213,81 @@ test(
     }
   },
 );
+
+test(
+  "GUI presents actionable local connection and operation errors without process authority",
+  () => {
+    const html =
+      fs.readFileSync(
+        htmlPath,
+        "utf8",
+      );
+
+    const js =
+      fs.readFileSync(
+        jsPath,
+        "utf8",
+      );
+
+    assert.match(
+      html,
+      /id="connection-detail"/,
+    );
+
+    assert.match(
+      html,
+      /id="operational-error"/,
+    );
+
+    assert.match(
+      js,
+      /Control Server reachable on loopback/,
+    );
+
+    assert.match(
+      js,
+      /Open Dev Exec Control from the Start Menu/,
+    );
+
+    assert.match(
+      js,
+      /Dev Exec Control Doctor/,
+    );
+
+    assert.match(
+      js,
+      /showOperationalError/,
+    );
+
+    assert.match(
+      js,
+      /Read state/,
+    );
+
+    assert.match(
+      js,
+      /Capability check/,
+    );
+
+    assert.match(
+      js,
+      /Start child run/,
+    );
+
+    for (
+      const forbidden of [
+        "node:child_process",
+        "process.kill",
+        "spawn(",
+        "spawnSync(",
+        "devexec-control.mjs",
+      ]
+    ) {
+      assert.equal(
+        js.includes(forbidden),
+        false,
+        `browser code must not contain ${forbidden}`,
+      );
+    }
+  },
+);

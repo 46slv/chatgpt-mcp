@@ -4,6 +4,12 @@ const byId = id =>
 const serverStatus =
   byId("server-status");
 
+const connectionDetail =
+  byId("connection-detail");
+
+const operationalError =
+  byId("operational-error");
+
 const parentRun =
   byId("parent-run");
 
@@ -60,6 +66,45 @@ function pretty(value) {
     null,
     2,
   );
+}
+
+function connectionErrorMessage(
+  error,
+) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  if (
+    /fetch|network|connection|refused|abort|failed/i
+      .test(message)
+  ) {
+    return (
+      "Local Control Server is unavailable. " +
+      "Open Dev Exec Control from the Start Menu. " +
+      "If the problem remains, run Dev Exec Control Doctor."
+    );
+  }
+
+  return message;
+}
+
+function clearOperationalError() {
+  operationalError.hidden = true;
+  operationalError.textContent = "";
+}
+
+function showOperationalError(
+  context,
+  error,
+) {
+  operationalError.hidden = false;
+
+  operationalError.textContent =
+    context +
+    ": " +
+    connectionErrorMessage(error);
 }
 
 async function requestJson(
@@ -164,7 +209,18 @@ async function health() {
         result.status === "ok"
           ? "Server online"
           : "Server response";
-  } catch {
+
+    connectionDetail.textContent =
+      result.bind_policy ===
+      "loopback-only"
+        ? (
+          "Control Server reachable on loopback. " +
+          "Browser requests stay on the local origin."
+        )
+        : "Unexpected Control Server bind policy.";
+
+    clearOperationalError();
+  } catch (error) {
     serverStatus.className =
       "status error";
 
@@ -174,11 +230,23 @@ async function health() {
       )
       .textContent =
         "Server unavailable";
+
+    connectionDetail.textContent =
+      connectionErrorMessage(
+        error
+      );
+
+    showOperationalError(
+      "Connection",
+      error,
+    );
   }
 }
 
 async function loadRun() {
   try {
+
+    clearOperationalError();
     const id =
       parentId();
 
@@ -194,6 +262,11 @@ async function loadRun() {
     inspectionOutput.textContent =
       pretty(result);
   } catch (error) {
+
+    showOperationalError(
+      "Read state",
+      error,
+    );
     inspectionOutput.textContent =
       pretty(
         error.body ?? {
@@ -206,6 +279,8 @@ async function loadRun() {
 
 async function loadCapability() {
   try {
+
+    clearOperationalError();
     const id =
       parentId();
 
@@ -222,6 +297,11 @@ async function loadCapability() {
     inspectionOutput.textContent =
       pretty(result);
   } catch (error) {
+
+    showOperationalError(
+      "Capability check",
+      error,
+    );
     capability = null;
 
     startRun.disabled =
@@ -274,6 +354,8 @@ async function launch() {
     true;
 
   try {
+
+    clearOperationalError();
     if (
       capability?.can_start !==
       true
@@ -352,6 +434,11 @@ async function launch() {
 
     await loadCapability();
   } catch (error) {
+
+    showOperationalError(
+      "Start child run",
+      error,
+    );
     launchOutput.textContent =
       pretty(
         error.body ?? {
