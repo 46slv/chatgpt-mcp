@@ -192,12 +192,19 @@ export function acquireMissionLock(missionRoot, {
     fs.linkSync(stagingFile, file);
   } catch (error) {
     try { fs.rmSync(stagingFile, {force: true}); } catch {}
-    if (error?.code === "EEXIST") {
+    // Some Windows/filesystem combinations can surface a non-EEXIST error for
+    // an already-present target. If the canonical lock exists after the failed
+    // link attempt, conservatively classify it as contention and never replace it.
+    if (error?.code === "EEXIST" || fs.existsSync(file)) {
       const locked = new Error("MISSION_CONTROL_LOCKED");
       locked.lock_file = file;
       throw locked;
     }
-    throw error;
+    const publishError = new Error("MISSION_CONTROL_LOCK_ATOMIC_PUBLISH_FAILED");
+    publishError.cause = error;
+    publishError.lock_file = file;
+    publishError.fs_code = error?.code ?? null;
+    throw publishError;
   }
 
   // Publication already succeeded. Staging cleanup is deliberately best-effort:
