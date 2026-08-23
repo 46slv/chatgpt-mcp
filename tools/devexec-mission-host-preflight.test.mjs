@@ -72,6 +72,7 @@ test("untracked file is rejected before host acceptance", () => withRepo((root, 
 test("clean worktree with MERGE_HEAD is rejected as an in-progress Git operation", () => withRepo((root, head) => {
   const mergeHead = resolvedGitPath(root, "MERGE_HEAD");
   fs.writeFileSync(mergeHead, `${head}\n`, "utf8");
+  assert.equal(git(root, "status", "--porcelain=v1", "--untracked-files=all"), "");
   assert.throws(
     () => inspectMissionHostCheckout(root, {expectedHead: head}),
     error => {
@@ -87,6 +88,7 @@ test("clean worktree with MERGE_HEAD is rejected as an in-progress Git operation
 test("clean worktree with rebase state directory is rejected before host acceptance", () => withRepo((root, head) => {
   const rebaseState = resolvedGitPath(root, "rebase-merge");
   fs.mkdirSync(rebaseState, {recursive: true});
+  assert.equal(git(root, "status", "--porcelain=v1", "--untracked-files=all"), "");
   assert.throws(
     () => inspectMissionHostCheckout(root, {expectedHead: head}),
     error => {
@@ -96,6 +98,40 @@ test("clean worktree with rebase state directory is rejected before host accepta
     },
   );
 }));
+
+test("all declared Git transaction markers fail closed even when porcelain status is clean", () => {
+  const cases = [
+    ["cherry-pick", "CHERRY_PICK_HEAD", "file"],
+    ["revert", "REVERT_HEAD", "file"],
+    ["rebase-apply", "rebase-apply", "directory"],
+    ["sequencer", "sequencer/todo", "file"],
+    ["bisect", "BISECT_START", "file"],
+  ];
+  for (const [operation, gitPath, kind] of cases) {
+    withRepo((root, head) => {
+      const statePath = resolvedGitPath(root, gitPath);
+      if (kind === "directory") {
+        fs.mkdirSync(statePath, {recursive: true});
+      } else {
+        fs.mkdirSync(path.dirname(statePath), {recursive: true});
+        fs.writeFileSync(statePath, `${head}\n`, "utf8");
+      }
+      assert.equal(
+        git(root, "status", "--porcelain=v1", "--untracked-files=all"),
+        "",
+        `${operation} fixture should remain porcelain-clean`,
+      );
+      assert.throws(
+        () => inspectMissionHostCheckout(root, {expectedHead: head}),
+        error => {
+          assert.equal(error?.message, "MISSION_HOST_PREFLIGHT_GIT_OPERATION_IN_PROGRESS");
+          assert.equal(error?.git_operation, operation);
+          return true;
+        },
+      );
+    });
+  }
+});
 
 test("expected HEAD mismatch is rejected", () => withRepo((root) => {
   const impossible = "0".repeat(40);
