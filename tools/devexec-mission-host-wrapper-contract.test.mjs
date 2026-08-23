@@ -46,3 +46,12 @@ test("host wrapper uses non-reused evidence directory identity", () => {
   assert.match(source, /\[Guid\]::NewGuid\(\)/);
   assert.doesNotMatch(source, /New-Item[^\r\n]+-Force[^\r\n]+\$runDir/);
 });
+
+test("filesystem-sensitive probes are pinned to Mission base rather than EvidenceRoot", () => {
+  const source = readWrapper();
+  assert.match(source, /\$missionBase = \$env:LOCALAPPDATA/);
+  assert.match(source, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT = \$missionBase/);
+  assert.match(source, /DEVEXEC_MISSION_HOST_PROBE_ROOT = \$missionBase/);
+  assert.match(source, /mission_probe_root = \$missionBase/);
+  assert.doesNotMatch(source, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT = \$runDir/);
+});
