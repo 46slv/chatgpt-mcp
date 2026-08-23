@@ -10,6 +10,7 @@ import { loadRegistry, resolveTarget } from "./target-registry.mjs";
 import { loadAndClassifyRunState, loadAndInspectReceiptAwarePending, reconcileReceiptAwarePending, verifyEventJournal } from "./devexec-recovery.mjs";
 import { classifySelfRecovery } from "./devexec-self-recovery.mjs";
 import { queueTerminalStopAlert } from "./devexec-stop-alert-runtime.mjs";
+import {runAutonomousStartCli} from "./devexec-mission-autonomous-start-cli.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const targetCli = path.join(here, "devexec-target.mjs");
@@ -74,6 +75,7 @@ function usage() {
  " devexec agent status <local-agent-run-id>",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
+ " devexec autonomous-start --child-run <id> --goal <goal> --entry <path> [--target <alias>]",
  " devexec recover inspect <run-id>",
  " devexec recover verify-journal <run-id>",
  "",
@@ -144,7 +146,9 @@ if (command === "run") {
  process.exit(code);
 }
 
-if (command === "continue") {
+if (command === "autonomous-start") {
+  await runAutonomousStartCli(args);
+} else if (command === "continue") {
  const parentRunId = args.shift();
  if (!parentRunId) throw new Error("continue requires a parent run id.");
 
@@ -191,7 +195,9 @@ if (command === "continue") {
  process.exit(code);
 }
 
-usage();
-process.exit(2);
+if (command !== "autonomous-start") {
+  usage();
+  process.exit(2);
+}
 
 
