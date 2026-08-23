@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import {inspectMissionLock, missionLockPath} from "./devexec-mission-lock.mjs";
+import {inspectMissionLock} from "./devexec-mission-lock.mjs";
 
 function readLockRecord(file) {
   let raw;
@@ -127,6 +127,21 @@ function currentStillMatches(inspection, current) {
   );
 }
 
+function mixedClaimsError(canonical, baseFile, owners) {
+  const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_MIXED_CLAIMS");
+  error.lock_file = canonical;
+  error.quarantine_file = baseFile;
+  error.claim_files = owners;
+  return error;
+}
+
+function multipleClaimsError(canonical, owners) {
+  const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_MULTIPLE_CLAIMS");
+  error.lock_file = canonical;
+  error.claim_files = owners;
+  return error;
+}
+
 function claimRecoveryOwnership(inspection) {
   const canonical = inspection.file;
   const staleToken = inspection.record.token;
@@ -135,61 +150,20 @@ function claimRecoveryOwnership(inspection) {
   const ownerFile = recoveryOwnerPath(canonical, staleToken, process.pid, recoveryToken);
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    let owners = listRecoveryOwnerClaims(canonical, staleToken);
-    if (owners.length > 1) {
-      const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_MULTIPLE_CLAIMS");
-      error.lock_file = canonical;
-      error.claim_files = owners;
-      throw error;
+    const owners = listRecoveryOwnerClaims(canonical, staleToken);
+    const baseExists = fs.existsSync(baseFile);
+
+    if (owners.length > 1) throw multipleClaimsError(canonical, owners);
+
+    // Classify the entire recovery namespace before mutating it. A live/dead
+    // PID-bearing owner plus neutral evidence is an ambiguous mixed-protocol
+    // state. Never consume the neutral path while another recovery owner exists.
+    if (owners.length === 1 && baseExists) {
+      throw mixedClaimsError(canonical, baseFile, owners);
     }
 
-    if (!fs.existsSync(baseFile) && owners.length === 0) {
-      try {
-        fs.linkSync(canonical, baseFile);
-      } catch (error) {
-        if (error?.code === "EEXIST" || fs.existsSync(baseFile)) {
-          // Another recoverer published the arbitration link. Compete for the
-          // link by rename below rather than assuming ownership.
-        } else if (error?.code === "ENOENT") {
-          const current = inspectMissionLock(path.dirname(canonical));
-          if (current.status === "UNLOCKED") return null;
-          const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
-          changed.lock_file = canonical;
-          changed.lock_status = current.status;
-          throw changed;
-        } else {
-          const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_ATOMIC_CLAIM_FAILED");
-          claimError.cause = error;
-          claimError.lock_file = canonical;
-          claimError.quarantine_file = baseFile;
-          claimError.fs_code = error?.code ?? null;
-          throw claimError;
-        }
-      }
-    }
-
-    if (fs.existsSync(baseFile)) {
-      try {
-        fs.renameSync(baseFile, ownerFile);
-        return {owner_file: ownerFile, base_file: baseFile, recovery_token: recoveryToken};
-      } catch (error) {
-        if (error?.code !== "ENOENT") {
-          const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_OWNER_CLAIM_FAILED");
-          claimError.cause = error;
-          claimError.lock_file = canonical;
-          throw claimError;
-        }
-        continue;
-      }
-    }
-
-    owners = listRecoveryOwnerClaims(canonical, staleToken);
-    if (owners.length > 1) {
-      const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_MULTIPLE_CLAIMS");
-      error.lock_file = canonical;
-      error.claim_files = owners;
-      throw error;
-    }
+    // Owner claims always take precedence over neutral evidence. This is the
+    // only path that can resume a crashed recoverer.
     if (owners.length === 1) {
       const existing = parseRecoveryOwnerClaim(canonical, staleToken, owners[0]);
       const alive = processExists(existing.pid);
@@ -213,22 +187,69 @@ function claimRecoveryOwnership(inspection) {
       }
     }
 
-    const current = readLockRecord(canonical);
-    if (!current) return null;
-    if (!currentStillMatches(inspection, current)) {
-      const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
-      changed.lock_file = canonical;
-      throw changed;
+    if (baseExists) {
+      try {
+        fs.renameSync(baseFile, ownerFile);
+        return {owner_file: ownerFile, base_file: baseFile, recovery_token: recoveryToken};
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_OWNER_CLAIM_FAILED");
+        claimError.cause = error;
+        claimError.lock_file = canonical;
+        throw claimError;
+      }
+    }
+
+    try {
+      fs.linkSync(canonical, baseFile);
+      // Reclassify on the next iteration. If another owner appeared while the
+      // neutral link was published, mixed-state detection fails closed before
+      // any ownership transition or canonical unlink.
+      continue;
+    } catch (error) {
+      if (error?.code === "EEXIST" || fs.existsSync(baseFile)) continue;
+      if (error?.code === "ENOENT") {
+        const current = inspectMissionLock(path.dirname(canonical));
+        if (current.status === "UNLOCKED") return null;
+        const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
+        changed.lock_file = canonical;
+        changed.lock_status = current.status;
+        throw changed;
+      }
+      const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_ATOMIC_CLAIM_FAILED");
+      claimError.cause = error;
+      claimError.lock_file = canonical;
+      claimError.quarantine_file = baseFile;
+      claimError.fs_code = error?.code ?? null;
+      throw claimError;
     }
   }
 
   throw new Error("MISSION_CONTROL_LOCK_RECOVERY_CLAIM_RETRY_EXHAUSTED");
 }
 
+function assertExclusiveRecoveryOwnership(inspection, ownership) {
+  const canonical = inspection.file;
+  const staleToken = inspection.record.token;
+  const owners = listRecoveryOwnerClaims(canonical, staleToken);
+  const foreignOwners = owners.filter(file => path.resolve(file) !== path.resolve(ownership.owner_file));
+  const baseExists = fs.existsSync(ownership.base_file);
+
+  if (foreignOwners.length > 0 || baseExists) {
+    throw mixedClaimsError(canonical, ownership.base_file, owners);
+  }
+  if (owners.length !== 1 || path.resolve(owners[0]) !== path.resolve(ownership.owner_file)) {
+    const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_OWNERSHIP_LOST");
+    error.lock_file = canonical;
+    error.claim_files = owners;
+    throw error;
+  }
+}
+
 export function recoverOrResumeStaleMissionLock(missionRoot) {
   const inspection = inspectMissionLock(missionRoot);
   if (inspection.status === "UNLOCKED") {
-    return {recovered: false, ...inspection, quarantine_file: null, recovery_claim_mode: "movable-owner-v1"};
+    return {recovered: false, ...inspection, quarantine_file: null, recovery_claim_mode: "movable-owner-v2"};
   }
   if (inspection.status === "HELD") {
     const error = new Error("MISSION_CONTROL_LOCK_OWNER_ALIVE");
@@ -252,7 +273,7 @@ export function recoverOrResumeStaleMissionLock(missionRoot) {
       file: inspection.file,
       record: null,
       quarantine_file: null,
-      recovery_claim_mode: "movable-owner-v1",
+      recovery_claim_mode: "movable-owner-v2",
     };
   }
 
@@ -280,11 +301,11 @@ export function recoverOrResumeStaleMissionLock(missionRoot) {
       throw mismatch;
     }
 
-    // Only the process owning the movable recovery link can reach this unlink.
-    // A crashed owner leaves its owner PID in the claim filename; a successor
-    // must atomically rename that exact claim before it can continue. Therefore
-    // two compliant recoverers cannot both pass this boundary against one
-    // canonical pathname.
+    // Re-read the recovery namespace immediately before the only canonical
+    // mutation. Any foreign owner or neutral claim means arbitration is no
+    // longer exclusive, so preserve the canonical lock and fail closed.
+    assertExclusiveRecoveryOwnership(inspection, ownership);
+
     fs.rmSync(inspection.file);
     canonicalRemoved = true;
 
@@ -296,14 +317,10 @@ export function recoverOrResumeStaleMissionLock(missionRoot) {
       file: inspection.file,
       record: inspection.record,
       quarantine_file: quarantineFile,
-      recovery_claim_mode: "movable-owner-v1",
+      recovery_claim_mode: "movable-owner-v2",
     };
   } finally {
     if (!canonicalRemoved) {
-      // Controlled validation failures release only this recovery ownership
-      // link back to the neutral evidence name. A process crash skips this
-      // finally; its PID-bearing owner filename then becomes the resumable
-      // durable handoff for the next process.
       restoreOwnedEvidence(ownership.owner_file, ownership.base_file);
     }
   }
