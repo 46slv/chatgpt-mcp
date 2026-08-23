@@ -7,6 +7,7 @@ import {loadMissionState} from "./devexec-mission-state.mjs";
 import {normalizeDurableTargetAlias} from "./devexec-target-alias.mjs";
 
 const ACTIVE = new Set(["PENDING", "LAUNCHING", "LAUNCHED", "AMBIGUOUS"]);
+const TRUSTED_DISPATCH_PREFLIGHTS = new WeakSet();
 
 function required(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} required`);
@@ -161,6 +162,25 @@ export function requestMissionChildLaunch(control, input, {
   });
 }
 
+// Produce the only preflight capability accepted by beginMissionChildLaunch().
+// The callback is deliberately not caller-supplied: it can only perform the
+// pure launch-spec construction that must share the same lock/snapshot as the
+// PENDING -> LAUNCHING transition. This prevents arbitrary synchronous side
+// effects from being smuggled into the atomic section while retaining a narrow
+// compatibility seam for direct begin callers.
+export function createMissionChildDispatchPreflight(control, {
+  entry_path,
+  node_path = process.execPath,
+} = {}) {
+  if (!control?.state?.mission_id) throw new Error("mission control required");
+  const preflight = durableLaunch => buildMissionChildLaunchSpec(control, durableLaunch, {
+    entry_path,
+    node_path,
+  });
+  TRUSTED_DISPATCH_PREFLIGHTS.add(preflight);
+  return preflight;
+}
+
 export function beginMissionChildLaunch(control, launchId, {
   launch_attempt_id,
   launcher_request_id,
@@ -184,12 +204,15 @@ export function beginMissionChildLaunch(control, launchId, {
     if (launch.status !== "PENDING") throw new Error(`launch not pending: ${launch.status}`);
 
     // Deterministic dispatch validation must share the same Mission lock and
-    // durable snapshot as PENDING -> LAUNCHING. A separate pre-read leaves a
-    // TOCTOU window where another writer can alter the launch after validation
-    // but before begin persists an in-flight attempt.
+    // durable snapshot as PENDING -> LAUNCHING. Only a one-shot capability
+    // created by createMissionChildDispatchPreflight() is accepted here; an
+    // arbitrary callback could perform unrelated side effects before the
+    // launch transition and leave them unjournaled if it later throws.
     let preflightResult = null;
     if (preflight != null) {
-      if (typeof preflight !== "function") throw new Error("mission launch preflight must be a function");
+      if (typeof preflight !== "function" || !TRUSTED_DISPATCH_PREFLIGHTS.delete(preflight)) {
+        throw new Error("MISSION_LAUNCH_UNTRUSTED_PREFLIGHT");
+      }
       preflightResult = preflight(clone(launch));
       if (preflightResult && typeof preflightResult.then === "function") {
         throw new Error("mission launch preflight must be synchronous");
