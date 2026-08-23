@@ -54,6 +54,7 @@ $ShortcutRoot = [System.IO.Path]::GetFullPath($ShortcutRoot)
 $StartLauncher = Join-Path $InstallRoot "DevExec Control.cmd"
 $StatusLauncher = Join-Path $InstallRoot "DevExec Control Status.cmd"
 $StopLauncher = Join-Path $InstallRoot "DevExec Control Stop.cmd"
+$DoctorLauncher = Join-Path $InstallRoot "DevExec Control Doctor.cmd"
 $Manifest = Join-Path $InstallRoot "install.json"
 $Shortcut = Join-Path $ShortcutRoot "Dev Exec Control.lnk"
 
@@ -79,6 +80,7 @@ function Assert-Installed {
         $StartLauncher,
         $StatusLauncher,
         $StopLauncher,
+        $DoctorLauncher,
         $Manifest,
         $Shortcut
     )) {
@@ -149,6 +151,12 @@ $StopText = @"
 if errorlevel 1 pause
 "@
 
+$DoctorText = @"
+@echo off
+"$Node" "$DevExec" control doctor
+if errorlevel 1 pause
+"@
+
 Write-Utf8NoBom `
     -Path $StartLauncher `
     -Text ($StartText.Trim() + "`r`n")
@@ -160,6 +168,10 @@ Write-Utf8NoBom `
 Write-Utf8NoBom `
     -Path $StopLauncher `
     -Text ($StopText.Trim() + "`r`n")
+
+Write-Utf8NoBom `
+    -Path $DoctorLauncher `
+    -Text ($DoctorText.Trim() + "`r`n")
 
 $InstallState = [ordered]@{
     protocol = "devexec.control.install"
@@ -173,6 +185,7 @@ $InstallState = [ordered]@{
         start_open = $StartLauncher
         status = $StatusLauncher
         stop = $StopLauncher
+        doctor = $DoctorLauncher
     }
 }
 
