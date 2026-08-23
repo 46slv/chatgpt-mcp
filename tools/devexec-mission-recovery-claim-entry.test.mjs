@@ -43,8 +43,6 @@ test("interrupted neutral stale-recovery claim resumes before exactly one Local 
   const dead = createDeadMissionLock(root, missionId);
   const quarantine = `${dead.canonical}.stale-${dead.token}.json`;
 
-  // Model a crash after the neutral hard-link evidence was published but before
-  // the old stale canonical pathname was removed.
   fs.linkSync(dead.canonical, quarantine);
 
   let calls = 0;
@@ -62,7 +60,7 @@ test("interrupted neutral stale-recovery claim resumes before exactly one Local 
   assert.equal(result.agent.run_id, "LOCAL-AGENT-ONCE");
   assert.equal(result.lock_recovery.recovered, true);
   assert.equal(result.lock_recovery.status, "STALE_RECOVERED");
-  assert.equal(result.lock_recovery.recovery_claim_mode, "movable-owner-v1");
+  assert.equal(result.lock_recovery.recovery_claim_mode, "movable-owner-v2");
   assert.equal(fs.existsSync(dead.canonical), false);
   assert.equal(fs.existsSync(result.lock_recovery.quarantine_file), true);
   const evidence = JSON.parse(fs.readFileSync(result.lock_recovery.quarantine_file, "utf8"));
