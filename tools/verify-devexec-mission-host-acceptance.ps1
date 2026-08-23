@@ -10,13 +10,6 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $node = (Get-Command node -ErrorAction Stop).Source
-$head = (& git rev-parse HEAD).Trim()
-$branch = (& git branch --show-current).Trim()
-if ([string]::IsNullOrWhiteSpace($branch)) { $branch = "DETACHED" }
-
-if (-not [string]::IsNullOrWhiteSpace($ExpectedHead) -and $head -ne $ExpectedHead.Trim()) {
-    throw "HEAD mismatch: expected $($ExpectedHead.Trim()) observed $head"
-}
 
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $base = $env:LOCALAPPDATA
@@ -25,9 +18,10 @@ if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
     $EvidenceRoot = Join-Path $base "ChatGPTMCPProbe\mission-host-acceptance"
 }
 
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$runDir = Join-Path $EvidenceRoot $stamp
-New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+$suffix = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+$runDir = Join-Path $EvidenceRoot "$stamp-$suffix"
+New-Item -ItemType Directory -Path $runDir -ErrorAction Stop | Out-Null
 
 function Invoke-AndPersist {
     param(
@@ -67,9 +61,22 @@ function Invoke-AndPersist {
 
 Write-Host "=== DEV EXEC MISSION HOST ACCEPTANCE ==="
 Write-Host "Repo: $repoRoot"
+Write-Host "Evidence: $runDir"
+
+$preflightScript = Join-Path $PSScriptRoot "devexec-mission-host-preflight.mjs"
+$preflightFile = Invoke-AndPersist -Name "00-repo-preflight" -Action {
+    $args = @($preflightScript, "--repo", $repoRoot)
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedHead)) {
+        $args += @("--expected-head", $ExpectedHead.Trim())
+    }
+    & $node @args
+}
+
+$head = (& git rev-parse HEAD).Trim()
+$branch = (& git branch --show-current).Trim()
+if ([string]::IsNullOrWhiteSpace($branch)) { $branch = "DETACHED" }
 Write-Host "Branch: $branch"
 Write-Host "HEAD: $head"
-Write-Host "Evidence: $runDir"
 
 $reliabilityFile = Invoke-AndPersist -Name "01-mission-reliability" -Action {
     & (Join-Path $PSScriptRoot "verify-devexec-mission-constraint-continuation.ps1")
@@ -89,7 +96,14 @@ $lockFile = Invoke-AndPersist -Name "03-host-lock-process" -Action {
     & $node (Join-Path $PSScriptRoot "devexec-mission-host-lock-acceptance.mjs")
 }
 
-$files = @($reliabilityFile, $identityFile, $lockFile)
+# Re-run the checkout guard after every component. A host packet is only
+# attributable to the recorded commit if tests did not modify tracked or
+# untracked repository state while producing their evidence.
+$postflightFile = Invoke-AndPersist -Name "04-repo-postflight" -Action {
+    & $node $preflightScript --repo $repoRoot --expected-head $head
+}
+
+$files = @($preflightFile, $reliabilityFile, $identityFile, $lockFile, $postflightFile)
 $artifacts = @()
 foreach ($file in $files) {
     $hash = Get-FileHash -LiteralPath $file -Algorithm SHA256
@@ -101,7 +115,7 @@ foreach ($file in $files) {
 
 $summary = [ordered]@{
     protocol = "devexec.mission-host-acceptance"
-    schema_version = 1
+    schema_version = 2
     generated_at = (Get-Date).ToString("o")
     machine = $env:COMPUTERNAME
     repo = $repoRoot
@@ -110,10 +124,12 @@ $summary = [ordered]@{
     expected_head = if ([string]::IsNullOrWhiteSpace($ExpectedHead)) { $null } else { $ExpectedHead.Trim() }
     evidence_root = $runDir
     checks = [ordered]@{
+        source_checkout_preflight_clean = "PASS"
         mission_reliability_bundle = "PASS"
         filesystem_hardlink_identity = "PASS"
         real_process_live_owner_refusal_and_kill_recovery = "PASS"
         returned_thenable_cross_process_exclusion = "PASS"
+        source_checkout_postflight_clean = "PASS"
     }
     host_only_remainder = @(
         "Local Agent/Local Executor end-to-end integration",
