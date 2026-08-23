@@ -31,17 +31,32 @@ function regularFileMode(stat) {
   return (stat.mode & 0o111) !== 0 ? "100755" : "100644";
 }
 
-function walkTree(directory, {ignoreNames}) {
+function isGitMetadataName(name) {
+  if (name === ".git") return true;
+  return process.platform === "win32" && name.toLowerCase() === ".git";
+}
+
+function walkTree(directory, {ignoreNames, isRoot = false}) {
   const entries = [];
   let fileCount = 0;
   let byteCount = 0;
 
   for (const dirent of fs.readdirSync(directory, {withFileTypes: true})) {
-    if (ignoreNames.has(dirent.name)) continue;
+    if (isRoot && ignoreNames.has(dirent.name)) continue;
     const absolute = path.join(directory, dirent.name);
 
+    // Root .git is the bootstrap-owned metadata directory and may be ignored
+    // during post-bootstrap source verification. Nested .git entries are never
+    // source-neutral: Git itself can hide them from status/add while commands
+    // run below that directory may discover different repository metadata.
+    if (!isRoot && isGitMetadataName(dirent.name)) {
+      throw rawTreeError("MISSION_RAW_SNAPSHOT_NESTED_GIT_METADATA_FORBIDDEN", {
+        path: absolute,
+      });
+    }
+
     if (dirent.isDirectory()) {
-      const child = walkTree(absolute, {ignoreNames});
+      const child = walkTree(absolute, {ignoreNames, isRoot: false});
       if (child.entryCount === 0) continue;
       entries.push({
         name: dirent.name,
@@ -130,7 +145,7 @@ function normalizeSha1(value, code) {
 export function computeRawSnapshotGitTree(root, {ignoreNames = [".git"]} = {}) {
   const canonicalRoot = canonicalDirectory(root);
   const ignored = new Set(ignoreNames);
-  const result = walkTree(canonicalRoot, {ignoreNames: ignored});
+  const result = walkTree(canonicalRoot, {ignoreNames: ignored, isRoot: true});
   return {
     root: canonicalRoot,
     tree_sha1: result.sha.toString("hex"),
@@ -161,7 +176,7 @@ export function verifyRawSnapshotGitTree(root, {
   }
   return {
     protocol: "devexec.mission-raw-snapshot-tree",
-    schema_version: 1,
+    schema_version: 2,
     source_mode: "raw_snapshot",
     expected_commit,
     expected_tree,
@@ -170,6 +185,7 @@ export function verifyRawSnapshotGitTree(root, {
     file_count: observed.file_count,
     byte_count: observed.byte_count,
     ignored_names: observed.ignored_names,
+    nested_git_metadata: "FORBIDDEN",
     tree_identity: "PASS",
   };
 }
@@ -201,11 +217,12 @@ if (isMain) {
   } catch (error) {
     const report = {
       protocol: "devexec.mission-raw-snapshot-tree-error",
-      schema_version: 1,
+      schema_version: 2,
       error: error?.message || String(error),
       expected_tree: error?.expected_tree ?? null,
       observed_tree: error?.observed_tree ?? null,
       root: error?.root ?? null,
+      path: error?.path ?? null,
       file_count: error?.file_count ?? null,
       byte_count: error?.byte_count ?? null,
     };
