@@ -40,12 +40,31 @@ function defaultCommandRunner(command, args, {cwd, env}) {
 
 function runCommand(commandRunner, command, args, options, label) {
   const result = commandRunner(command, args, options);
-  if (!result || typeof result.status !== "number") {
+  if (!result || typeof result !== "object") {
     throw launchError("MISSION_REVIEWED_HOST_COMMAND_RESULT_INVALID", {label});
   }
   const stdout = String(result.stdout ?? "");
   const stderr = String(result.stderr ?? "");
-  if (result.error || result.status !== 0) {
+  if (result.error) {
+    throw launchError("MISSION_REVIEWED_HOST_COMMAND_FAILED", {
+      label,
+      command,
+      args,
+      status: typeof result.status === "number" ? result.status : null,
+      stdout,
+      stderr,
+      cause: result.error,
+    });
+  }
+  if (typeof result.status !== "number") {
+    throw launchError("MISSION_REVIEWED_HOST_COMMAND_RESULT_INVALID", {
+      label,
+      status: result.status ?? null,
+      stdout,
+      stderr,
+    });
+  }
+  if (result.status !== 0) {
     throw launchError("MISSION_REVIEWED_HOST_COMMAND_FAILED", {
       label,
       command,
@@ -53,7 +72,6 @@ function runCommand(commandRunner, command, args, options, label) {
       status: result.status,
       stdout,
       stderr,
-      cause: result.error ?? null,
     });
   }
   return {stdout, stderr};
@@ -82,10 +100,15 @@ export function runReviewedHostAcceptance({
   baseEnv = process.env,
   commandRunner = defaultCommandRunner,
 } = {}) {
-  const root = path.resolve(String(reviewedRoot ?? ""));
-  if (!root || root === path.parse(root).root && !reviewedRoot) {
+  const rootText = String(reviewedRoot ?? "").trim();
+  if (!rootText) {
     throw launchError("MISSION_REVIEWED_HOST_ROOT_REQUIRED");
   }
+  const powershell = String(powershellExecutable ?? "").trim();
+  if (!powershell) {
+    throw launchError("MISSION_REVIEWED_HOST_POWERSHELL_REQUIRED");
+  }
+  const root = path.resolve(rootText);
   const headExpected = validateExpectedHead(expectedHead);
   const toolsDir = path.join(root, "tools");
   const reliabilityScript = path.join(toolsDir, "verify-devexec-mission-constraint-continuation.ps1");
@@ -127,7 +150,7 @@ export function runReviewedHostAcceptance({
   }
 
   const reliability = run(
-    powershellExecutable,
+    powershell,
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", reliabilityScript],
     "ordinary-mission-reliability",
   );
@@ -145,7 +168,7 @@ export function runReviewedHostAcceptance({
   if (String(evidenceRoot ?? "").trim() !== "") {
     hostArgs.push("-EvidenceRoot", path.resolve(String(evidenceRoot)));
   }
-  const host = run(powershellExecutable, hostArgs, "mission-host-acceptance");
+  const host = run(powershell, hostArgs, "mission-host-acceptance");
   requireExactMarker(host.stdout, "MISSION_HOST_ACCEPTANCE=PASS", "mission-host-acceptance");
 
   const postHead = git(["rev-parse", "HEAD"], "git-head-postflight").toLowerCase();
