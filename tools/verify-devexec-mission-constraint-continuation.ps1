@@ -14,6 +14,7 @@ $syntaxFiles = @(
     "tools/devexec-mission-lock.mjs",
     "tools/devexec-mission-lock-resume.mjs",
     "tools/devexec-mission-control.mjs",
+    "tools/devexec-mission-autonomous-start.mjs",
     "tools/devexec-mission-launch.mjs",
     "tools/devexec-mission-launcher.mjs",
     "tools/devexec-mission-run-admission.mjs",
@@ -45,7 +46,9 @@ $testFiles = @(
     "tools/devexec-mission-recovery-claim-entry.test.mjs",
     "tools/devexec-mission-lock-publication.test.mjs",
     "tools/devexec-mission-control.test.mjs",
+    "tools/devexec-mission-autonomous-start.test.mjs",
     "tools/devexec-mission-launch-review.test.mjs",
+    "tools/devexec-mission-autonomous-start-real-e2e.test.mjs",
     "tools/devexec-mission-process-crash.test.mjs",
     "tools/devexec-mission-run-admission.test.mjs",
     "tools/devexec-mission-entry-runtime.test.mjs",
@@ -126,6 +129,7 @@ Write-Host "Copied/mismatched recovery evidence cannot authorize canonical unlin
 Write-Host "Atomic Mission lock publication crash windows=PASS"
 Write-Host "Cross-process exit/restart LAUNCHING replay guard, including actual dispatcher spawn-before-receipt crash=PASS"
 Write-Host "External hard termination after durable LAUNCHING and real child spawn before receipt does not replay the child=PASS"
+Write-Host "Typed autonomous Mission new-RUN API real child spawn/idempotent duplicate no-replay=PASS"
 Write-Host "Host evidence preflight rejects dirty or wrong-HEAD checkout state=PASS"
 Write-Host "Persisted host evidence verifier rejects hash/marker/root/commit drift and writes an immutable verification receipt=PASS"
 Write-Host "Host wrapper static contract preserves pinned-HEAD, pre/postflight, unique evidence, component PASS-marker, BOM-free UTF-8 evidence, and post-write readback requirements=PASS"
