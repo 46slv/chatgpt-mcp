@@ -1,58 +1,19 @@
 import crypto from "node:crypto";
 import {execFileSync} from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 
 import {verifyRawSnapshotGitTree} from "./devexec-mission-raw-tree.mjs";
+import {
+  assertSafeInheritedGitEnvironment,
+  buildIsolatedGitEnvironment,
+} from "./devexec-mission-reviewed-host-git-env.mjs";
 
 function bootstrapError(code, details = {}) {
   const error = new Error(code);
   Object.assign(error, details);
   return error;
-}
-
-const GIT_ROUTING_ENV_KEYS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-];
-
-const GIT_CONFIG_AUTHORITY_ENV_KEYS = [
-  "GIT_CONFIG_GLOBAL",
-  "GIT_CONFIG_SYSTEM",
-  "GIT_CONFIG_PARAMETERS",
-  "GIT_ATTR_SOURCE",
-];
-
-function inheritedGitEnvironmentContamination() {
-  const contaminated = [];
-  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) {
-    // Presence itself is significant. In particular GIT_DIR="" makes Git fail
-    // repository discovery rather than behaving like an unset variable.
-    if (Object.hasOwn(process.env, key)) contaminated.push(key);
-  }
-  if (Object.hasOwn(process.env, "GIT_CONFIG_COUNT") && process.env.GIT_CONFIG_COUNT !== "0") {
-    contaminated.push("GIT_CONFIG_COUNT");
-  }
-  for (const key of Object.keys(process.env)) {
-    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) contaminated.push(key);
-  }
-  return [...new Set(contaminated)].sort();
-}
-
-function assertSafeInheritedGitEnvironment() {
-  const contaminated = inheritedGitEnvironmentContamination();
-  if (contaminated.length > 0) {
-    throw bootstrapError("MISSION_RAW_SNAPSHOT_INHERITED_GIT_ENV_FORBIDDEN", {
-      git_environment_variables: contaminated,
-    });
-  }
 }
 
 function gitObjectSha1(type, bytes) {
@@ -63,26 +24,12 @@ function gitObjectSha1(type, bytes) {
     .digest("hex");
 }
 
-function sanitizedGitEnvironment() {
-  const env = {...process.env};
-  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) delete env[key];
-  for (const key of Object.keys(env)) {
-    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete env[key];
-  }
-  env.GIT_CONFIG_COUNT = "0";
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  env.GIT_CONFIG_GLOBAL = os.devNull;
-  env.GIT_ATTR_NOSYSTEM = "1";
-  env.GIT_NO_REPLACE_OBJECTS = "1";
-  return env;
-}
-
 function runGit(root, args, {input = null} = {}) {
   try {
     return execFileSync("git", ["-C", root, ...args], {
       encoding: "utf8",
       input,
-      env: sanitizedGitEnvironment(),
+      env: buildIsolatedGitEnvironment(process.env),
       stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
     }).trim();
@@ -142,11 +89,11 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
   expectedCommit,
   commitObject,
 } = {}) {
-  // A successful bootstrap is later followed by ordinary Git-based host checks
-  // in the same operator environment. Reject repository-routing/config-injection
-  // variables up front instead of merely sanitizing this function's children and
-  // leaving the subsequent host packet exposed to a different Git authority.
-  assertSafeInheritedGitEnvironment();
+  // A successful bootstrap is followed by ordinary Git-based host checks in the
+  // operator environment. Reject inherited authority before source verification
+  // or mutation. Bootstrap and reviewed-host launch now share one authority
+  // implementation so their routing/config semantics cannot silently drift.
+  assertSafeInheritedGitEnvironment(process.env);
 
   const verified = verifyRawSnapshotGitTree(root, {expectedTree, expectedCommit});
   const commit = validateCommitObject(commitObject, {
@@ -161,9 +108,9 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS", {git_dir: gitDir});
   }
 
-  // Also isolate Git children from host global/system config, replacement refs,
-  // and repository-routing variables. The precheck above ensures the operator
-  // shell is safe for the unchanged host packet that follows this bootstrap.
+  // Git children use the exact same authority isolation contract as the
+  // post-bootstrap reviewed-host launcher: no routing/config injection, no
+  // system/global config, no system attributes, and no replacement objects.
   runGit(verified.root, ["init", "-q"]);
   runGit(verified.root, ["config", "core.autocrlf", "false"]);
   runGit(verified.root, ["config", "core.filemode", "false"]);
@@ -206,7 +153,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 6,
+    schema_version: 7,
     source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
@@ -214,7 +161,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     head,
     branch: "devexec-raw-snapshot",
     git_worktree_clean: true,
-    git_environment: "PRECHECKED_AND_SANITIZED",
+    git_environment: "PRECHECKED_AND_SANITIZED_SHARED_CONTRACT",
     nested_git_metadata: "FORBIDDEN",
     status: "PASS",
   };
@@ -256,7 +203,7 @@ if (isMain) {
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 6,
+      schema_version: 7,
       error: error?.message || String(error),
       expected_commit: error?.expected_commit ?? null,
       observed_commit: error?.observed_commit ?? null,
