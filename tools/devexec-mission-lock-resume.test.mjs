@@ -37,11 +37,7 @@ if (helperMode === "crash_with_lock") {
   function crashWithLock(root) {
     const crashed = spawnSync(process.execPath, [self], {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        DEVEXEC_MISSION_RESUME_HELPER: "crash_with_lock",
-        DEVEXEC_MISSION_RESUME_ROOT: root,
-      },
+      env: {...process.env, DEVEXEC_MISSION_RESUME_HELPER: "crash_with_lock", DEVEXEC_MISSION_RESUME_ROOT: root},
     });
     assert.equal(crashed.status, 77, crashed.stderr || crashed.stdout);
     const inspected = inspectMissionLock(root);
@@ -57,99 +53,80 @@ if (helperMode === "crash_with_lock") {
     return `${canonical}.stale-${token}.recover-${recoveryPid}-${recoveryToken}.json`;
   }
 
-  test("resumes a crash after neutral recovery evidence was published before canonical unlink", () => withRoot(root => {
+  test("resumes neutral recovery evidence using movable-owner v2", () => withRoot(root => {
     const inspected = crashWithLock(root);
     const canonical = missionLockPath(root);
-    const base = baseClaim(canonical, inspected.record.token);
-    fs.linkSync(canonical, base);
-
+    fs.linkSync(canonical, baseClaim(canonical, inspected.record.token));
     const recovered = recoverOrResumeStaleMissionLock(root);
     assert.equal(recovered.recovered, true);
-    assert.equal(recovered.status, "STALE_RECOVERED");
-    assert.equal(recovered.recovery_claim_mode, "movable-owner-v1");
+    assert.equal(recovered.recovery_claim_mode, "movable-owner-v2");
     assert.equal(fs.existsSync(canonical), false);
-    assert.equal(fs.existsSync(recovered.quarantine_file), true);
-
-    const evidence = JSON.parse(fs.readFileSync(recovered.quarantine_file, "utf8"));
-    assert.equal(evidence.token, inspected.record.token);
-    assert.equal(evidence.pid, inspected.record.pid);
   }));
 
-  test("resumes after a real recovery process exits after ownership claim but before canonical unlink", () => withRoot(root => {
+  test("resumes after a recovery process exits after owner claim before canonical unlink", () => withRoot(root => {
     const inspected = crashWithLock(root);
     const canonical = missionLockPath(root);
-    const crashedRecoverer = spawnSync(process.execPath, [self], {
+    const crashed = spawnSync(process.execPath, [self], {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        DEVEXEC_MISSION_RESUME_HELPER: "crash_during_recovery",
-        DEVEXEC_MISSION_RESUME_ROOT: root,
-      },
+      env: {...process.env, DEVEXEC_MISSION_RESUME_HELPER: "crash_during_recovery", DEVEXEC_MISSION_RESUME_ROOT: root},
     });
-    assert.equal(crashedRecoverer.status, 78, crashedRecoverer.stderr || crashedRecoverer.stdout);
+    assert.equal(crashed.status, 78, crashed.stderr || crashed.stdout);
     assert.equal(fs.existsSync(canonical), true);
 
-    const ownerPrefix = `${path.basename(canonical)}.stale-${inspected.record.token}.recover-`;
-    const ownerFiles = fs.readdirSync(path.dirname(canonical)).filter(name => name.startsWith(ownerPrefix));
-    assert.equal(ownerFiles.length, 1);
-    assert.ok(ownerFiles[0].includes(`recover-${crashedRecoverer.pid}-`));
-
-    const recovered = recoverOrResumeStaleMissionLock(root);
-    assert.equal(recovered.recovered, true);
-    assert.equal(recovered.status, "STALE_RECOVERED");
-    assert.equal(fs.existsSync(canonical), false);
-    assert.equal(fs.existsSync(path.join(path.dirname(canonical), ownerFiles[0])), false);
-    assert.equal(fs.existsSync(recovered.quarantine_file), true);
-  }));
-
-  test("atomically takes over a PID-bearing recovery owner left by a crashed recoverer", () => withRoot(root => {
-    const inspected = crashWithLock(root);
-    const canonical = missionLockPath(root);
-    const base = baseClaim(canonical, inspected.record.token);
-    const orphan = ownerClaim(canonical, inspected.record.token, inspected.record.pid, "dead-recoverer");
-    fs.linkSync(canonical, base);
-    fs.renameSync(base, orphan);
-
     const recovered = recoverOrResumeStaleMissionLock(root);
     assert.equal(recovered.recovered, true);
     assert.equal(fs.existsSync(canonical), false);
-    assert.equal(fs.existsSync(orphan), false);
-    assert.equal(fs.existsSync(recovered.quarantine_file), true);
+    const quarantine = JSON.parse(fs.readFileSync(recovered.quarantine_file, "utf8"));
+    assert.equal(quarantine.token, inspected.record.token);
   }));
 
-  test("does not steal a recovery owner whose PID is still alive", () => withRoot(root => {
+  test("does not steal a live recovery owner", () => withRoot(root => {
+    const inspected = crashWithLock(root);
+    const canonical = missionLockPath(root);
+    const owner = ownerClaim(canonical, inspected.record.token, process.pid, "live-recoverer");
+    fs.linkSync(canonical, owner);
+    assert.throws(
+      () => recoverOrResumeStaleMissionLock(root),
+      error => error?.message === "MISSION_CONTROL_LOCK_RECOVERY_ALREADY_CLAIMED",
+    );
+    assert.equal(fs.existsSync(canonical), true);
+    assert.equal(fs.existsSync(owner), true);
+  }));
+
+  test("fails closed without mutation when live owner and neutral evidence coexist", () => withRoot(root => {
     const inspected = crashWithLock(root);
     const canonical = missionLockPath(root);
     const base = baseClaim(canonical, inspected.record.token);
-    const liveOwner = ownerClaim(canonical, inspected.record.token, process.pid, "live-recoverer");
+    const owner = ownerClaim(canonical, inspected.record.token, process.pid, "mixed-live-owner");
+    fs.linkSync(canonical, owner);
     fs.linkSync(canonical, base);
-    fs.renameSync(base, liveOwner);
 
     assert.throws(
       () => recoverOrResumeStaleMissionLock(root),
-      error => {
-        assert.equal(error?.message, "MISSION_CONTROL_LOCK_RECOVERY_ALREADY_CLAIMED");
-        assert.equal(error?.recovery_owner_pid, process.pid);
-        return true;
-      },
+      error => error?.message === "MISSION_CONTROL_LOCK_RECOVERY_MIXED_CLAIMS",
     );
     assert.equal(fs.existsSync(canonical), true);
-    assert.equal(fs.existsSync(liveOwner), true);
+    assert.equal(fs.existsSync(owner), true);
+    assert.equal(fs.existsSync(base), true);
   }));
 
-  test("matching JSON is insufficient when recovery evidence is not the same filesystem object", () => withRoot(root => {
+  test("matching JSON is insufficient when recovery evidence is a copied file", () => withRoot(root => {
     const inspected = crashWithLock(root);
     const canonical = missionLockPath(root);
     const fakeOwner = ownerClaim(canonical, inspected.record.token, inspected.record.pid, "copied-evidence");
     fs.writeFileSync(fakeOwner, fs.readFileSync(canonical));
-
-    assert.throws(
-      () => recoverOrResumeStaleMissionLock(root),
-      /MISSION_CONTROL_LOCK_RECOVERY_IDENTITY_MISMATCH/,
-    );
+    assert.throws(() => recoverOrResumeStaleMissionLock(root), /MISSION_CONTROL_LOCK_RECOVERY_IDENTITY_MISMATCH/);
     assert.equal(fs.existsSync(canonical), true);
-    const current = inspectMissionLock(root);
-    assert.equal(current.status, "STALE");
-    assert.equal(current.record.token, inspected.record.token);
+  }));
+
+  test("multiple PID-bearing recovery claims remain fail-closed", () => withRoot(root => {
+    const inspected = crashWithLock(root);
+    const canonical = missionLockPath(root);
+    const a = ownerClaim(canonical, inspected.record.token, inspected.record.pid, "dead-a");
+    const b = ownerClaim(canonical, inspected.record.token, inspected.record.pid, "dead-b");
+    fs.linkSync(canonical, a);
+    fs.linkSync(canonical, b);
+    assert.throws(() => recoverOrResumeStaleMissionLock(root), /MISSION_CONTROL_LOCK_RECOVERY_MULTIPLE_CLAIMS/);
+    assert.equal(fs.existsSync(canonical), true);
   }));
 }
