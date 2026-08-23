@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {openMissionControl} from "./devexec-mission-control.mjs";
+import {missionLockPath} from "./devexec-mission-lock.mjs";
 import {
   beginMissionChildLaunch,
   readMissionLaunchState,
@@ -217,6 +218,29 @@ test("invalid declarative dispatch preflight is rejected before transition", () 
     launcher_request_id: "REQUEST-BAD-DESCRIPTOR",
     dispatch_preflight: () => ({bad: true}),
   }), /MISSION_LAUNCH_DISPATCH_PREFLIGHT_INVALID/);
+  assertPendingWithoutAttempt(control);
+});
+
+test("dispatch preflight accessors are evaluated before the Mission lock is acquired", () => {
+  const control = controlFor();
+  request(control, "valid-target");
+  const lockFile = missionLockPath(control.paths.root);
+  let lockObservedDuringGetter = null;
+  const descriptor = {
+    get entry_path() {
+      lockObservedDuringGetter = fs.existsSync(lockFile);
+      throw new Error("PREFLIGHT_GETTER_SENTINEL");
+    },
+    node_path: "node",
+  };
+
+  assert.throws(() => beginMissionChildLaunch(control, "LAUNCH-1", {
+    launch_attempt_id: "ATTEMPT-GETTER",
+    launcher_request_id: "REQUEST-GETTER",
+    dispatch_preflight: descriptor,
+  }), /PREFLIGHT_GETTER_SENTINEL/);
+  assert.equal(lockObservedDuringGetter, false);
+  assert.equal(fs.existsSync(lockFile), false);
   assertPendingWithoutAttempt(control);
 });
 
