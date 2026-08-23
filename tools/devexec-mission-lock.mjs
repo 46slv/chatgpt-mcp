@@ -191,7 +191,6 @@ export function acquireMissionLock(missionRoot, {
     pid: process.pid,
     release() {
       if (released) return false;
-      released = true;
 
       let current;
       try {
@@ -204,7 +203,12 @@ export function acquireMissionLock(missionRoot, {
       if (current?.token !== token || current?.pid !== process.pid) {
         throw new Error("MISSION_CONTROL_LOCK_OWNERSHIP_LOST");
       }
+
+      // Mark the handle released only after the canonical unlink succeeds. A
+      // transient filesystem failure must not permanently disable a safe retry
+      // by the still-owning caller while the canonical lock remains intact.
       fs.rmSync(file);
+      released = true;
       return true;
     },
   };
