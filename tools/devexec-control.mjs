@@ -419,6 +419,129 @@ export function openControlGui({
   };
 }
 
+export async function diagnoseControlServer({
+  env = process.env,
+  fetch_impl = globalThis.fetch,
+  timeout_ms = 2000,
+} = {}) {
+  const state = inspectControlLifecycle({env});
+
+  if (!state.receipt) {
+    return {
+      protocol: PROTOCOL,
+      schema_version: SCHEMA_VERSION,
+      action: "doctor",
+      status: "STOPPED",
+      running: false,
+      stale: false,
+      receipt: null,
+      recommendation: "start",
+    };
+  }
+
+  if (state.stale) {
+    return {
+      protocol: PROTOCOL,
+      schema_version: SCHEMA_VERSION,
+      action: "doctor",
+      status: "STALE",
+      running: false,
+      stale: true,
+      receipt: state.receipt,
+      safe_cleanup_available: true,
+      recommendation: "stop",
+    };
+  }
+
+  if (!state.running) {
+    return {
+      protocol: PROTOCOL,
+      schema_version: SCHEMA_VERSION,
+      action: "doctor",
+      status: "STOPPED",
+      running: false,
+      stale: false,
+      receipt: state.receipt,
+      recommendation: "start",
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeout_ms,
+  );
+
+  try {
+    const response = await fetch_impl(
+      state.receipt.url + "/health",
+      {signal: controller.signal},
+    );
+
+    if (!response?.ok) {
+      return {
+        protocol: PROTOCOL,
+        schema_version: SCHEMA_VERSION,
+        action: "doctor",
+        status: "DEGRADED",
+        running: true,
+        stale: false,
+        receipt: state.receipt,
+        health_http_status: response?.status ?? null,
+        recommendation: "restart",
+      };
+    }
+
+    const health = await response.json();
+
+    if (
+      health?.status !== "ok" ||
+      health?.bind_policy !== "loopback-only"
+    ) {
+      return {
+        protocol: PROTOCOL,
+        schema_version: SCHEMA_VERSION,
+        action: "doctor",
+        status: "DEGRADED",
+        running: true,
+        stale: false,
+        receipt: state.receipt,
+        health,
+        recommendation: "restart",
+      };
+    }
+
+    return {
+      protocol: PROTOCOL,
+      schema_version: SCHEMA_VERSION,
+      action: "doctor",
+      status: "HEALTHY",
+      running: true,
+      stale: false,
+      receipt: state.receipt,
+      health,
+      recommendation: null,
+    };
+  } catch (error) {
+    return {
+      protocol: PROTOCOL,
+      schema_version: SCHEMA_VERSION,
+      action: "doctor",
+      status: "DEGRADED",
+      running: true,
+      stale: false,
+      receipt: state.receipt,
+      health_error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+      recommendation: "restart",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function emit(value) {
   process.stdout.write(
     JSON.stringify(value) + "\n"
@@ -489,6 +612,13 @@ export async function main(
     return;
   }
 
+  if (command === "doctor") {
+    emit(
+      await diagnoseControlServer()
+    );
+    return;
+  }
+
   if (command === "open") {
     emit(
       openControlGui()
@@ -497,7 +627,7 @@ export async function main(
   }
 
   throw new Error(
-    "usage: devexec control start [--port <port>] [--open] | status | stop | open"
+    "usage: devexec control start [--port <port>] [--open] | status | doctor | stop | open"
   );
 }
 
