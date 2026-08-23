@@ -8,6 +8,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const wrapper = path.join(HERE, "verify-devexec-mission-host-acceptance.ps1");
 const hostLockProbe = path.join(HERE, "devexec-mission-host-lock-acceptance.mjs");
 const fileIdentityProbe = path.join(HERE, "devexec-mission-file-identity-host-probe.mjs");
+const evidenceVerifier = path.join(HERE, "devexec-mission-host-evidence-verify.mjs");
 
 function read(file) {
   return fs.readFileSync(file, "utf8");
@@ -68,4 +69,25 @@ test("filesystem-sensitive probes are pinned to Mission base rather than Evidenc
   const identitySource = read(fileIdentityProbe);
   assert.match(identitySource, /DEVEXEC_FILE_IDENTITY_PROBE_ROOT/);
   assert.match(identitySource, /path\.join\(parent, "\.devexec-file-identity-probe-"\)/);
+});
+
+test("overall host PASS is gated by persisted evidence readback and immutable receipt", () => {
+  const source = read(wrapper);
+  assert.match(source, /devexec-mission-host-evidence-verify\.mjs/);
+  assert.match(source, /--summary \$summaryPath/);
+  assert.match(source, /--expected-head \$ExpectedHead/);
+  assert.match(source, /--expected-mission-probe-root \$missionBase/);
+  assert.match(source, /--receipt \$verificationPath/);
+  assert.match(source, /MISSION_HOST_EVIDENCE_VERIFY=PASS/);
+  assert.match(source, /VERIFICATION_SHA256=/);
+
+  const verifierOffset = source.indexOf("devexec-mission-host-evidence-verify.mjs");
+  const overallPassOffset = source.lastIndexOf('MISSION_HOST_ACCEPTANCE=PASS');
+  assert.ok(verifierOffset >= 0 && overallPassOffset > verifierOffset);
+
+  const verifierSource = read(evidenceVerifier);
+  assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_HASH_MISMATCH/);
+  assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_MARKER_MISSING/);
+  assert.match(verifierSource, /MISSION_HOST_EVIDENCE_ARTIFACT_OUTSIDE_ROOT/);
+  assert.match(verifierSource, /MISSION_HOST_EVIDENCE_RECEIPT_EXISTS/);
 });
