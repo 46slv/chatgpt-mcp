@@ -99,6 +99,7 @@ function pathInside(parent, child) {
 export function verifyMissionHostEvidence(summaryPath, {
   expectedHead = "",
   expectedMissionProbeRoot = "",
+  expectedRepoRoot = "",
   writeReceipt = "",
 } = {}) {
   const summaryFile = canonicalPath(summaryPath);
@@ -152,6 +153,20 @@ export function verifyMissionHostEvidence(summaryPath, {
       expected_head: expected,
       recorded_head: recordedHead,
     });
+  }
+
+  let recordedRepoRoot = null;
+  if (expectedRepoRoot) {
+    recordedRepoRoot = canonicalPath(
+      ensureString(summary.repo, "MISSION_HOST_EVIDENCE_REPO_ROOT_REQUIRED"),
+    );
+    const expectedRepositoryRoot = canonicalPath(expectedRepoRoot);
+    if (!samePath(recordedRepoRoot, expectedRepositoryRoot)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_REPO_ROOT_MISMATCH", {
+        expected_repo_root: expectedRepositoryRoot,
+        recorded_repo_root: recordedRepoRoot,
+      });
+    }
   }
 
   const missionProbeRoot = canonicalPath(
@@ -269,6 +284,7 @@ export function verifyMissionHostEvidence(summaryPath, {
     summary_sha256: summarySnapshot.sha256,
     expected_head: expected,
     recorded_head: recordedHead,
+    repo_root: recordedRepoRoot,
     mission_probe_root: missionProbeRoot,
     evidence_root: summaryDir,
     validated_artifacts: validatedArtifacts,
@@ -343,6 +359,7 @@ function parseCli(argv) {
   let summary = "";
   let expectedHead = "";
   let expectedMissionProbeRoot = "";
+  let expectedRepoRoot = "";
   let receipt = "";
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -350,10 +367,12 @@ function parseCli(argv) {
     else if (arg === "--expected-head") expectedHead = argv[++index] ?? "";
     else if (arg === "--expected-mission-probe-root") {
       expectedMissionProbeRoot = argv[++index] ?? "";
+    } else if (arg === "--expected-repo-root") {
+      expectedRepoRoot = argv[++index] ?? "";
     } else if (arg === "--receipt") receipt = argv[++index] ?? "";
     else throw verificationError("MISSION_HOST_EVIDENCE_UNKNOWN_ARGUMENT", {argument: arg});
   }
-  return {summary, expectedHead, expectedMissionProbeRoot, receipt};
+  return {summary, expectedHead, expectedMissionProbeRoot, expectedRepoRoot, receipt};
 }
 
 const isMain = process.argv[1]
@@ -366,6 +385,7 @@ if (isMain) {
     const report = verifyMissionHostEvidence(args.summary, {
       expectedHead: args.expectedHead,
       expectedMissionProbeRoot: args.expectedMissionProbeRoot,
+      expectedRepoRoot: args.expectedRepoRoot,
       writeReceipt: args.receipt,
     });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
