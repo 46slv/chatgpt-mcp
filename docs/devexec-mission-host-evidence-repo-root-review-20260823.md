@@ -17,14 +17,15 @@ For an authoritative host packet, commit identity and checkout identity are sepa
 3. rejects mismatch with `MISSION_HOST_EVIDENCE_REPO_ROOT_MISMATCH`;
 4. records the verified `repo_root` in `VERIFICATION.json`.
 
-`tools/verify-devexec-mission-host-acceptance.ps1` now passes `--expected-repo-root $repoRoot`, so the authoritative SHIRO-WS packet always enables this check. The ordinary JavaScript API keeps the option explicit so focused non-host fixtures that are not claiming repository attribution do not silently acquire a fake checkout requirement.
+`tools/verify-devexec-mission-host-acceptance.ps1` now passes `--expected-repo-root $repoRoot`, so the authoritative SHIRO-WS packet always enables this check. The ordinary JavaScript API keeps the option explicit for read-only/non-authoritative validation, but **any persisted verification receipt now requires both an external repository-root pin and an external Mission-probe-root pin**. A receipt cannot be created by trusting only the roots declared by the SUMMARY it is certifying.
 
-Regression coverage was added to `devexec-mission-host-evidence-verify.test.mjs`, including a wrong-repository rejection and receipt binding, and the wrapper contract now requires the repo-root pin.
+Regression coverage was added to `devexec-mission-host-evidence-verify.test.mjs`, including wrong-repository rejection, receipt binding, mandatory external-root pins for receipt creation, concurrent receipt publication, and Windows-canonical path expectations. The wrapper contract now also requires the repo-root pin.
 
 ## Validation performed
 
 - GitHub source/commit readback for verifier, wrapper, and tests.
 - Source-faithful Node probe against real temporary filesystem roots: matching repo root PASS; mismatched repo root rejected with `MISSION_HOST_EVIDENCE_REPO_ROOT_MISMATCH`; missing recorded repo rejected when the pin is requested. Marker: `MISSION_HOST_EVIDENCE_REPO_ROOT_PROBE=PASS`.
+- Self-review caught and repaired a Windows-only test portability problem: production canonical paths are lower-cased on Windows, so test assertions now use the same canonical path rule rather than comparing against raw `fs.realpathSync()` casing.
 
 The final committed full evidence-verifier test bundle, PowerShell wrapper, GitHub CI, and SHIRO-WS host packet are still not claimed as executed in this cloud runtime.
 
