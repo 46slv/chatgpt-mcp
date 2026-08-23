@@ -111,3 +111,23 @@ Authority chain:
 
 Mission primitives -> typed autonomous start -> Control Service -> loopback
 Control Server -> GUI.
+
+## Production lifecycle
+
+`devexec control` manages only the dedicated loopback Control Server process.
+
+Commands:
+
+- `devexec control start`
+- `devexec control start --open`
+- `devexec control status`
+- `devexec control stop`
+- `devexec control open`
+
+The lifecycle layer may start/terminate the Control Server and open its GUI URL.
+It contains no Mission launch primitive.
+
+Authority remains:
+
+Mission primitives -> typed autonomous start -> Control Service -> loopback
+Control Server -> GUI/lifecycle.
