@@ -91,94 +91,28 @@ export function inspectMissionLock(missionRoot) {
   }
 }
 
+// Deprecated compatibility surface. Stale-lock mutation is intentionally owned
+// by recoverOrResumeStaleMissionLock() in devexec-mission-lock-resume.mjs so all
+// recoverers share one arbitration namespace and one owner/neutral ordering.
+// Leaving a second mutator here would allow older callers to bypass a live
+// PID-bearing recovery owner. This export therefore remains non-mutating and
+// fails closed for any locked state.
 export function recoverStaleMissionLock(missionRoot) {
   const inspection = inspectMissionLock(missionRoot);
   if (inspection.status === "UNLOCKED") {
-    return {recovered: false, ...inspection, quarantine_file: null};
-  }
-  if (inspection.status === "HELD") {
-    const error = new Error("MISSION_CONTROL_LOCK_OWNER_ALIVE");
-    error.lock_file = inspection.file;
-    error.owner_pid = inspection.record?.pid ?? null;
-    throw error;
-  }
-  if (inspection.status !== "STALE" || inspection.recoverable !== true) {
-    const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_UNSAFE");
-    error.lock_file = inspection.file;
-    error.lock_status = inspection.status;
-    throw error;
-  }
-
-  // Recovery itself needs an atomic ownership claim. A plain
-  // read/compare/rename sequence allows two recoverers to validate the same
-  // stale record; after the first frees the canonical path, the second rename
-  // could target a replacement lock. Create a deterministic hard-link evidence
-  // path first. Only one recoverer can create it, and after canonical unlink
-  // this recoverer never touches the canonical path again.
-  const quarantineFile = `${inspection.file}.stale-${inspection.record.token}.json`;
-  try {
-    fs.linkSync(inspection.file, quarantineFile);
-  } catch (error) {
-    if (error?.code === "EEXIST" || fs.existsSync(quarantineFile)) {
-      const claimed = new Error("MISSION_CONTROL_LOCK_RECOVERY_ALREADY_CLAIMED");
-      claimed.lock_file = inspection.file;
-      claimed.quarantine_file = quarantineFile;
-      throw claimed;
-    }
-    if (error?.code === "ENOENT") {
-      const current = inspectMissionLock(missionRoot);
-      if (current.status === "UNLOCKED") {
-        return {recovered: false, ...current, quarantine_file: null};
-      }
-      const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
-      changed.lock_file = inspection.file;
-      changed.lock_status = current.status;
-      throw changed;
-    }
-    const claimError = new Error("MISSION_CONTROL_LOCK_RECOVERY_ATOMIC_CLAIM_FAILED");
-    claimError.cause = error;
-    claimError.lock_file = inspection.file;
-    claimError.quarantine_file = quarantineFile;
-    claimError.fs_code = error?.code ?? null;
-    throw claimError;
-  }
-
-  let keepQuarantine = false;
-  try {
-    const claimed = readMissionLockRecord(quarantineFile);
-    const current = readMissionLockRecord(inspection.file);
-    if (
-      !current ||
-      claimed?.token !== inspection.record.token ||
-      claimed?.pid !== inspection.record.pid ||
-      current.token !== inspection.record.token ||
-      current.pid !== inspection.record.pid
-    ) {
-      const changed = new Error("MISSION_CONTROL_LOCK_CHANGED_DURING_RECOVERY");
-      changed.lock_file = inspection.file;
-      throw changed;
-    }
-
-    // The quarantine hard link pins exactly the stale inode we validated. Once
-    // the canonical name is unlinked, a new owner may safely publish there; this
-    // recovery path must never rename/remove the canonical path again.
-    fs.rmSync(inspection.file);
-    keepQuarantine = true;
     return {
-      recovered: true,
-      status: "STALE_RECOVERED",
-      recoverable: false,
-      file: inspection.file,
-      record: inspection.record,
-      quarantine_file: quarantineFile,
+      recovered: false,
+      ...inspection,
+      quarantine_file: null,
+      recovery_claim_mode: "legacy-mutator-retired",
     };
-  } finally {
-    // If verification or canonical unlink failed, remove only the claim created
-    // by this call. Never weaken or replace the canonical lock on an error path.
-    if (!keepQuarantine) {
-      try { fs.rmSync(quarantineFile, {force: true}); } catch {}
-    }
   }
+
+  const error = new Error("MISSION_CONTROL_LOCK_RECOVERY_LEGACY_MUTATOR_RETIRED");
+  error.lock_file = inspection.file;
+  error.lock_status = inspection.status;
+  error.recovery_api = "recoverOrResumeStaleMissionLock";
+  throw error;
 }
 
 function stagingLockPath(file, pid, token) {
