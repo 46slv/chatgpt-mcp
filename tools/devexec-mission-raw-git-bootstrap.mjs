@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import {execFileSync} from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 
@@ -20,11 +21,36 @@ function gitObjectSha1(type, bytes) {
     .digest("hex");
 }
 
+function sanitizedGitEnvironment() {
+  const env = {...process.env};
+  for (const key of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+  ]) {
+    delete env[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete env[key];
+  }
+  env.GIT_CONFIG_COUNT = "0";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = os.devNull;
+  env.GIT_ATTR_NOSYSTEM = "1";
+  env.GIT_NO_REPLACE_OBJECTS = "1";
+  return env;
+}
+
 function runGit(root, args, {input = null} = {}) {
   try {
     return execFileSync("git", ["-C", root, ...args], {
       encoding: "utf8",
       input,
+      env: sanitizedGitEnvironment(),
       stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
     }).trim();
@@ -97,6 +123,9 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     throw bootstrapError("MISSION_RAW_SNAPSHOT_GIT_METADATA_ALREADY_EXISTS", {git_dir: gitDir});
   }
 
+  // Do not let an inherited Git routing/config environment redirect bootstrap
+  // mutations to some other repository or inject host-specific object/config
+  // semantics. Every Git command below runs in an explicitly sanitized env.
   runGit(verified.root, ["init", "-q"]);
   runGit(verified.root, ["config", "core.autocrlf", "false"]);
   runGit(verified.root, ["config", "core.filemode", "false"]);
@@ -139,7 +168,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 3,
+    schema_version: 4,
     source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
@@ -147,6 +176,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
     head,
     branch: "devexec-raw-snapshot",
     git_worktree_clean: true,
+    git_environment: "SANITIZED",
     nested_git_metadata: "FORBIDDEN",
     status: "PASS",
   };
@@ -188,7 +218,7 @@ if (isMain) {
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 3,
+      schema_version: 4,
       error: error?.message || String(error),
       expected_commit: error?.expected_commit ?? null,
       observed_commit: error?.observed_commit ?? null,
