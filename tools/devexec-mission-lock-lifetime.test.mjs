@@ -89,3 +89,36 @@ test("transient canonical unlink failure leaves release retryable", () => withRo
     fs.rmSync = originalRmSync;
   }
 }));
+
+test("callback failure plus release failure is surfaced as a combined lock error", () => withRoot(root => {
+  const canonical = path.resolve(missionLockPath(root));
+  const originalRmSync = fs.rmSync;
+  let injected = false;
+
+  fs.rmSync = (target, ...args) => {
+    if (!injected && path.resolve(String(target)) === canonical) {
+      injected = true;
+      const error = new Error("simulated release failure");
+      error.code = "EBUSY";
+      throw error;
+    }
+    return originalRmSync(target, ...args);
+  };
+
+  try {
+    assert.throws(
+      () => withMissionLock(root, () => { throw new Error("mutation failed"); }),
+      error => {
+        assert.equal(error?.code, "MISSION_LOCK_CALLBACK_AND_RELEASE_FAILED");
+        assert.equal(error?.callback_error, "mutation failed");
+        assert.equal(error?.release_error, "simulated release failure");
+        assert.equal(path.resolve(error?.lock_file), canonical);
+        return true;
+      },
+    );
+    assert.equal(fs.existsSync(canonical), true, "combined failure must not pretend the lock was released");
+  } finally {
+    fs.rmSync = originalRmSync;
+    originalRmSync(canonical, {force: true});
+  }
+}));
