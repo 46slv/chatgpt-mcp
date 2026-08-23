@@ -3,7 +3,6 @@ import {spawn} from "node:child_process";
 import {
   beginMissionChildLaunch,
   completeMissionChildLaunch,
-  createMissionChildDispatchPreflight,
   markMissionChildLaunchAmbiguous,
 } from "./devexec-mission-launch.mjs";
 
@@ -47,17 +46,16 @@ export async function dispatchMissionChildLaunch(control, launch, {
   const attemptId = required(launch_attempt_id, "launch_attempt_id");
   const launcherRequestId = required(launcher_request_id, "launcher_request_id");
 
-  // Deterministic spec validation and PENDING -> LAUNCHING must use the same
-  // durable snapshot under the same Mission lock. The preflight capability is
-  // created by the mission-launch module itself, so arbitrary caller callbacks
-  // cannot execute unrelated side effects inside the atomic section.
+  // Deterministic spec validation and PENDING -> LAUNCHING use the same
+  // durable snapshot under the same Mission lock. Only declarative entry/node
+  // inputs cross this boundary; no caller code executes inside the lock.
   const begun = beginMissionChildLaunch(control, launchId, {
     launch_attempt_id: attemptId,
     launcher_request_id: launcherRequestId,
     lease_token,
     lease_ms,
     now,
-    preflight: createMissionChildDispatchPreflight(control, {entry_path, node_path}),
+    dispatch_preflight: {entry_path, node_path},
   });
   if (begun.deduplicated) {
     // A durable LAUNCHING record with the same attempt means a previous dispatcher
