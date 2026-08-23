@@ -28,8 +28,10 @@ function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-host-evidence-verify-"));
   const evidenceRoot = path.join(root, "evidence");
   const missionRoot = path.join(root, "mission-base");
+  const repoRoot = path.join(root, "repo");
   fs.mkdirSync(evidenceRoot);
   fs.mkdirSync(missionRoot);
+  fs.mkdirSync(repoRoot);
 
   const artifacts = REQUIRED.map(([name, marker]) => {
     const file = path.join(evidenceRoot, name);
@@ -42,7 +44,7 @@ function fixture() {
     schema_version: 2,
     generated_at: new Date().toISOString(),
     machine: "TEST-HOST",
-    repo: path.join(root, "repo"),
+    repo: repoRoot,
     branch: "test-branch",
     head: HEAD,
     expected_head: HEAD,
@@ -67,6 +69,7 @@ function fixture() {
     root,
     evidenceRoot,
     missionRoot,
+    repoRoot,
     summary,
     summaryFile,
     cleanup() { fs.rmSync(root, {recursive: true, force: true}); },
@@ -86,6 +89,7 @@ function runVerifierChild(fx, receipt) {
       VERIFIER,
       "--summary", fx.summaryFile,
       "--expected-head", HEAD,
+      "--expected-repo-root", fx.repoRoot,
       "--expected-mission-probe-root", fx.missionRoot,
       "--receipt", receipt,
     ], {stdio: ["ignore", "pipe", "pipe"]});
@@ -106,17 +110,20 @@ test("valid host evidence verifies and writes immutable receipt bound to SUMMARY
     const receipt = path.join(fx.evidenceRoot, "VERIFICATION.json");
     const report = verifyMissionHostEvidence(fx.summaryFile, {
       expectedHead: HEAD,
+      expectedRepoRoot: fx.repoRoot,
       expectedMissionProbeRoot: fx.missionRoot,
       writeReceipt: receipt,
     });
     assert.equal(report.status, "PASS");
     assert.equal(report.summary_sha256, sha256(fx.summaryFile));
+    assert.equal(report.repo_root, fs.realpathSync(fx.repoRoot));
     assert.equal(report.validated_artifacts.length, REQUIRED.length);
     assert.equal(fs.existsSync(receipt), true);
 
     const persisted = JSON.parse(fs.readFileSync(receipt, "utf8"));
     assert.equal(persisted.status, "PASS");
     assert.equal(persisted.summary_sha256, sha256(fx.summaryFile));
+    assert.equal(persisted.repo_root, fs.realpathSync(fx.repoRoot));
     assert.equal(persisted.validated_artifacts.length, REQUIRED.length);
     assert.equal(report.receipt_sha256, sha256(receipt));
   } finally {
@@ -188,6 +195,29 @@ test("recorded and caller-pinned commit identity must agree", () => {
       }),
       "MISSION_HOST_EVIDENCE_VERIFIER_HEAD_MISMATCH",
     );
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("caller can pin the reviewed repository root recorded in SUMMARY", () => {
+  const fx = fixture();
+  try {
+    const otherRepo = path.join(fx.root, "other-repo");
+    fs.mkdirSync(otherRepo);
+    expectCode(
+      () => verifyMissionHostEvidence(fx.summaryFile, {
+        expectedHead: HEAD,
+        expectedRepoRoot: otherRepo,
+      }),
+      "MISSION_HOST_EVIDENCE_REPO_ROOT_MISMATCH",
+    );
+
+    const report = verifyMissionHostEvidence(fx.summaryFile, {
+      expectedHead: HEAD,
+      expectedRepoRoot: fx.repoRoot,
+    });
+    assert.equal(report.repo_root, fs.realpathSync(fx.repoRoot));
   } finally {
     fx.cleanup();
   }
@@ -266,6 +296,7 @@ test("competing verifier processes cannot replace the winning receipt", async ()
     const persisted = JSON.parse(fs.readFileSync(receipt, "utf8"));
     assert.equal(persisted.status, "PASS");
     assert.equal(persisted.summary_sha256, sha256(fx.summaryFile));
+    assert.equal(persisted.repo_root, fs.realpathSync(fx.repoRoot));
   } finally {
     fx.cleanup();
   }
