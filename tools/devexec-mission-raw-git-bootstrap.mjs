@@ -23,17 +23,25 @@ const GIT_ROUTING_ENV_KEYS = [
   "GIT_NAMESPACE",
 ];
 
+const GIT_CONFIG_AUTHORITY_ENV_KEYS = [
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_ATTR_SOURCE",
+];
+
 function inheritedGitEnvironmentContamination() {
   const contaminated = [];
-  for (const key of GIT_ROUTING_ENV_KEYS) {
-    if (typeof process.env[key] === "string" && process.env[key] !== "") contaminated.push(key);
+  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) {
+    // Presence itself is significant. In particular GIT_DIR="" makes Git fail
+    // repository discovery rather than behaving like an unset variable.
+    if (Object.hasOwn(process.env, key)) contaminated.push(key);
   }
-  const configCount = process.env.GIT_CONFIG_COUNT;
-  if (typeof configCount === "string" && configCount !== "" && configCount !== "0") {
+  if (Object.hasOwn(process.env, "GIT_CONFIG_COUNT") && process.env.GIT_CONFIG_COUNT !== "0") {
     contaminated.push("GIT_CONFIG_COUNT");
   }
   for (const key of Object.keys(process.env)) {
-    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key) && process.env[key] !== "") contaminated.push(key);
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) contaminated.push(key);
   }
   return [...new Set(contaminated)].sort();
 }
@@ -57,7 +65,7 @@ function gitObjectSha1(type, bytes) {
 
 function sanitizedGitEnvironment() {
   const env = {...process.env};
-  for (const key of GIT_ROUTING_ENV_KEYS) delete env[key];
+  for (const key of [...GIT_ROUTING_ENV_KEYS, ...GIT_CONFIG_AUTHORITY_ENV_KEYS]) delete env[key];
   for (const key of Object.keys(env)) {
     if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) delete env[key];
   }
@@ -198,7 +206,7 @@ export function prepareRawSnapshotExactGitWorkspace(root, {
 
   return {
     protocol: "devexec.mission-raw-snapshot-git-bootstrap",
-    schema_version: 5,
+    schema_version: 6,
     source_mode: "raw_snapshot_exact_commit",
     expected_commit: verified.expected_commit,
     expected_tree: verified.expected_tree,
@@ -248,7 +256,7 @@ if (isMain) {
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       protocol: "devexec.mission-raw-snapshot-git-bootstrap-error",
-      schema_version: 5,
+      schema_version: 6,
       error: error?.message || String(error),
       expected_commit: error?.expected_commit ?? null,
       observed_commit: error?.observed_commit ?? null,
