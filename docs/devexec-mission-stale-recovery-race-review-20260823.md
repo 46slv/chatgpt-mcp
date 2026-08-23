@@ -26,10 +26,11 @@ If atomic hard-link claim publication is unavailable, recovery fails closed with
 `tools/devexec-mission-lock-recovery.test.mjs` now adds:
 
 - a real competing recovery process injected immediately before the first recoverer's canonical removal; the competitor must stop at `MISSION_CONTROL_LOCK_RECOVERY_ALREADY_CLAIMED` and must not publish a replacement;
+- a stale-snapshot race where a new live lock is published immediately before recovery claim creation; validation must reject the stale recovery and preserve the replacement lock;
 - an interrupted-recovery state where the deterministic claim exists but the stale canonical name was not yet removed; a later automatic recovery must remain fail-closed rather than risk removing a replacement;
 - hard-link-unavailable recovery; the stale canonical remains authoritative and no quarantine claim is fabricated.
 
-The existing Mission reliability verifier already runs this recovery test, so the new cases become part of the real-checkout packet without expanding the verifier surface.
+The existing Mission reliability verifier already runs this recovery test, so the new cases become part of the real-checkout packet without expanding the verifier surface. Its output now explicitly identifies the atomic stale-recovery claim/concurrent-recoverer coverage and the intentionally fail-closed interrupted-claim boundary.
 
 ## Validation actually performed
 
@@ -38,7 +39,9 @@ Before committing the production repair, a source-faithful reconstruction of the
 - repaired semantics: **2/2 PASS** for concurrent recovery exclusion and interrupted-claim fail-closed behavior;
 - prior rename-based semantics under the same regression: **0/2 PASS**, demonstrating that the test catches the reviewed race.
 
-After the GitHub writes, production source and regression files were read back from the dedicated branch. Full repository checkout tests, GitHub CI, Windows/SHIRO-WS hard-link semantics, forced OS-kill timing, Local Agent/Local Executor integration, and power-loss durability are not claimed in this cloud review.
+After the GitHub writes, an expanded source-faithful probe of the repaired semantics ran **5/5 PASS**: baseline dead-owner recovery, concurrent-recoverer exclusion, interrupted-claim fail-closed behavior, hard-link-unavailable fail-closed behavior, and replacement-before-claim preservation. Production source and regression files were then read back from the dedicated branch.
+
+Full repository checkout tests, GitHub CI, Windows/SHIRO-WS hard-link semantics, forced OS-kill timing, Local Agent/Local Executor integration, and power-loss durability are not claimed in this cloud review.
 
 ## Residual boundary
 
@@ -52,4 +55,4 @@ Run the real-checkout reliability packet:
 
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-devexec-mission-constraint-continuation.ps1`
 
-Then on SHIRO-WS add concurrent stale recovery to the existing Mission crash matrix: two recovery attempts against one dead owner, interrupted recovery after claim/before unlink, atomic new-lock publication, dead/live-owner handling, dispatcher spawn-before-receipt, target/constraint isolation, and STARTING/AMBIGUOUS replay refusal. Keep live `GOAL_PATCH / supersede_current_goal` pending until Mission reliability acceptance closes, then continue to the typed local Control API/service before GUI.
+Then on SHIRO-WS add concurrent stale recovery to the existing Mission crash matrix: two recovery attempts against one dead owner, replacement-before-claim, interrupted recovery after claim/before unlink, atomic new-lock publication, dead/live-owner handling, dispatcher spawn-before-receipt, target/constraint isolation, and STARTING/AMBIGUOUS replay refusal. Keep live `GOAL_PATCH / supersede_current_goal` pending until Mission reliability acceptance closes, then continue to the typed local Control API/service before GUI.
