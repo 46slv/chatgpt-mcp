@@ -15,6 +15,11 @@ export const GIT_CONFIG_AUTHORITY_ENV_KEYS = Object.freeze([
   "GIT_CONFIG_SYSTEM",
   "GIT_CONFIG_PARAMETERS",
   "GIT_ATTR_SOURCE",
+  "GIT_ATTR_GLOBAL",
+  "GIT_ATTR_SYSTEM",
+  "GIT_TEMPLATE_DIR",
+  "GIT_DEFAULT_HASH",
+  "GIT_DEFAULT_REF_FORMAT",
 ]);
 
 function authorityError(code, details = {}) {
