@@ -1,0 +1,338 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import {fileURLToPath} from "node:url";
+
+const REQUIRED_CHECKS = Object.freeze([
+  "source_checkout_preflight_clean",
+  "mission_reliability_bundle",
+  "mission_filesystem_hardlink_identity",
+  "mission_filesystem_real_process_live_owner_refusal_and_kill_recovery",
+  "mission_filesystem_returned_thenable_cross_process_exclusion",
+  "source_checkout_postflight_clean",
+  "component_pass_markers",
+]);
+
+const REQUIRED_ARTIFACTS = Object.freeze(new Map([
+  ["00-repo-preflight.txt", "MISSION_HOST_PREFLIGHT=PASS"],
+  ["01-mission-reliability.txt", "MISSION_RELIABILITY_CHECK=PASS"],
+  ["02-file-identity.txt", "MISSION_FILE_IDENTITY_HOST_PROBE=PASS"],
+  ["03-host-lock-process.txt", "MISSION_HOST_LOCK_ACCEPTANCE=PASS"],
+  ["04-repo-postflight.txt", "MISSION_HOST_PREFLIGHT=PASS"],
+]));
+
+function verificationError(code, details = {}) {
+  const error = new Error(code);
+  Object.assign(error, details);
+  return error;
+}
+
+function canonicalPath(value) {
+  const resolved = path.resolve(value);
+  let real;
+  try {
+    real = typeof fs.realpathSync.native === "function"
+      ? fs.realpathSync.native(resolved)
+      : fs.realpathSync(resolved);
+  } catch (cause) {
+    throw verificationError("MISSION_HOST_EVIDENCE_PATH_UNAVAILABLE", {cause, path: resolved});
+  }
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+function sha256File(file) {
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(1024 * 128);
+    while (true) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+function hasExactMarker(text, marker) {
+  return String(text ?? "").split(/\r?\n/).some(line => line.trim() === marker);
+}
+
+function ensureString(value, code, details = {}) {
+  if (typeof value !== "string" || !value.trim()) throw verificationError(code, details);
+  return value.trim();
+}
+
+function samePath(left, right) {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function pathInside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative);
+}
+
+export function verifyMissionHostEvidence(summaryPath, {
+  expectedHead = "",
+  expectedMissionProbeRoot = "",
+  writeReceipt = "",
+} = {}) {
+  const summaryFile = canonicalPath(summaryPath);
+  const summaryDir = canonicalPath(path.dirname(summaryFile));
+  let summary;
+  try {
+    summary = JSON.parse(fs.readFileSync(summaryFile, "utf8"));
+  } catch (cause) {
+    throw verificationError("MISSION_HOST_EVIDENCE_SUMMARY_INVALID", {cause, summary_file: summaryFile});
+  }
+
+  if (summary?.protocol !== "devexec.mission-host-acceptance" || summary.schema_version !== 2) {
+    throw verificationError("MISSION_HOST_EVIDENCE_SUMMARY_PROTOCOL_MISMATCH", {
+      protocol: summary?.protocol ?? null,
+      schema_version: summary?.schema_version ?? null,
+    });
+  }
+
+  const recordedEvidenceRoot = canonicalPath(
+    ensureString(summary.evidence_root, "MISSION_HOST_EVIDENCE_ROOT_REQUIRED"),
+  );
+  if (!samePath(recordedEvidenceRoot, summaryDir)) {
+    throw verificationError("MISSION_HOST_EVIDENCE_ROOT_MISMATCH", {
+      recorded_evidence_root: recordedEvidenceRoot,
+      summary_directory: summaryDir,
+    });
+  }
+
+  const recordedHead = ensureString(summary.head, "MISSION_HOST_EVIDENCE_HEAD_REQUIRED");
+  const recordedExpectedHead = ensureString(
+    summary.expected_head,
+    "MISSION_HOST_EVIDENCE_EXPECTED_HEAD_REQUIRED",
+  );
+  if (recordedHead !== recordedExpectedHead) {
+    throw verificationError("MISSION_HOST_EVIDENCE_RECORDED_HEAD_MISMATCH", {
+      head: recordedHead,
+      expected_head: recordedExpectedHead,
+    });
+  }
+
+  const expected = ensureString(
+    expectedHead,
+    "MISSION_HOST_EVIDENCE_VERIFIER_EXPECTED_HEAD_REQUIRED",
+  );
+  if (recordedHead !== expected) {
+    throw verificationError("MISSION_HOST_EVIDENCE_VERIFIER_HEAD_MISMATCH", {
+      expected_head: expected,
+      recorded_head: recordedHead,
+    });
+  }
+
+  const missionProbeRoot = canonicalPath(
+    ensureString(summary.mission_probe_root, "MISSION_HOST_EVIDENCE_MISSION_PROBE_ROOT_REQUIRED"),
+  );
+  if (expectedMissionProbeRoot) {
+    const expectedRoot = canonicalPath(expectedMissionProbeRoot);
+    if (!samePath(missionProbeRoot, expectedRoot)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_MISSION_PROBE_ROOT_MISMATCH", {
+        expected_mission_probe_root: expectedRoot,
+        recorded_mission_probe_root: missionProbeRoot,
+      });
+    }
+  }
+
+  if (!summary.checks || typeof summary.checks !== "object" || Array.isArray(summary.checks)) {
+    throw verificationError("MISSION_HOST_EVIDENCE_CHECKS_INVALID");
+  }
+  for (const name of REQUIRED_CHECKS) {
+    if (summary.checks[name] !== "PASS") {
+      throw verificationError("MISSION_HOST_EVIDENCE_CHECK_NOT_PASS", {
+        check: name,
+        value: summary.checks[name] ?? null,
+      });
+    }
+  }
+
+  if (!Array.isArray(summary.artifacts)) {
+    throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACTS_INVALID");
+  }
+  if (summary.artifacts.length !== REQUIRED_ARTIFACTS.size) {
+    throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_COUNT_MISMATCH", {
+      expected: REQUIRED_ARTIFACTS.size,
+      observed: summary.artifacts.length,
+    });
+  }
+
+  const validatedArtifacts = [];
+  const seenNames = new Set();
+  for (const artifact of summary.artifacts) {
+    if (!artifact || typeof artifact !== "object") {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_INVALID");
+    }
+    const recordedPath = ensureString(
+      artifact.path,
+      "MISSION_HOST_EVIDENCE_ARTIFACT_PATH_REQUIRED",
+    );
+    const artifactFile = canonicalPath(recordedPath);
+    if (!pathInside(summaryDir, artifactFile)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_OUTSIDE_ROOT", {
+        artifact_path: artifactFile,
+        evidence_root: summaryDir,
+      });
+    }
+
+    const name = path.basename(artifactFile);
+    const requiredMarker = REQUIRED_ARTIFACTS.get(name);
+    if (!requiredMarker) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_UNEXPECTED", {artifact: name});
+    }
+    if (seenNames.has(name)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_DUPLICATE", {artifact: name});
+    }
+    seenNames.add(name);
+
+    const recordedHash = ensureString(
+      artifact.sha256,
+      "MISSION_HOST_EVIDENCE_ARTIFACT_HASH_REQUIRED",
+      {artifact: name},
+    ).toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(recordedHash)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_HASH_INVALID", {
+        artifact: name,
+        sha256: recordedHash,
+      });
+    }
+    const actualHash = sha256File(artifactFile);
+    if (actualHash !== recordedHash) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_HASH_MISMATCH", {
+        artifact: name,
+        expected_sha256: recordedHash,
+        actual_sha256: actualHash,
+      });
+    }
+    const text = fs.readFileSync(artifactFile, "utf8");
+    if (!hasExactMarker(text, requiredMarker)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_MARKER_MISSING", {
+        artifact: name,
+        marker: requiredMarker,
+      });
+    }
+    validatedArtifacts.push({
+      name,
+      path: artifactFile,
+      sha256: actualHash,
+      marker: requiredMarker,
+    });
+  }
+
+  for (const requiredName of REQUIRED_ARTIFACTS.keys()) {
+    if (!seenNames.has(requiredName)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_ARTIFACT_MISSING", {artifact: requiredName});
+    }
+  }
+
+  const report = {
+    protocol: "devexec.mission-host-evidence-verification",
+    schema_version: 1,
+    verified_at: new Date().toISOString(),
+    summary_file: summaryFile,
+    summary_sha256: sha256File(summaryFile),
+    expected_head: expected,
+    recorded_head: recordedHead,
+    mission_probe_root: missionProbeRoot,
+    evidence_root: summaryDir,
+    validated_artifacts: validatedArtifacts,
+    status: "PASS",
+  };
+
+  if (writeReceipt) {
+    const receiptPath = path.resolve(writeReceipt);
+    const receiptParent = canonicalPath(path.dirname(receiptPath));
+    if (!samePath(receiptParent, summaryDir)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_ROOT_MISMATCH", {
+        receipt_path: receiptPath,
+        evidence_root: summaryDir,
+      });
+    }
+    if (fs.existsSync(receiptPath)) {
+      throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_EXISTS", {
+        receipt_path: receiptPath,
+      });
+    }
+
+    const tmp = `${receiptPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    const payload = `${JSON.stringify(report, null, 2)}\n`;
+    let fd;
+    try {
+      fd = fs.openSync(tmp, "wx", 0o600);
+      fs.writeFileSync(fd, payload, "utf8");
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tmp, receiptPath);
+    } catch (cause) {
+      if (fd != null) {
+        try { fs.closeSync(fd); } catch {}
+      }
+      try { fs.rmSync(tmp, {force: true}); } catch {}
+      throw verificationError("MISSION_HOST_EVIDENCE_RECEIPT_WRITE_FAILED", {
+        cause,
+        receipt_path: receiptPath,
+      });
+    }
+    report.receipt_file = receiptPath;
+    report.receipt_sha256 = sha256File(receiptPath);
+  }
+
+  return report;
+}
+
+function parseCli(argv) {
+  let summary = "";
+  let expectedHead = "";
+  let expectedMissionProbeRoot = "";
+  let receipt = "";
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--summary") summary = argv[++index] ?? "";
+    else if (arg === "--expected-head") expectedHead = argv[++index] ?? "";
+    else if (arg === "--expected-mission-probe-root") {
+      expectedMissionProbeRoot = argv[++index] ?? "";
+    } else if (arg === "--receipt") receipt = argv[++index] ?? "";
+    else throw verificationError("MISSION_HOST_EVIDENCE_UNKNOWN_ARGUMENT", {argument: arg});
+  }
+  return {summary, expectedHead, expectedMissionProbeRoot, receipt};
+}
+
+const isMain = process.argv[1]
+  ? path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])
+  : false;
+
+if (isMain) {
+  try {
+    const args = parseCli(process.argv.slice(2));
+    const report = verifyMissionHostEvidence(args.summary, {
+      expectedHead: args.expectedHead,
+      expectedMissionProbeRoot: args.expectedMissionProbeRoot,
+      writeReceipt: args.receipt,
+    });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.stdout.write("MISSION_HOST_EVIDENCE_VERIFY=PASS\n");
+  } catch (error) {
+    const report = {
+      protocol: "devexec.mission-host-evidence-verification-error",
+      schema_version: 1,
+      error: error?.message || String(error),
+      details: Object.fromEntries(
+        Object.entries(error ?? {}).filter(([key]) => key !== "cause"),
+      ),
+    };
+    process.stderr.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.exitCode = 2;
+  }
+}
