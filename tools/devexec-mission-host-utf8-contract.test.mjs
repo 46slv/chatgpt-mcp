@@ -82,7 +82,14 @@ test("host wrapper writes evidence with explicit UTF-8 without BOM", () => {
   assert.match(text, /\[System\.IO\.File\]::WriteAllText\(\$Path, \$Text, \$script:Utf8NoBom\)/);
   assert.match(text, /Write-Utf8NoBom -Path \$outputFile -Text \$outputText/);
   assert.match(text, /Write-Utf8NoBom -Path \$summaryPath -Text \(\$summaryJson \+ \[Environment\]::NewLine\)/);
-  assert.doesNotMatch(text, /Set-Content[^\r\n]+-Encoding UTF8/);
+  const executableText = text
+    .split(/\r?\n/)
+    .filter(line => !/^\s*#/.test(line))
+    .join("\n");
+  assert.doesNotMatch(
+    executableText,
+    /Set-Content[^\r\n]+-Encoding UTF8/,
+  );
 });
 
 test("the Windows PowerShell 5.1 UTF-8 BOM would make Node JSON.parse reject SUMMARY bytes", () => {
