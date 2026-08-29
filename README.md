@@ -66,6 +66,16 @@ start/stop remains owned by its adapter, while the parent runtime recomputes
 Git changes and test evidence before accepting a result. Omit the flags (or use
 `--disabled`) to retain the established path.
 
+The FreeToken adapter uses a provider-neutral minimal harness loop for local
+coding tasks. OpenAI-compatible tool calls are bounded by the task's timeout,
+call, history, search, and output limits. The typed tools are `read`, `search`,
+`patch`, `run_test`, and `git_diff`; writes are restricted to `allowed_paths`,
+and duplicate tool failures stop the run. The parent then revalidates the Git
+root/base commit, recomputes changed paths, and runs the fixed regression
+command. This loop is constructed only for the explicit
+`runtime=local,provider=freetoken` selection; Cloud and existing LM Studio
+adapters are unchanged.
+
 ### Reusable handoff for autonomous consultation
 
 For another Codex task, register the user-prepared ChatGPT URL first, then freeze

@@ -366,7 +366,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     };
     return { result: validateResultContract(result), log: redactStructuredLog({ event: "local_worker_blocked", task_id: task.task_id, status: result.status, blocker }) };
   }
-  try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal }); } catch (error) { adapterError = error; }
+  try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal, runTest }); } catch (error) { adapterError = error; }
   // A provider crash must not strand an owned process. Adapters are required
   // to make stop() ownership-aware (external engines remain untouched).
   if (adapterError) { try { await runtimeAdapter.stop(); } catch { /* cleanup is best effort */ } }
