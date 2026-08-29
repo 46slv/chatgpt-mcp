@@ -7,12 +7,57 @@ export const CONSULTATION_SCHEMA_VERSION = 1;
 export const CONSULTATION_PHASES = new Set(["PREPARED", "IN_FLIGHT", "RESPONSE_RECEIVED", "BLOCKED", "DELIVERY_UNKNOWN"]);
 export const DEFAULT_CONSULTATION_MAX_CHARS = 12000;
 export const DEFAULT_CONSULTATION_EVIDENCE_CHARS = 6000;
+export const DEFAULT_CONSULTATION_MAX_REQUESTS = 3;
+export const DEFAULT_CONSULTATION_TIMEOUT_MINUTES = 30;
+export const CONSULTATION_LIMITS = Object.freeze({
+  maxRequests: Object.freeze({ min: 1, max: 10 }),
+  maxChars: Object.freeze({ min: 1, max: 12000 }),
+  evidenceChars: Object.freeze({ min: 1, max: 12000 }),
+  timeoutMinutes: Object.freeze({ min: 1, max: 120 }),
+});
 
 function hash(value) { return crypto.createHash("sha256").update(String(value), "utf8").digest("hex"); }
 function exactKeys(value, keys) { return !!value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort()); }
 function validId(value) { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,96}$/.test(value) || value.includes("..") || path.isAbsolute(value)) throw new Error("invalid consultation id"); return value; }
 
 export function consultationEnabled(env = process.env) { return env.DEV_EXEC_CHATGPT_CONSULT_ENABLED === "1"; }
+
+function boundedEnvInteger(env, name, fallback, bounds) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return { value: fallback, valid: true, clamped: false };
+  const text = String(raw).trim();
+  if (!/^\d+$/.test(text)) return { value: fallback, valid: false, clamped: false, reason: `${name}_malformed` };
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed)) return { value: fallback, valid: false, clamped: false, reason: `${name}_malformed` };
+  const value = Math.min(bounds.max, Math.max(bounds.min, parsed));
+  return { value, valid: true, clamped: value !== parsed };
+}
+
+/**
+ * Read the process-local consultation controls. Numeric values outside the
+ * contract are clamped; malformed values invalidate the standing opt-in so a
+ * typo cannot silently widen or alter a live request policy.
+ */
+export function consultationConfig(env = process.env) {
+  const limits = {
+    maxRequests: boundedEnvInteger(env, "DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS", DEFAULT_CONSULTATION_MAX_REQUESTS, CONSULTATION_LIMITS.maxRequests),
+    maxChars: boundedEnvInteger(env, "DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS", DEFAULT_CONSULTATION_MAX_CHARS, CONSULTATION_LIMITS.maxChars),
+    evidenceChars: boundedEnvInteger(env, "DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS", DEFAULT_CONSULTATION_EVIDENCE_CHARS, CONSULTATION_LIMITS.evidenceChars),
+    timeoutMinutes: boundedEnvInteger(env, "DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES", DEFAULT_CONSULTATION_TIMEOUT_MINUTES, CONSULTATION_LIMITS.timeoutMinutes),
+  };
+  const invalid = Object.values(limits).filter(item => !item.valid).map(item => item.reason);
+  return {
+    enabled: consultationEnabled(env) && invalid.length === 0,
+    requestedEnabled: consultationEnabled(env),
+    valid: invalid.length === 0,
+    invalid,
+    maxRequests: limits.maxRequests.value,
+    maxChars: limits.maxChars.value,
+    evidenceChars: limits.evidenceChars.value,
+    timeoutMinutes: limits.timeoutMinutes.value,
+    clamped: Object.fromEntries(Object.entries(limits).filter(([, item]) => item.clamped).map(([key]) => [key, true])),
+  };
+}
 
 export function classifyConsultationPrompt(prompt, { maxChars = DEFAULT_CONSULTATION_MAX_CHARS } = {}) {
   const text = String(prompt ?? "").trim();
@@ -44,7 +89,7 @@ function defaultState(runId, target, limits = {}) {
   return { protocol: CONSULTATION_PROTOCOL, schema_version: CONSULTATION_SCHEMA_VERSION, run_id: validId(runId), target, limits, phase: "PREPARED", active_request_id: null, requests: {}, updated_at: new Date().toISOString() };
 }
 
-export function createConsultationRunner({ stateDir, runId, enabled = false, targetAlias, targetUrl = null, transport, maxChars = DEFAULT_CONSULTATION_MAX_CHARS, evidenceChars = DEFAULT_CONSULTATION_EVIDENCE_CHARS, maxRequests = 3 } = {}) {
+export function createConsultationRunner({ stateDir, runId, enabled = false, targetAlias, targetUrl = null, transport, maxChars = DEFAULT_CONSULTATION_MAX_CHARS, evidenceChars = DEFAULT_CONSULTATION_EVIDENCE_CHARS, maxRequests = DEFAULT_CONSULTATION_MAX_REQUESTS, timeoutMinutes = DEFAULT_CONSULTATION_TIMEOUT_MINUTES } = {}) {
   if (!stateDir || !runId) throw new Error("consultation stateDir and runId required");
   validId(runId);
   if (!transport || typeof transport.chatgpt_reply !== "function") throw new Error("fixed chatgpt_reply transport required");
@@ -52,8 +97,9 @@ export function createConsultationRunner({ stateDir, runId, enabled = false, tar
   if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 12000) throw new Error("invalid consultation request budget");
   if (!Number.isInteger(evidenceChars) || evidenceChars < 1 || evidenceChars > 12000) throw new Error("invalid consultation evidence budget");
   if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 10) throw new Error("invalid consultation request count budget");
+  if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 120) throw new Error("invalid consultation timeout budget");
   const file = path.join(stateDir, `${runId}.json`);
-  let state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : defaultState(runId, { alias: targetAlias, url: targetUrl, frozen_at: new Date().toISOString() }, { max_chars: maxChars, evidence_chars: evidenceChars, max_requests: maxRequests });
+  let state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : defaultState(runId, { alias: targetAlias, url: targetUrl, frozen_at: new Date().toISOString() }, { max_chars: maxChars, evidence_chars: evidenceChars, max_requests: maxRequests, timeout_minutes: timeoutMinutes });
   if (state.run_id !== runId || state.protocol !== CONSULTATION_PROTOCOL || state.schema_version !== CONSULTATION_SCHEMA_VERSION) throw new Error("consultation state mismatch");
   if (state.target?.alias !== targetAlias || (targetUrl && state.target.url && state.target.url !== targetUrl)) throw new Error("consultation target is not frozen");
   fs.mkdirSync(stateDir, { recursive: true });
@@ -73,7 +119,7 @@ export function createConsultationRunner({ stateDir, runId, enabled = false, tar
     if (classification.decision !== "ALLOW") { record.phase = "BLOCKED"; record.reason = classification.reason; record.blocked_at = new Date().toISOString(); state.phase = "BLOCKED"; save(); return result(record); }
     record.phase = "IN_FLIGHT"; record.sent_at = new Date().toISOString(); state.phase = "IN_FLIGHT"; save();
     let raw;
-    try { raw = await transport.chatgpt_reply({ prompt: text, targetAlias, requestId: id }); }
+    try { raw = await transport.chatgpt_reply({ prompt: text, targetAlias, requestId: id, timeoutMinutes }); }
     catch (error) { record.phase = "DELIVERY_UNKNOWN"; record.reason = String(error?.message || error); record.delivery_unknown_at = new Date().toISOString(); state.phase = "DELIVERY_UNKNOWN"; save(); return result(record, { retry: false }); }
     const response = typeof raw === "string" ? raw : raw?.response;
     if (typeof response !== "string" || !response.trim() || response.length > maxChars * 4) { record.phase = "BLOCKED"; record.reason = "malformed_or_overlong_response"; record.blocked_at = new Date().toISOString(); state.phase = "BLOCKED"; save(); return result(record); }

@@ -14,6 +14,12 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 # $env:DEV_EXEC_CHATGPT_CONSULT_ENABLED = '1'
 # $env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
 # $env:DEV_EXEC_CONSULTATION_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\consultation-state'
+# Optional consultation limits. Out-of-range numeric values are clamped;
+# malformed values disable consultation fail-closed.
+# $env:DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS = '3'
+# $env:DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS = '12000'
+# $env:DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS = '6000'
+# $env:DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES = '30'
 
 # Optional overrides. The adapter has conservative defaults for omitted values.
 # $env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'

@@ -6,7 +6,8 @@ import test from "node:test";
 
 import { parsePlannerDecision, parsePlannerText, buildPlannerPrompt } from "./local-worker-planner-protocol.mjs";
 import { runIterativeLocalWorker } from "./local-worker-iterative-runner.mjs";
-import { boundConsultationEvidence, classifyConsultationPrompt, consultationEnabled, createChatgptReplyAdapter, createConsultationRunner } from "./devexec-consultation.mjs";
+import { boundConsultationEvidence, classifyConsultationPrompt, consultationConfig, consultationEnabled, createChatgptReplyAdapter, createConsultationRunner } from "./devexec-consultation.mjs";
+import { makeConsultationCallback } from "./local-worker-adapter.mjs";
 
 function temp() { return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-consult-")); }
 
@@ -63,4 +64,56 @@ test("malformed response is BLOCKED and evidence is bounded", async () => {
 test("adapter has only fixed chatgpt_reply seam and never forwards target/tool selection", async () => {
   let seen; const adapter = createChatgptReplyAdapter({ callTool: async (tool, meta) => { seen = { tool, meta }; return { content: [{ type: "text", text: JSON.stringify({ response: "ok" }) }] }; } });
   assert.equal(await adapter.chatgpt_reply({ prompt: "hello", targetAlias: "main", requestId: "C-1" }), "ok"); assert.equal(seen.tool.name, "chatgpt_reply"); assert.deepEqual(seen.tool.arguments, { prompt: "hello", timeout_minutes: 30 }); assert.equal(seen.meta.targetAlias, "main");
+});
+
+test("local-worker adapter wires standing opt-in, fixed target, bounded env, and one fake reply", async () => {
+  const root = temp(); let calls = 0; let seen = null;
+  const config = consultationConfig({
+    DEV_EXEC_CHATGPT_CONSULT_ENABLED: "1",
+    DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS: "2",
+    DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS: "64",
+    DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS: "9",
+    DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES: "7",
+  });
+  const callback = makeConsultationCallback("LW-adapter-enabled", {
+    config, targetAlias: "main", stateDir: root,
+    fixedTarget: { target_id: "main", chat_url: "https://chatgpt.com/c/fixed", source: "test" },
+    transport: { chatgpt_reply: async (request) => { calls += 1; seen = request; return "0123456789"; } },
+  });
+  const first = await callback("ordinary question", "C-R01-01");
+  const cached = await callback("ordinary question", "C-R02-01");
+  assert.equal(first.status, "RESPONSE_RECEIVED"); assert.equal(cached.cached, true); assert.equal(calls, 1);
+  assert.deepEqual(seen, { prompt: "ordinary question", targetAlias: "main", requestId: "C-R01-01", timeoutMinutes: 7 });
+  const state = JSON.parse(fs.readFileSync(path.join(root, "LW-adapter-enabled.json"), "utf8"));
+  assert.deepEqual(state.limits, { max_chars: 64, evidence_chars: 9, max_requests: 2, timeout_minutes: 7 });
+  assert.equal(state.target.alias, "main"); assert.equal(state.target.url, "https://chatgpt.com/c/fixed");
+  assert.equal(state.requests["C-R01-01"].response_evidence.text, "012345678...[TRUNCATED]");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("local-worker adapter remains fail-closed when opt-in is absent", async () => {
+  const root = temp(); let calls = 0;
+  const callback = makeConsultationCallback("LW-adapter-disabled", {
+    config: consultationConfig({}), targetAlias: "main", stateDir: root,
+    fixedTarget: { target_id: "main", chat_url: "https://chatgpt.com/c/fixed", source: "test" },
+    transport: { chatgpt_reply: async () => { calls += 1; return "must not be called"; } },
+  });
+  const result = await callback("ordinary question", "C-R01-01");
+  assert.equal(result.status, "BLOCKED"); assert.match(result.reason, /standing_opt_in/); assert.equal(calls, 0);
+  assert.equal(fs.existsSync(path.join(root, "LW-adapter-disabled.json")), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("consultation env limits clamp safely and malformed limits deny opt-in", () => {
+  const clamped = consultationConfig({
+    DEV_EXEC_CHATGPT_CONSULT_ENABLED: "1",
+    DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS: "999",
+    DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS: "0",
+    DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS: "120000",
+    DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES: "999",
+  });
+  assert.equal(clamped.enabled, true); assert.equal(clamped.valid, true);
+  assert.equal(clamped.maxRequests, 10); assert.equal(clamped.maxChars, 1); assert.equal(clamped.evidenceChars, 12000); assert.equal(clamped.timeoutMinutes, 120);
+  const malformed = consultationConfig({ DEV_EXEC_CHATGPT_CONSULT_ENABLED: "1", DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS: "not-a-number" });
+  assert.equal(malformed.enabled, false); assert.equal(malformed.valid, false); assert.deepEqual(malformed.invalid, ["DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS_malformed"]);
 });

@@ -92,6 +92,12 @@ The local planner is not allowed to select ChatGPT tools, targets, or request ID
 ```powershell
 $env:DEV_EXEC_CHATGPT_CONSULT_ENABLED = '1'
 $env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
+# Optional bounded controls (defaults: 3 requests, 12,000 prompt chars,
+# 6,000 evidence chars, 30-minute chatgpt_reply timeout):
+# $env:DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS = '2'
+# $env:DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS = '12000'
+# $env:DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS = '6000'
+# $env:DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES = '30'
 ```
 
 The runner uses only the fixed `chatgpt_reply` adapter. Prompts containing secrets or credentials, personal data, file upload/path requests, permissions, account or billing actions, destructive instructions, external/out-of-scope work, or unknown intent are durably `BLOCKED`. Requests are bounded to 12,000 characters; responses are retained as untrusted, truncated evidence (6,000 characters) and must re-enter the local planner before any typed LocalExecutor action. Request SHA-256 deduplication prevents duplicate replies. A transport failure is durable `DELIVERY_UNKNOWN`; an ambiguous request is never automatically resent. Disable the feature by omitting the opt-in variable (the default).
