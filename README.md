@@ -28,6 +28,9 @@ Claude Code (orchestrator)
     ├── Claude       → native
     └── ChatGPT      → chatgpt-mcp (this project)
                          └── Playwright → Chromium → chatgpt.com
+
+DevExec autonomous consultation (explicit opt-in only)
+    Codex goal → local planner → fixed `chatgpt_reply` target → untrusted evidence → planner/typed LocalExecutor
 ```
 
 The server launches a persistent Chromium browser on first use, maintains login cookies across sessions, and uses multi-strategy DOM scraping to extract responses reliably despite ChatGPT's frequently-changing UI.
@@ -43,6 +46,8 @@ The server launches a persistent Chromium browser on first use, maintains login 
 | `chatgpt_new_chat` | Start fresh conversation (stays in project if set) |
 
 All tools are **blocking** — they return only when the response is ready (or timeout). This matches the ergonomics of Codex and Gemini MCPs.
+
+DevExec's local worker can optionally ask one fixed ChatGPT conversation for bounded ordinary-text guidance. Set `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS=<alias>` in the invoking process; the default is disabled. The local model can emit only the strict `{type:"REQUEST_CONSULTATION",prompt:string}` decision. Target, transport (`chatgpt_reply`), request ID, budgets, and durable state are runner-owned. Sensitive, destructive, account, permission, file, credential, personal-data, or unknown requests are blocked. Responses are untrusted bounded evidence and never become shell authority.
 
 ## Setup
 

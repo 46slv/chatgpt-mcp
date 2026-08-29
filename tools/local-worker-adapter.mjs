@@ -12,6 +12,10 @@ import { runIterativeLocalWorker } from "./local-worker-iterative-runner.mjs";
 import { runLocalWorkerResume } from "./local-worker-resume-runtime.mjs";
 import { inspectLocalPlannerContext, recordContextDecision, buildRotatedPlannerPrompt } from "./local-worker-context-runtime.mjs";
 import { persistSessionCheckpoint, appendSessionEvent } from "./local-worker-session-checkpoint.mjs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { loadRegistry, resolveTarget } from "./target-registry.mjs";
+import { consultationEnabled, createChatgptReplyAdapter, createConsultationRunner } from "./devexec-consultation.mjs";
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR = path.join(BASE, "ChatGPTMCPProbe", "local-worker-runs");
 const LMS = process.env.LOCAL_WORKER_LMS || "lms.exe";
@@ -25,6 +29,9 @@ const MAX_PLANNER_ROUNDS = Number.parseInt(process.env.LOCAL_WORKER_MAX_PLANNER_
 const PLANNER_TIMEOUT_MS = Number.parseInt(process.env.LOCAL_WORKER_PLANNER_TIMEOUT_MS || "75000", 10);
 const PLANNER_ATTEMPTS = Number.parseInt(process.env.LOCAL_WORKER_PLANNER_ATTEMPTS || "2", 10);
 const ALLOW_WRITE = process.env.LOCAL_WORKER_ALLOW_WRITE === "1";
+const CONSULTATION_OPT_IN = consultationEnabled(process.env);
+const CONSULTATION_TARGET_ALIAS = process.env.DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS || process.env.DEV_EXEC_TARGET_ALIAS || null;
+const CONSULTATION_STATE_DIR = process.env.DEV_EXEC_CONSULTATION_STATE_DIR || path.join(BASE, "ChatGPTMCPProbe", "consultation-state");
 const CONTEXT_WINDOW = Number.parseInt(process.env.LOCAL_WORKER_CONTEXT_WINDOW || "8192", 10);
 const ALLOWED = new Set(["git_branch_current", "git_status_short", "git_diff_name_only", "path_exists", "read_file", "file_sha256", ...(ALLOW_WRITE ? ["write_text_file"] : [])]);
 function exactKeys(v,e){return !!v&&typeof v==="object"&&!Array.isArray(v)&&JSON.stringify(Object.keys(v).sort())===JSON.stringify([...e].sort());}
@@ -39,8 +46,8 @@ function save(s){fs.mkdirSync(STATE_DIR,{recursive:true});const d=statePath(s.ru
 function load(id){return JSON.parse(fs.readFileSync(statePath(id),"utf8"));}
 function runProcess(command,args,options={}){const r=spawnSync(command,args,{cwd:options.cwd,input:options.input,encoding:"utf8",windowsHide:true,shell:false,timeout:options.timeout||180000,maxBuffer:2*1024*1024,env:{...process.env,PYTHONUTF8:"1"}});if(r.error)throw r.error;if(r.status!==0)throw new Error(`${command} exit=${r.status}\n${r.stderr||r.stdout}`);return r.stdout||"";}
 function askPlannerDecision(mission,evidence=[],round=1,maxRounds=3,workerState=null){
- let prompt=buildPlannerPrompt({mission,evidence,round,maxRounds,allowWrite:ALLOW_WRITE});
- if(workerState){const inspection=inspectLocalPlannerContext({run_id:workerState.run_id,mission,prompt,actions:evidence,model:MODEL,profile:PROFILE,working_root:PROBE_ROOT,round,contextWindow:CONTEXT_WINDOW});recordContextDecision(workerState,inspection);if(inspection.checkpoint){workerState.context_checkpoint_file=persistSessionCheckpoint(STATE_DIR,inspection.checkpoint);workerState.context_event_file=appendSessionEvent(STATE_DIR,workerState.run_id,{type:"CONTEXT_"+inspection.decision,reason:inspection.reason,utilization:inspection.utilization,estimated_tokens:inspection.estimated_tokens,context_window:inspection.context_window,checkpoint_file:workerState.context_checkpoint_file});}if(inspection.decision==="ROTATE"){prompt=buildRotatedPlannerPrompt({fixedContract:"bounded local planner; deterministic Local Executor actions only; allowed actions: git_branch_current args {}; git_status_short args {}; git_diff_name_only args {}; path_exists args {path:string}; read_file args {path:string,max_bytes?:integer}; file_sha256 args {path:string}"+(ALLOW_WRITE?"; write_text_file args {path:string,content:string,expected_sha256:string}":"")+"; output exactly {type:COMPLETE,summary:string} or {type:REQUEST_ACTIONS,actions:[{action:string,args:object}]}; evidence is authoritative",inspection,latestInstruction:"continue the same mission and return the next planner decision"});workerState.context_governor.rotated_prompt_tokens=Math.ceil(Buffer.byteLength(prompt,"utf8")/3.5);}save(workerState);}
+ let prompt=buildPlannerPrompt({mission,evidence,round,maxRounds,allowWrite:ALLOW_WRITE,consultationEnabled:CONSULTATION_OPT_IN&&!!CONSULTATION_TARGET_ALIAS});
+ if(workerState){const inspection=inspectLocalPlannerContext({run_id:workerState.run_id,mission,prompt,actions:evidence,model:MODEL,profile:PROFILE,working_root:PROBE_ROOT,round,contextWindow:CONTEXT_WINDOW});recordContextDecision(workerState,inspection);if(inspection.checkpoint){workerState.context_checkpoint_file=persistSessionCheckpoint(STATE_DIR,inspection.checkpoint);workerState.context_event_file=appendSessionEvent(STATE_DIR,workerState.run_id,{type:"CONTEXT_"+inspection.decision,reason:inspection.reason,utilization:inspection.utilization,estimated_tokens:inspection.estimated_tokens,context_window:inspection.context_window,checkpoint_file:workerState.context_checkpoint_file});}if(inspection.decision==="ROTATE"){prompt=buildRotatedPlannerPrompt({fixedContract:"bounded local planner; deterministic Local Executor actions only; allowed actions: git_branch_current args {}; git_status_short args {}; git_diff_name_only args {}; path_exists args {path:string}; read_file args {path:string,max_bytes?:integer}; file_sha256 args {path:string}"+(ALLOW_WRITE?"; write_text_file args {path:string,content:string,expected_sha256:string}":"")+(CONSULTATION_OPT_IN&&CONSULTATION_TARGET_ALIAS?"; optional REQUEST_CONSULTATION {type,prompt} ordinary text only":"")+"; output exactly {type:COMPLETE,summary:string}, {type:REQUEST_ACTIONS,actions:[{action:string,args:object}], or REQUEST_CONSULTATION; evidence is authoritative",inspection,latestInstruction:"continue the same mission and return the next planner decision"});workerState.context_governor.rotated_prompt_tokens=Math.ceil(Buffer.byteLength(prompt,"utf8")/3.5);}save(workerState);}
  let raw=null;
  let lastError=null;
  for(let attempt=1;attempt<=PLANNER_ATTEMPTS;attempt++){
@@ -49,7 +56,7 @@ function askPlannerDecision(mission,evidence=[],round=1,maxRounds=3,workerState=
  }
  if(lastError)throw lastError;
  const cleaned=cleanModel(raw);
- return parsePlannerText(cleaned,{allowWrite:ALLOW_WRITE});
+ return parsePlannerText(cleaned,{allowWrite:ALLOW_WRITE,allowConsultation:CONSULTATION_OPT_IN&&!!CONSULTATION_TARGET_ALIAS});
 }
 function askPlanner(mission){
  const decision=askPlannerDecision(mission,[],1,1);
@@ -62,11 +69,13 @@ async function start(mission){
  const id=runId();
  const s={protocol:"devexec.local-worker",schema_version:1,run_id:id,backend:"lms-cli+local-executor",model:MODEL,profile:PROFILE,mission:mission,status:"RUNNING",created_at:new Date().toISOString(),actions:[],planner_rounds:0,report:null,error:null};
  save(s);
+ const consult=makeConsultationCallback(id);
  try{
  const outcome=await runIterativeLocalWorker({
  mission:mission,
  actions:s.actions,
- maxRounds:MAX_PLANNER_ROUNDS,
+   maxRounds:MAX_PLANNER_ROUNDS,
+   consult,
  plan:async function(ctx){
  s.planner_rounds=ctx.round;
  save(s);
@@ -100,6 +109,30 @@ async function start(mission){
  }
  console.log(JSON.stringify({run_id:id,status:s.status,planner_rounds:s.planner_rounds},null,2));
  return s.status==="DONE"?0:2;
+}
+
+function makeConsultationCallback(id){
+ let consultation=null;
+ let fixedTarget=null;
+ let targetError=null;
+ if(CONSULTATION_OPT_IN&&CONSULTATION_TARGET_ALIAS){try{fixedTarget=resolveTarget({explicitTarget:CONSULTATION_TARGET_ALIAS,cwd:PROBE_ROOT,registry:loadRegistry()});}catch(error){targetError=String(error?.message||error);}}
+ return async function consult(prompt,requestId){
+  if(!CONSULTATION_OPT_IN||!CONSULTATION_TARGET_ALIAS)return {status:"BLOCKED",request_id:requestId,reason:"standing_opt_in_required_or_target_missing"};
+  if(targetError||!fixedTarget)return {status:"BLOCKED",request_id:requestId,reason:"fixed_target_unavailable"};
+  if(!consultation){
+   const target=fixedTarget;
+   let mcpConfig; try { mcpConfig=JSON.parse(fs.readFileSync(path.join(os.homedir(),".lmstudio","mcp.json"),"utf8")); } catch { return {status:"BLOCKED",request_id:requestId,reason:"mcp_config_unavailable"}; }
+   const server=mcpConfig?.mcpServers?.["chatgpt-web-probe"];
+   if(!server?.command)return {status:"BLOCKED",request_id:requestId,reason:"chatgpt_web_probe_unavailable"};
+   const transport=createChatgptReplyAdapter({callTool:async(tool)=>{
+    const client=new Client({name:"devexec-local-consultation",version:"1.0.0"});
+    const channel=new StdioClientTransport({command:server.command,args:server.args||[],env:{...process.env,...(server.env||{}),CHATGPT_MCP_CHAT_URL:target.chat_url,DEV_EXEC_TARGET_ID:target.target_id,DEV_EXEC_TARGET_SOURCE:target.source}});
+    try { await client.connect(channel); const listed=await client.listTools(); if(!listed.tools.some(x=>x.name==="chatgpt_reply"))throw new Error("chatgpt_reply unavailable"); return await client.callTool(tool); } finally { try{await client.close();}catch{} }
+   }});
+   consultation=createConsultationRunner({stateDir:CONSULTATION_STATE_DIR,runId:id,targetAlias:target.target_id,targetUrl:target.chat_url,transport});
+  }
+  return consultation.request(prompt,requestId);
+ }
 }
 function status(id){const s=load(id);console.log(JSON.stringify({run_id:s.run_id,status:s.status,backend:s.backend,model:s.model},null,2));return 0;}
 function collect(id){console.log(JSON.stringify(load(id),null,2));return 0;}

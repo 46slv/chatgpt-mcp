@@ -66,18 +66,30 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 
 Set `LOCAL_WORKER_PROFILE` to the external LocalExecutor read-only profile when the default profile discovery is not suitable. Other bounded controls (`LOCAL_WORKER_CONTEXT_WINDOW`, `LOCAL_WORKER_MAX_PLANNER_ROUNDS`, `LOCAL_WORKER_PLANNER_TIMEOUT_MS`, and `LOCAL_WORKER_PLANNER_ATTEMPTS`) are optional environment overrides. Never put `mcp.json`, model caches, executor credentials, or runtime state under this checkout.
 
-## 5. State and security boundaries
+## 5. Optional autonomous ordinary-text consultation
+
+The local planner is not allowed to select ChatGPT tools, targets, or request IDs. To permit bounded ordinary-text consultation, explicitly opt in for the process and freeze a target alias before starting a goal:
+
+```powershell
+$env:DEV_EXEC_CHATGPT_CONSULT_ENABLED = '1'
+$env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
+```
+
+The runner uses only the fixed `chatgpt_reply` adapter. Prompts containing secrets or credentials, personal data, file upload/path requests, permissions, account or billing actions, destructive instructions, external/out-of-scope work, or unknown intent are durably `BLOCKED`. Requests are bounded to 12,000 characters; responses are retained as untrusted, truncated evidence (6,000 characters) and must re-enter the local planner before any typed LocalExecutor action. Request SHA-256 deduplication prevents duplicate replies. A transport failure is durable `DELIVERY_UNKNOWN`; an ambiguous request is never automatically resent. Disable the feature by omitting the opt-in variable (the default).
+
+## 6. State and security boundaries
 
 The normal external locations are:
 
 - Browser profile: `%USERPROFILE%\.chatgpt-mcp\user-data` (override with `CHATGPT_MCP_USER_DATA_DIR`).
 - Target registry: `%LOCALAPPDATA%\DevExec\targets.json`.
 - DevExec state/runs: `%LOCALAPPDATA%\ChatGPTMCPProbe\dev-exec-state` and `dev-exec-runs` (override with `DEV_EXEC_STATE_DIR` / `DEV_EXEC_RUNS_DIR`).
+- Consultation state: `%LOCALAPPDATA%\ChatGPTMCPProbe\consultation-state` (override with `DEV_EXEC_CONSULTATION_STATE_DIR`).
 - LM Studio MCP configuration: `%USERPROFILE%\.lmstudio\mcp.json`.
 
 Keep these outside Git and back them up using the machine's normal protected backup mechanism. Do not commit `.env` files, copied PowerShell environment files, cookies, browser profiles, target registries, `mcp.json`, LocalExecutor trees, model weights, state, run logs, or generated reports. The tracked env file is an example only and contains no secrets.
 
-## 6. Read-only preflight and troubleshooting
+## 7. Read-only preflight and troubleshooting
 
 Run the preflight whenever changing machines, profiles, or ports:
 
@@ -91,5 +103,6 @@ It reports command availability, repository/build paths, existence and validity 
 - `403` when publishing: the GitHub identity lacks write permission to the upstream repository. Push to an authorized fork/remote or obtain permission; do not force-push or rewrite history.
 - Missing model / `MODEL_NOT_FOUND`: inspect the model id shown by LM Studio, set `LOCAL_WORKER_MODEL` exactly, ensure the LM Studio local server is listening on its configured port, and rerun preflight. No model is downloaded automatically.
 - `CDP_UNAVAILABLE`: verify the port, profile, and Chrome process; do not broaden network exposure beyond localhost.
+- Consultation remains disabled unless `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and a valid `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS` are present. `BLOCKED` and `DELIVERY_UNKNOWN` are expected fail-closed outcomes, not permission prompts to bypass.
 
 For a new machine, the bounded completion check is: `npm ci`, Playwright Chromium installed, `npm run build`, `npm test` passing, target captured and verified, then a dry-run with write disabled. Live ChatGPT or LM Studio success depends on external login and local services and should be recorded separately from deterministic repository tests.

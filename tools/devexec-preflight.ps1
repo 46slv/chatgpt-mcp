@@ -69,6 +69,8 @@ $userDataDir = [Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR'
 if ([string]::IsNullOrWhiteSpace($userDataDir)) { $userDataDir = Join-Path $userHome '.chatgpt-mcp\user-data' }
 $mcpConfig = Join-Path $userHome '.lmstudio\mcp.json'
 $targetRegistry = Join-Path $localAppData 'DevExec\targets.json'
+$consultationStateDir = [Environment]::GetEnvironmentVariable('DEV_EXEC_CONSULTATION_STATE_DIR')
+if ([string]::IsNullOrWhiteSpace($consultationStateDir)) { $consultationStateDir = Join-Path $localAppData 'ChatGPTMCPProbe\consultation-state' }
 
 $report = [ordered]@{
     protocol = 'devexec.preflight'
@@ -93,6 +95,7 @@ $report = [ordered]@{
         target_registry = Get-ConfigReport $targetRegistry 'targets'
         devexec_state = Get-PathReport $stateDir
         devexec_runs = Get-PathReport $runsDir
+        consultation_state = Get-PathReport $consultationStateDir
         lmstudio_mcp = Get-ConfigReport $mcpConfig 'mcp'
         local_executor_root = [Environment]::GetEnvironmentVariable('LOCAL_WORKER_EXECUTOR_ROOT')
     }
@@ -105,6 +108,8 @@ $report = [ordered]@{
         local_worker_model_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_MODEL'))
         local_worker_lms_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_LMS'))
         chatgpt_mcp_user_data_dir_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR'))
+        chatgpt_consultation_enabled = ([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_ENABLED') -eq '1')
+        chatgpt_consultation_target_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS'))
     }
     safety = [ordered]@{
         read_only = $true

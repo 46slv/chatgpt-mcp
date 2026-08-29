@@ -8,6 +8,13 @@
 # reviewed write work package using a separate LocalExecutor profile.
 $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 
+# Autonomous ordinary-text ChatGPT consultation is opt-in and remains disabled
+# unless explicitly set to 1. The target alias is frozen at run start; the
+# local model cannot choose the target, tool, or request id.
+# $env:DEV_EXEC_CHATGPT_CONSULT_ENABLED = '1'
+# $env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
+# $env:DEV_EXEC_CONSULTATION_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\consultation-state'
+
 # Optional overrides. The adapter has conservative defaults for omitted values.
 # $env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
 # $env:LOCAL_WORKER_MODEL = 'your-local-model-id'
