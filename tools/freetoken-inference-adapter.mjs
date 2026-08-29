@@ -220,16 +220,32 @@ export function createFreeTokenInferenceAdapter(options = {}) {
         outputLimit: task && typeof task === "object" ? task.output_limit : 12000,
         logger: (event) => log(redactFreeTokenLog({ event: "freetoken_harness", ...event })),
         infer: async ({ messages, tools, tool_choice, max_tokens, signal }) => {
-          const response = await request(`${config.serveUrl}/v1/chat/completions`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ model: config.model, messages, tools, tool_choice, max_tokens: max_tokens ?? task?.max_tokens ?? 1024 }),
-            signal,
-          });
-          if (!response || !response.body || typeof response.body !== "object" || Array.isArray(response.body)) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is malformed");
-          let encoded; try { encoded = JSON.stringify(response.body); } catch { throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is not serializable"); }
-          if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
-          return response.body;
+          // The HTTP server binds before the scheduler has finished loading
+          // weights. Retry only that transient 503 window; persistent model
+          // load failures still surface after a bounded number of attempts.
+          let lastError = null;
+          const retryDeadline = Date.now() + Math.max(1000, Math.min(config.requestTimeoutMs - 1000, 60000));
+          for (let attempt = 0; attempt < 60 && Date.now() < retryDeadline; attempt += 1) {
+            try {
+              const response = await request(`${config.serveUrl}/v1/chat/completions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ model: config.model, messages, tools, tool_choice, max_tokens: max_tokens ?? task?.max_tokens ?? 1024 }),
+                signal,
+              });
+              if (!response || !response.body || typeof response.body !== "object" || Array.isArray(response.body)) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is malformed");
+              let encoded; try { encoded = JSON.stringify(response.body); } catch { throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is not serializable"); }
+              if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
+              return response.body;
+            } catch (error) {
+              lastError = error;
+              const status = Number(error?.status);
+              const transient = status === 503 || /HTTP 503|service unavailable|scheduler.*ready/i.test(String(error?.message || error));
+              if (!transient || signal?.aborted || attempt === 59 || Date.now() >= retryDeadline) throw error;
+              await sleep(1000);
+            }
+          }
+          throw lastError || failure(FREETOKEN_FAILURES.SERVER_FAILURE, "FreeToken inference failed");
         },
       });
       const mappedCode = harness.code === "CANCELLED" ? FREETOKEN_FAILURES.CANCELLED : harness.code === "HARNESS_TIMEOUT" ? FREETOKEN_FAILURES.TIMEOUT : harness.code === "MALFORMED_RESULT" ? FREETOKEN_FAILURES.MALFORMED_RESULT : harness.status === "BLOCKED" ? FREETOKEN_FAILURES.SERVER_FAILURE : null;

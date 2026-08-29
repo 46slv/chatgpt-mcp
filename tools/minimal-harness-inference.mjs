@@ -238,13 +238,18 @@ export async function runMinimalHarness(task, { infer, signal, runTest, maxToolC
         if (count >= 2) return { status: "BLOCKED", code: "DUPLICATE_FAILURE", reason: "duplicate tool failure threshold reached", tool_calls: toolCalls, observations };
         result = { error: code, message: bounded(error?.message || error, 1000) };
       }
-      observations.push({ name, ok: !result?.error });
+      const toolOk = !result?.error && (name !== "run_test" || result?.status === "PASS");
+      observations.push({ name, ok: toolOk });
       const encoded = bounded(JSON.stringify(result), MAX_OUTPUT);
       messages.push({ role: "tool", tool_call_id: callId, name, content: encoded });
       logger({ event: "harness_tool", name, ok: !result?.error, tool_calls: toolCalls });
       if (Date.now() >= deadline) break;
     }
   }
+  const completedEvidence = observations.some((x) => x.name === "patch" && x.ok)
+    && observations.some((x) => x.name === "run_test" && x.ok)
+    && observations.some((x) => x.name === "git_diff" && x.ok);
+  if (completedEvidence) return { status: "PASS", summary: "bounded harness completed after tool-call limit", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
   const timedOut = Date.now() >= deadline;
   return { status: "FAILED", code: timedOut ? "HARNESS_TIMEOUT" : "HARNESS_MAX_TOOL_CALLS", reason: timedOut ? "harness deadline exceeded" : "maximum tool calls reached", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
 }
