@@ -80,9 +80,29 @@ export async function ensureReplyTargetOnPage(
     isLoggedIn: () => Promise<boolean>;
   },
 ): Promise<void> {
+  await navigateAndVerifyReplyTargetOnPage(page, target, dependencies.navigate);
+
+  if (!(await dependencies.isLoggedIn())) {
+    throw new Error('ChatGPT session is not logged in at the targeted conversation.');
+  }
+}
+
+/**
+ * Move an attached/persistent page to a runner-owned target and verify the
+ * complete canonical URL before any authentication or composer checks.
+ *
+ * Keeping this navigation-only phase separate is important for startup: a
+ * target supplied on the first call must not be sent through the legacy home
+ * navigation or login check while the browser is still on another tab.
+ */
+export async function navigateAndVerifyReplyTargetOnPage(
+  page: { url(): string; waitForLoadState?: (state: 'domcontentloaded', options?: { timeout?: number }) => Promise<unknown> },
+  target: ChatGPTTargetIdentity,
+  navigate: (url: string) => Promise<boolean>,
+): Promise<void> {
   const currentUrl = page.url();
   if (currentUrl !== target.url) {
-    const navigated = await dependencies.navigate(target.url);
+    const navigated = await navigate(target.url);
     if (!navigated) throw new Error('Failed to navigate to targeted ChatGPT conversation.');
     if (page.waitForLoadState) {
       await page.waitForLoadState('domcontentloaded', { timeout: CONFIG.defaultTimeout });
@@ -99,10 +119,6 @@ export async function ensureReplyTargetOnPage(
   }
   if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
     throw new Error('Target conversation identity mismatch after navigation.');
-  }
-
-  if (!(await dependencies.isLoggedIn())) {
-    throw new Error('ChatGPT session is not logged in at the targeted conversation.');
   }
 }
 
@@ -126,7 +142,10 @@ async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
  */
 export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<void> {
   if (sessionInitialized && isBrowserRunning()) {
-    if (target) await getPage(target.url);
+    if (target) {
+      const currentPage = await getPage(target.url);
+      await navigateAndVerifyReplyTargetOnPage(currentPage, target, navigateTo);
+    }
     return;
   }
 
@@ -137,12 +156,19 @@ export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<voi
   // an exact prepared target and avoid navigating it away to the home page.
   // For an attached non-ChatGPT page, navigate the selected safe page to home
   // so legacy ask flows still have a usable composer.
-  let success = true;
-  if (!isBrowserAttached() || !/^https:\/\/chatgpt\.com(?:\/|$)/.test(currentPage.url())) {
-    success = await navigateTo(CONFIG.chatgptUrl);
-  }
-  if (!success) {
-    throw new Error('Failed to navigate to ChatGPT');
+  if (target) {
+    // Targeted startup must navigate to the exact prepared conversation first
+    // and only then perform the targeted login/composer readiness check.
+    // This also preserves a project-scoped /g/<slug>/c/<id> URL verbatim.
+    await navigateAndVerifyReplyTargetOnPage(currentPage, target, navigateTo);
+  } else {
+    let success = true;
+    if (!isBrowserAttached() || !/^https:\/\/chatgpt\.com(?:\/|$)/.test(currentPage.url())) {
+      success = await navigateTo(CONFIG.chatgptUrl);
+    }
+    if (!success) {
+      throw new Error('Failed to navigate to ChatGPT');
+    }
   }
 
   // Wait for page to settle, then check login with retries
@@ -163,7 +189,7 @@ export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<voi
   await saveStorageState();
 
   // Auto-select default project on first launch
-  if (CONFIG.defaultProject && !sessionState.currentProjectUrl) {
+  if (!target && CONFIG.defaultProject && !sessionState.currentProjectUrl) {
     const result = await selectProject(CONFIG.defaultProject);
     if (result.success) {
       console.error(`[session] Auto-selected default project: ${CONFIG.defaultProject}`);

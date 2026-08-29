@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ensureReplyTargetOnPage } from "../dist/chatgpt.js";
+import { ensureReplyTargetOnPage, navigateAndVerifyReplyTargetOnPage } from "../dist/chatgpt.js";
 import { parseChatGPTTargetUrl } from "../dist/types.js";
 
 function fakePage(initialUrl) {
@@ -46,6 +46,45 @@ test("targeted reply performs one exact navigation before send", async () => {
   assert.equal(fake.page.url(), "https://chatgpt.com/c/prepared-2");
 });
 
+test("targeted startup navigates home to the exact target before login readiness", async () => {
+  const target = parseChatGPTTargetUrl("https://chatgpt.com/g/g-p-prepared/c/project-startup-1");
+  const fake = fakePage("https://chatgpt.com");
+  const events = [];
+  await ensureReplyTargetOnPage(fake.page, target, {
+    navigate: async (url) => { events.push(`navigate:${url}`); fake.setUrl(url); return true; },
+    isLoggedIn: async () => { events.push("login-check"); return true; },
+  });
+  assert.deepEqual(events, [
+    `navigate:${target.url}`,
+    "login-check",
+  ]);
+  assert.equal(fake.page.url(), target.url);
+});
+
+test("navigation-only target preparation performs one navigation from another conversation", async () => {
+  const target = parseChatGPTTargetUrl("https://chatgpt.com/c/prepared-startup-2");
+  const fake = fakePage("https://chatgpt.com/c/other-startup-2");
+  const navigations = [];
+  await navigateAndVerifyReplyTargetOnPage(fake.page, target, async (url) => {
+    navigations.push(url);
+    fake.setUrl(url);
+    return true;
+  });
+  assert.deepEqual(navigations, [target.url]);
+  assert.equal(fake.page.url(), target.url);
+});
+
+test("navigation-only target preparation keeps an exact target on zero navigation", async () => {
+  const target = parseChatGPTTargetUrl("https://chatgpt.com/c/prepared-startup-3");
+  const fake = fakePage(target.url);
+  let navigationCalls = 0;
+  await navigateAndVerifyReplyTargetOnPage(fake.page, target, async () => {
+    navigationCalls += 1;
+    return true;
+  });
+  assert.equal(navigationCalls, 0);
+});
+
 test("targeted reply preserves a project-scoped conversation URL", async () => {
   const targetUrl = "https://chatgpt.com/g/g-p-slug/c/prepared-project-2";
   const fake = fakePage("https://chatgpt.com");
@@ -65,13 +104,15 @@ test("targeted reply preserves a project-scoped conversation URL", async () => {
 test("redirects, login state, and identity mismatches fail before typing", async () => {
   const target = parseChatGPTTargetUrl("https://chatgpt.com/c/prepared-3");
   const redirected = fakePage("https://chatgpt.com");
+  let redirectedLoginChecks = 0;
   await assert.rejects(
     () => ensureReplyTargetOnPage(redirected.page, target, {
       navigate: async (url) => { redirected.setUrl("https://chatgpt.com/auth/login"); return true; },
-      isLoggedIn: async () => true,
+      isLoggedIn: async () => { redirectedLoginChecks += 1; return true; },
     }),
     /redirected/,
   );
+  assert.equal(redirectedLoginChecks, 0);
 
   const notLoggedIn = fakePage(target.url);
   await assert.rejects(
