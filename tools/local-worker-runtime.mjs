@@ -93,6 +93,9 @@ export function createTaskContract(input) {
 
 export function validateTaskContract(task, { verifyGit = false } = {}) {
   if (!isObject(task) || task.version !== TASK_CONTRACT_VERSION) fail("task.version must be 1");
+  const allowedKeys = new Set(["version", "task_id", "repo", "worktree", "cwd", "base_commit", "goal", "allowed_paths", "constraints", "test_command", "timeout", "max_tool_calls", "output_limit"]);
+  const unknownKeys = Object.keys(task).filter((key) => !allowedKeys.has(key));
+  if (unknownKeys.length) fail(`unknown task fields: ${unknownKeys.join(", ")}`);
   asString(task.task_id, "task_id", { max: 200 });
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(task.task_id)) fail("task_id contains unsafe characters");
   const repo = path.resolve(asString(task.repo, "repo", { max: 4096 }));

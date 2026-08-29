@@ -50,6 +50,7 @@ test("parent boundary validates exact Git root and base HEAD", () => {
   assert.equal(boundary.git_root, path.resolve(root));
   assert.equal(boundary.base_matches_head, true);
   assert.deepEqual(captureGitEvidence(root).changed_paths, []);
+  assert.throws(() => validateTaskBoundary({ ...task, cwd: os.tmpdir() }), /cwd|inside/i);
 });
 
 test("parent rejects symlink/reparse allowed paths", (t) => {
