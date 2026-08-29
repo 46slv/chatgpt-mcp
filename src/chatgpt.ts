@@ -14,7 +14,6 @@ import {
   getPage,
   navigateTo,
   findElement,
-  elementExists,
   typeText,
   clickElement,
   wait,
@@ -114,7 +113,7 @@ async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
   const page = await getPage(target.url);
   await ensureReplyTargetOnPage(page, target, {
     navigate: navigateTo,
-    isLoggedIn: checkLoginStatus,
+    isLoggedIn: () => checkLoginStatus(target),
   });
 }
 
@@ -181,14 +180,117 @@ export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<voi
 }
 
 /**
- * Check if user is logged in to ChatGPT
+ * The small, serializable observation used by the authentication gate.  Keep
+ * this separate from Playwright so the fail-closed decision can be unit
+ * tested without a live browser.
  */
-async function checkLoginStatus(): Promise<boolean> {
-  const hasLoggedInIndicator = await elementExists(SELECTORS.loggedInIndicator);
-  const hasLoginPrompt = await elementExists(SELECTORS.loginPrompt);
-  const hasPromptArea = await elementExists(SELECTORS.promptTextarea);
+export interface LoginReadinessSnapshot {
+  composerVisible: boolean;
+  composerEnabled: boolean;
+  authChallengeVisible: boolean;
+  actualUrl?: string;
+}
 
-  return (hasLoggedInIndicator || hasPromptArea) && !hasLoginPrompt;
+/**
+ * Return true only when a page is ready for an authenticated reply.
+ *
+ * A profile/avatar is not sufficient evidence: it can survive a redirect or
+ * be rendered in a stale shell.  Positive evidence is a visible, enabled
+ * composer on the exact canonical target, together with no visible login,
+ * signup, or authentication challenge.  Missing/partial observations are
+ * intentionally treated as false.
+ */
+export function loginReadinessFromSnapshot(
+  snapshot: LoginReadinessSnapshot,
+  expectedTargetUrl?: string,
+): boolean {
+  if (!snapshot || !snapshot.composerVisible || !snapshot.composerEnabled) return false;
+  if (snapshot.authChallengeVisible) return false;
+  if (expectedTargetUrl && snapshot.actualUrl !== expectedTargetUrl) return false;
+  return true;
+}
+
+type LoginReadinessPage = {
+  url(): string;
+  evaluate?: (pageFunction: (input: { composerSelectors: readonly string[] }) => LoginReadinessSnapshot | Promise<LoginReadinessSnapshot>, arg: { composerSelectors: readonly string[] }) => Promise<LoginReadinessSnapshot>;
+};
+
+/**
+ * Inspect the current page's DOM for authenticated composer readiness.
+ * `target` is optional for legacy current-chat calls; targeted callers should
+ * always pass it so this gate independently enforces exact URL identity.
+ */
+export async function checkLoginStatusOnPage(
+  page: LoginReadinessPage,
+  target?: ChatGPTTargetIdentity,
+): Promise<boolean> {
+  const expectedTargetUrl = target?.url;
+  const actualUrl = page.url();
+  if (expectedTargetUrl && actualUrl !== expectedTargetUrl) return false;
+  if (typeof page.evaluate !== 'function') return false;
+
+  try {
+    const observed = await page.evaluate((input) => {
+      const isVisible = (element: Element): boolean => {
+        if (!(element instanceof HTMLElement)) return false;
+        if (element.getAttribute('aria-hidden') === 'true') return false;
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      const isEnabled = (element: Element): boolean => {
+        if (!(element instanceof HTMLElement)) return false;
+        if (element.getAttribute('aria-disabled') === 'true') return false;
+        if ('disabled' in element && Boolean((element as HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement).disabled)) return false;
+        if (element.matches('[contenteditable="false"]')) return false;
+        return true;
+      };
+
+      const composerElements = input.composerSelectors.flatMap((selector) => {
+        try {
+          return Array.from(document.querySelectorAll(selector));
+        } catch {
+          return [];
+        }
+      });
+      const composerVisible = composerElements.some((element) => isVisible(element));
+      const composerEnabled = composerElements.some((element) => isVisible(element) && isEnabled(element));
+
+      // Text is restricted to interactive/auth containers so a conversation
+      // that merely mentions “log in” cannot masquerade as an auth challenge.
+      const authPattern = /\b(?:log\s*in|sign\s*(?:in|up)|create\s+account|continue\s+with\s+(?:google|microsoft|apple)|authentication\s+required)\b/i;
+      const authCandidates = document.querySelectorAll(
+        'button, a, input, label, form, [role="button"], [role="dialog"], [data-testid*="login"], [data-testid*="signup"], [data-testid*="sign-up"], [id*="login"], [id*="signup"], [id*="sign-up"], [class*="login"], [class*="signup"], [class*="sign-up"], [class*="auth"]',
+      );
+      const authChallengeVisible = Array.from(authCandidates).some((element) => {
+        if (!isVisible(element)) return false;
+        const text = [
+          element.textContent || '',
+          element.getAttribute('aria-label') || '',
+          element.getAttribute('placeholder') || '',
+          element.getAttribute('data-testid') || '',
+          element.id || '',
+        ].join(' ');
+        return authPattern.test(text);
+      });
+
+      return { composerVisible, composerEnabled, authChallengeVisible };
+    }, { composerSelectors: SELECTORS.promptTextarea });
+
+    // A redirect or tab switch during DOM evaluation must also fail closed.
+    const finalUrl = page.url();
+    return loginReadinessFromSnapshot({ ...observed, actualUrl: finalUrl }, expectedTargetUrl) && finalUrl === actualUrl;
+  } catch {
+    return false;
+  }
+}
+
+/** Check if the current ChatGPT page is authenticated and ready to type. */
+async function checkLoginStatus(target?: ChatGPTTargetIdentity): Promise<boolean> {
+  const page = await getPage(target?.url);
+  return checkLoginStatusOnPage(page, target);
 }
 
 // ============================================
