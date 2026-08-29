@@ -13,9 +13,9 @@ try {
     print({ registry_path: registryPath, default_target: registry.default_target, targets: registry.targets });
   } else if (command === "current") {
     print(resolveTarget({ registry }));
-  } else if (command === "set") {
+  } else if (command === "set" || command === "register") {
     const [alias, url] = args;
-    if (!alias || !url) throw new Error("set requires <alias> <chat-url>.");
+    if (!alias || !url) throw new Error(`${command} requires <alias> <chat-url>.`);
     setTarget(registry, alias, url); saveRegistry(registry, registryPath);
     print({ registry_path: registryPath, alias, target: registry.targets[alias] });
   } else if (command === "use") {

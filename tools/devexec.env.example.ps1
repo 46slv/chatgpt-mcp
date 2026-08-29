@@ -12,6 +12,9 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 # unless explicitly set to 1. The target alias is frozen at run start; the
 # local model cannot choose the target, tool, or request id.
 # $env:DEV_EXEC_CHATGPT_CONSULT_ENABLED = '1'
+# Prepare the exact conversation first (no trailing slash/query/fragment):
+#   node tools/devexec-target.mjs set main https://chatgpt.com/c/<conversation-id>
+# Then select the alias for consultation:
 # $env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
 # $env:DEV_EXEC_CONSULTATION_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\consultation-state'
 # Optional consultation limits. Out-of-range numeric values are clamped;

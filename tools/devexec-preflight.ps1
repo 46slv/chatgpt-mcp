@@ -71,6 +71,22 @@ $mcpConfig = Join-Path $userHome '.lmstudio\mcp.json'
 $targetRegistry = Join-Path $localAppData 'DevExec\targets.json'
 $consultationStateDir = [Environment]::GetEnvironmentVariable('DEV_EXEC_CONSULTATION_STATE_DIR')
 if ([string]::IsNullOrWhiteSpace($consultationStateDir)) { $consultationStateDir = Join-Path $localAppData 'ChatGPTMCPProbe\consultation-state' }
+$consultationAlias = [Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS')
+$consultationTargetContract = [ordered]@{ alias = $consultationAlias; configured = (-not [string]::IsNullOrWhiteSpace($consultationAlias)); present = $false; canonical = $false; conversation_id_match = $false }
+if ($consultationTargetContract.configured -and (Test-Path -LiteralPath $targetRegistry)) {
+    try {
+        $targetValue = Get-Content -LiteralPath $targetRegistry -Raw | ConvertFrom-Json
+        $property = $targetValue.targets.psobject.Properties[$consultationAlias]
+        $entry = if ($null -ne $property) { $property.Value } else { $null }
+        if ($null -ne $entry) {
+            $consultationTargetContract.present = $true
+            $url = [string]$entry.chat_url
+            $match = [regex]::Match($url, '^https://chatgpt\.com/c/([A-Za-z0-9-]+)$')
+            $consultationTargetContract.canonical = $match.Success
+            $consultationTargetContract.conversation_id_match = $match.Success -and ([string]$entry.conversation_id -eq $match.Groups[1].Value)
+        }
+    } catch { }
+}
 
 $report = [ordered]@{
     protocol = 'devexec.preflight'
@@ -115,6 +131,7 @@ $report = [ordered]@{
         chatgpt_mcp_allow_edge = ([Environment]::GetEnvironmentVariable('CHATGPT_MCP_ALLOW_EDGE') -eq '1')
         chatgpt_consultation_enabled = ([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_ENABLED') -eq '1')
         chatgpt_consultation_target_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS'))
+        chatgpt_consultation_target_contract = $consultationTargetContract
     }
     safety = [ordered]@{
         read_only = $true

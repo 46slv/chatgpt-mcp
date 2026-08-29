@@ -9,14 +9,17 @@ export function defaultRegistryPath(env = process.env) {
   return path.join(base, "DevExec", "targets.json");
 }
 
-export function normalizeChatUrl(value) {
-  if (typeof value !== "string" || value.trim() === "") throw new Error("Target URL must be a non-empty string.");
-  const url = new URL(value.trim());
-  if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") throw new Error("Target URL must use https://chatgpt.com.");
-  const match = url.pathname.match(/^\/c\/([A-Za-z0-9-]+)\/?$/);
-  if (!match) throw new Error("Target URL must be a ChatGPT conversation URL.");
-  return { chat_url: `https://chatgpt.com/c/${match[1]}`, conversation_id: match[1] };
+/** Parse the only URL form accepted for a prepared ChatGPT target. */
+export function parseChatGPTTargetUrl(value) {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) throw new Error("Target URL must be an exact non-empty string.");
+  const match = /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9-]+)$/.exec(value);
+  if (!match) throw new Error("Target URL must exactly match https://chatgpt.com/c/<safe-id> without query, fragment, port, userinfo, trailing slash, or extra path.");
+  const parsed = new URL(value);
+  if (parsed.origin !== "https://chatgpt.com" || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== `/c/${match[1]}`) throw new Error("Target URL is not canonical.");
+  return { chat_url: value, conversation_id: match[1] };
 }
+
+export const normalizeChatUrl = parseChatGPTTargetUrl;
 
 export function emptyRegistry() {
   return { schema_version: SCHEMA_VERSION, default_target: null, targets: {} };
@@ -29,7 +32,8 @@ export function validateRegistry(value) {
   for (const [name, target] of Object.entries(value.targets)) {
     if (!name || !target || typeof target !== "object") throw new Error("Invalid target entry.");
     if (target.transport !== "chatgpt-web") throw new Error(`Unsupported transport for target ${name}.`);
-    normalizeChatUrl(target.chat_url);
+    const normalized = parseChatGPTTargetUrl(target.chat_url);
+    if (target.conversation_id !== undefined && target.conversation_id !== normalized.conversation_id) throw new Error(`Target conversation_id does not match alias ${name}.`);
   }
   if (value.default_target !== null && !Object.prototype.hasOwnProperty.call(value.targets, value.default_target)) {
     throw new Error("default_target does not exist in targets.");
@@ -61,9 +65,9 @@ export function setTarget(registry, name, chatUrl, metadata = {}) {
   const normalized = normalizeChatUrl(chatUrl);
   registry.targets[name] = {
     transport: "chatgpt-web",
+    ...metadata,
     chat_url: normalized.chat_url,
     conversation_id: normalized.conversation_id,
-    ...metadata,
   };
   return registry.targets[name];
 }
@@ -92,7 +96,7 @@ function readProjectTarget(startDir) {
 }
 
 function resolvedTarget(alias, target, source, extra = {}) {
-  const normalized = normalizeChatUrl(target.chat_url);
+  const normalized = parseChatGPTTargetUrl(target.chat_url);
   return {
     target_id: alias,
     transport: target.transport || "chatgpt-web",
@@ -101,6 +105,30 @@ function resolvedTarget(alias, target, source, extra = {}) {
     source,
     ...extra,
   };
+}
+
+/** Freeze the target identity used by one worker run. */
+export function freezeTarget(target, { frozenAt = new Date().toISOString() } = {}) {
+  if (!target || typeof target !== "object") throw new Error("Target is required to freeze.");
+  const alias = target.alias || target.target_id;
+  if (typeof alias !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) throw new Error("Target alias is required to freeze.");
+  const normalized = parseChatGPTTargetUrl(target.url || target.chat_url);
+  const source = typeof target.source === "string" && target.source ? target.source : "unknown";
+  const value = { alias, url: normalized.chat_url, conversation_id: normalized.conversation_id, source, frozen_at: String(frozenAt) };
+  return Object.freeze(value);
+}
+
+/** Re-resolve an alias at resume and reject any identity drift. */
+export function verifyFrozenTarget(frozenTarget, { registry = loadRegistry(), cwd = process.cwd() } = {}) {
+  if (!frozenTarget || typeof frozenTarget !== "object") throw new Error("Frozen target is missing.");
+  const frozen = freezeTarget(frozenTarget, { frozenAt: frozenTarget.frozen_at });
+  let current;
+  try { current = resolveTarget({ explicitTarget: frozen.alias, cwd, registry }); }
+  catch (error) { const e = new Error(`Frozen target alias is unavailable: ${frozen.alias}`); e.code = "TARGET_FROZEN_ALIAS_UNAVAILABLE"; e.cause = error; throw e; }
+  if (current.chat_url !== frozen.url || current.conversation_id !== frozen.conversation_id) {
+    const e = new Error(`Frozen target alias changed: ${frozen.alias}`); e.code = "TARGET_FROZEN_MISMATCH"; throw e;
+  }
+  return frozen;
 }
 
 export function resolveTarget({ explicitTarget = null, cwd = process.cwd(), registry = loadRegistry(), legacyUrl = process.env.CHATGPT_MCP_CHAT_URL || null } = {}) {
@@ -184,7 +212,7 @@ export async function captureCurrentChat({ cdpBase = "http://127.0.0.1:9222" } =
   const targets = await response.json();
   const candidates = targets.filter((target) =>
     target.type === "page" &&
-    /^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]+(?:[/?#].*)?$/.test(target.url || "") &&
+    /^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]+$/.test(target.url || "") &&
     target.webSocketDebuggerUrl
   );
   const inspected = [];

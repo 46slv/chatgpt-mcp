@@ -1,4 +1,4 @@
-export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,plan,execute,consult,onProgress=()=>{}}){
+export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,plan,execute,consult,target=null,onProgress=()=>{}}){
  if(!mission||typeof plan!=="function"||typeof execute!=="function")throw new Error("iterative local worker arguments invalid");
  if(!Number.isInteger(maxRounds)||maxRounds<1||maxRounds>10)throw new Error("invalid planner round budget");
  for(let round=1;round<=maxRounds;round++){
@@ -9,7 +9,7 @@ export async function runIterativeLocalWorker({mission,actions=[],maxRounds=3,pl
   if(typeof consult!=="function")throw new Error("planner requested consultation but no consultation callback is configured");
   const consultationIndex=actions.filter(x=>x?.type==="CONSULTATION").length+1;
   const requestId="C-R"+String(round).padStart(2,"0")+"-"+String(consultationIndex).padStart(2,"0");
-  const result=await consult(decision.prompt,requestId);
+  const result=await consult(decision.prompt,requestId,target);
   if(!result||!["RESPONSE_RECEIVED","BLOCKED","DELIVERY_UNKNOWN"].includes(result.status))throw new Error("consultation callback returned invalid status");
   actions.push({type:"CONSULTATION",prompt:decision.prompt,request_id:requestId,result,planner_round:round});
   await onProgress({round,consultation:{prompt:decision.prompt,requestId},result,actions});

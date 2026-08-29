@@ -66,6 +66,7 @@ function usage() {
  " devexec target list",
  " devexec target current",
  " devexec target set <alias> <chat-url>",
+ " devexec target register <alias> <chat-url>",
  " devexec target use <alias>",
  " devexec target capture <alias>",
  " devexec goal <goal> [--target <alias>]",

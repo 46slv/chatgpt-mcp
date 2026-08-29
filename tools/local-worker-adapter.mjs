@@ -14,7 +14,7 @@ import { inspectLocalPlannerContext, recordContextDecision, buildRotatedPlannerP
 import { persistSessionCheckpoint, appendSessionEvent } from "./local-worker-session-checkpoint.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { loadRegistry, resolveTarget } from "./target-registry.mjs";
+import { freezeTarget, loadRegistry, resolveTarget, verifyFrozenTarget } from "./target-registry.mjs";
 import { consultationConfig, createChatgptReplyAdapter, createConsultationRunner } from "./devexec-consultation.mjs";
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR = path.join(BASE, "ChatGPTMCPProbe", "local-worker-runs");
@@ -69,14 +69,20 @@ async function start(mission){
  if(!mission||!mission.trim())throw new Error("mission required");
  const id=runId();
  const s={protocol:"devexec.local-worker",schema_version:1,run_id:id,backend:"lms-cli+local-executor",model:MODEL,profile:PROFILE,mission:mission,status:"RUNNING",created_at:new Date().toISOString(),actions:[],planner_rounds:0,report:null,error:null};
+ let frozenTarget=null;
+ if(CONSULTATION_OPT_IN&&CONSULTATION_TARGET_ALIAS){
+  try { frozenTarget=freezeTarget(resolveTarget({explicitTarget:CONSULTATION_TARGET_ALIAS,cwd:PROBE_ROOT,registry:loadRegistry()})); s.target=frozenTarget; }
+  catch(error) { s.target_error={code:error.code||"TARGET_FREEZE_FAILED",reason:String(error?.message||error)}; }
+ }
  save(s);
- const consult=makeConsultationCallback(id);
+ const consult=makeConsultationCallback(id,{fixedTarget:frozenTarget,targetAlias:CONSULTATION_TARGET_ALIAS});
  try{
  const outcome=await runIterativeLocalWorker({
  mission:mission,
  actions:s.actions,
    maxRounds:MAX_PLANNER_ROUNDS,
    consult,
+   target:frozenTarget,
  plan:async function(ctx){
  s.planner_rounds=ctx.round;
  save(s);
@@ -119,12 +125,13 @@ async function start(mission){
  */
 export function makeConsultationCallback(id, overrides = {}){
  const config=overrides.config || CONSULTATION_CONFIG;
- const targetAlias=overrides.targetAlias === undefined ? CONSULTATION_TARGET_ALIAS : overrides.targetAlias;
+ const suppliedTarget=overrides.fixedTarget || overrides.frozenTarget || null;
+ const targetAlias= suppliedTarget?.alias || (overrides.targetAlias === undefined ? CONSULTATION_TARGET_ALIAS : overrides.targetAlias);
  const stateDir=overrides.stateDir || CONSULTATION_STATE_DIR;
  let consultation=null;
- let fixedTarget=overrides.fixedTarget || null;
+ let fixedTarget=suppliedTarget ? freezeTarget(suppliedTarget, { frozenAt: suppliedTarget.frozen_at }) : null;
  let targetError=null;
- if(config.enabled&&targetAlias&&!fixedTarget){try{fixedTarget=(overrides.resolveTarget || resolveTarget)({explicitTarget:targetAlias,cwd:overrides.cwd || PROBE_ROOT,registry:(overrides.loadRegistry || loadRegistry)()});}catch(error){targetError=String(error?.message||error);}}
+ if(config.enabled&&targetAlias&&!fixedTarget){try{fixedTarget=freezeTarget((overrides.resolveTarget || resolveTarget)({explicitTarget:targetAlias,cwd:overrides.cwd || PROBE_ROOT,registry:(overrides.loadRegistry || loadRegistry)()}));}catch(error){targetError=String(error?.message||error);}}
  return async function consult(prompt,requestId){
   if(!config.enabled||!targetAlias)return {status:"BLOCKED",request_id:requestId,reason:config.valid===false?"invalid_consultation_configuration":"standing_opt_in_required_or_target_missing"};
   if(targetError||!fixedTarget)return {status:"BLOCKED",request_id:requestId,reason:"fixed_target_unavailable"};
@@ -137,18 +144,18 @@ export function makeConsultationCallback(id, overrides = {}){
     if(!server?.command)return {status:"BLOCKED",request_id:requestId,reason:"chatgpt_web_probe_unavailable"};
     transport=createChatgptReplyAdapter({timeoutMinutes:config.timeoutMinutes,callTool:async(tool)=>{
      const client=new Client({name:"devexec-local-consultation",version:"1.0.0"});
-     const channel=new StdioClientTransport({command:server.command,args:server.args||[],env:{...process.env,...(server.env||{}),CHATGPT_MCP_CHAT_URL:target.chat_url,DEV_EXEC_TARGET_ID:target.target_id,DEV_EXEC_TARGET_SOURCE:target.source}});
+     const channel=new StdioClientTransport({command:server.command,args:server.args||[],env:{...process.env,...(server.env||{}),CHATGPT_MCP_CHAT_URL:target.url,DEV_EXEC_TARGET_ID:target.alias,DEV_EXEC_TARGET_SOURCE:target.source}});
      try { await client.connect(channel); const listed=await client.listTools(); if(!listed.tools.some(x=>x.name==="chatgpt_reply"))throw new Error("chatgpt_reply unavailable"); return await client.callTool(tool); } finally { try{await client.close();}catch{} }
     }});
    }
-   consultation=createConsultationRunner({stateDir,runId:id,enabled:config.enabled,targetAlias:target.target_id,targetUrl:target.chat_url,maxRequests:config.maxRequests,maxChars:config.maxChars,evidenceChars:config.evidenceChars,timeoutMinutes:config.timeoutMinutes,transport});
+   consultation=createConsultationRunner({stateDir,runId:id,enabled:config.enabled,targetAlias:target.alias || target.target_id,targetUrl:target.url || target.chat_url,targetConversationId:target.conversation_id,targetSource:target.source,frozenTarget:target,maxRequests:config.maxRequests,maxChars:config.maxChars,evidenceChars:config.evidenceChars,timeoutMinutes:config.timeoutMinutes,transport});
   }
   return consultation.request(prompt,requestId);
  }
 }
 function status(id){const s=load(id);console.log(JSON.stringify({run_id:s.run_id,status:s.status,backend:s.backend,model:s.model},null,2));return 0;}
 function collect(id){console.log(JSON.stringify(load(id),null,2));return 0;}
-async function resume(id){const s=load(id);if(["DONE","CANCELLED"].includes(s.status)){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"terminal"},null,2));return 0;}const rf=repairPath();if(!rf){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"DEV_EXEC_RUN_ID required for supervisor repair"},null,2));return 2;}const repair=consumeLocalWorkerRepair(rf,s);if(!repair){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"supervisor repair not available",repair_file:rf},null,2));return 2;}try{s.status="RUNNING";s.error=null;s.completed_at=null;save(s);const outcome=await runLocalWorkerResume({mission:s.mission,actions:s.actions,repair,maxRounds:MAX_PLANNER_ROUNDS,plan:async ctx=>askPlannerDecision(ctx.mission,ctx.evidence,ctx.round,ctx.maxRounds,s),execute:async(action,args,requestId)=>callExecutor(action,args,id+"-RESUME-"+requestId),onProgress:async()=>save(s)});s.status="DONE";s.error=null;s.report={summary:outcome.summary,evidence:s.actions.map(x=>({action:x.action,args:x.args,status:x.result.status,stdout:x.result.stdout?.text||"",repair:x.repair===true}))};s.completed_at=new Date().toISOString();s.cloud_handoff={status:"REPAIRED",consumed_file:repair.consumed_file};save(s);if(process.env.DEV_EXEC_RUN_ID){const ef=path.join(BASE,"ChatGPTMCPProbe","dev-exec-runs",validateExternalRunId(process.env.DEV_EXEC_RUN_ID),"mission-escalation.json");if(fs.existsSync(ef)){const archived=ef+".resolved-"+Date.now();fs.renameSync(ef,archived);s.cloud_handoff.resolved_escalation_file=archived;save(s);}}console.log(JSON.stringify({run_id:id,status:s.status,resumed:true,repair_mode:repair.mode},null,2));return 0;}catch(error){s.status="FAILED";s.error=String(error?.stack||error);s.completed_at=new Date().toISOString();save(s);try{const h=writeLocalWorkerEscalation(s);s.cloud_handoff={status:"WRITTEN",file:h.file};save(s);}catch{}console.log(JSON.stringify({run_id:id,status:s.status,resumed:true,repair_mode:repair.mode},null,2));return 2;}}
+async function resume(id){const s=load(id);if(["DONE","CANCELLED"].includes(s.status)){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"terminal"},null,2));return 0;}const rf=repairPath();if(!rf){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"DEV_EXEC_RUN_ID required for supervisor repair"},null,2));return 2;}const repair=consumeLocalWorkerRepair(rf,s);if(!repair){console.log(JSON.stringify({run_id:id,status:s.status,resumed:false,reason:"supervisor repair not available",repair_file:rf},null,2));return 2;}try{let frozenTarget=s.target||null;if(frozenTarget){if(CONSULTATION_TARGET_ALIAS&&CONSULTATION_TARGET_ALIAS!==frozenTarget.alias){const e=new Error("Configured consultation alias differs from frozen run target");e.code="TARGET_FROZEN_ALIAS_CHANGED";throw e;}frozenTarget=verifyFrozenTarget(frozenTarget,{cwd:PROBE_ROOT,registry:loadRegistry()});s.target=frozenTarget;}s.status="RUNNING";s.error=null;s.completed_at=null;save(s);const consult=makeConsultationCallback(id,{fixedTarget:frozenTarget,targetAlias:frozenTarget?.alias||CONSULTATION_TARGET_ALIAS});const outcome=await runLocalWorkerResume({mission:s.mission,actions:s.actions,repair,maxRounds:MAX_PLANNER_ROUNDS,plan:async ctx=>askPlannerDecision(ctx.mission,ctx.evidence,ctx.round,ctx.maxRounds,s),execute:async(action,args,requestId)=>callExecutor(action,args,id+"-RESUME-"+requestId),consult,target:frozenTarget,onProgress:async()=>save(s)});s.status="DONE";s.error=null;s.report={summary:outcome.summary,evidence:s.actions.map(x=>({action:x.action,args:x.args,status:x.result.status,stdout:x.result.stdout?.text||"",repair:x.repair===true}))};s.completed_at=new Date().toISOString();s.cloud_handoff={status:"REPAIRED",consumed_file:repair.consumed_file};save(s);if(process.env.DEV_EXEC_RUN_ID){const ef=path.join(BASE,"ChatGPTMCPProbe","dev-exec-runs",validateExternalRunId(process.env.DEV_EXEC_RUN_ID),"mission-escalation.json");if(fs.existsSync(ef)){const archived=ef+".resolved-"+Date.now();fs.renameSync(ef,archived);s.cloud_handoff.resolved_escalation_file=archived;save(s);}}console.log(JSON.stringify({run_id:id,status:s.status,resumed:true,repair_mode:repair.mode},null,2));return 0;}catch(error){s.status="FAILED";s.error=String(error?.stack||error);s.completed_at=new Date().toISOString();save(s);try{const h=writeLocalWorkerEscalation(s);s.cloud_handoff={status:"WRITTEN",file:h.file};save(s);}catch{}console.log(JSON.stringify({run_id:id,status:s.status,resumed:true,repair_mode:repair.mode},null,2));return 2;}}
 function stop(id){const s=load(id);if(!["DONE","FAILED","BLOCKED","CANCELLED"].includes(s.status)){s.status="CANCELLED";s.completed_at=new Date().toISOString();save(s);}console.log(JSON.stringify({run_id:id,status:s.status},null,2));return 0;}
 if(process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))){
  const [command,...rest]=process.argv.slice(2);let code=0;try{if(command==="start")code=await start(rest.join(" "));else if(command==="status")code=status(rest[0]);else if(command==="collect")code=collect(rest[0]);else if(command==="resume")code=await resume(rest[0]);else if(command==="stop")code=stop(rest[0]);else throw new Error("usage: local-worker-adapter.mjs start <mission> | status <run_id> | collect <run_id> | resume <run_id> | stop <run_id>");}catch(error){console.error(String(error?.stack||error));code=2;}process.exitCode=code;

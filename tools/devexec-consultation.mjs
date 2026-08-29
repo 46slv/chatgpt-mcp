@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { parseChatGPTTargetUrl } from "./target-registry.mjs";
 
 export const CONSULTATION_PROTOCOL = "devexec.chatgpt-consultation";
 export const CONSULTATION_SCHEMA_VERSION = 1;
@@ -89,7 +90,7 @@ function defaultState(runId, target, limits = {}) {
   return { protocol: CONSULTATION_PROTOCOL, schema_version: CONSULTATION_SCHEMA_VERSION, run_id: validId(runId), target, limits, phase: "PREPARED", active_request_id: null, requests: {}, updated_at: new Date().toISOString() };
 }
 
-export function createConsultationRunner({ stateDir, runId, enabled = false, targetAlias, targetUrl = null, transport, maxChars = DEFAULT_CONSULTATION_MAX_CHARS, evidenceChars = DEFAULT_CONSULTATION_EVIDENCE_CHARS, maxRequests = DEFAULT_CONSULTATION_MAX_REQUESTS, timeoutMinutes = DEFAULT_CONSULTATION_TIMEOUT_MINUTES } = {}) {
+export function createConsultationRunner({ stateDir, runId, enabled = false, targetAlias, targetUrl = null, targetConversationId = null, targetSource = "unknown", frozenTarget = null, transport, maxChars = DEFAULT_CONSULTATION_MAX_CHARS, evidenceChars = DEFAULT_CONSULTATION_EVIDENCE_CHARS, maxRequests = DEFAULT_CONSULTATION_MAX_REQUESTS, timeoutMinutes = DEFAULT_CONSULTATION_TIMEOUT_MINUTES } = {}) {
   if (!stateDir || !runId) throw new Error("consultation stateDir and runId required");
   validId(runId);
   if (!transport || typeof transport.chatgpt_reply !== "function") throw new Error("fixed chatgpt_reply transport required");
@@ -98,10 +99,14 @@ export function createConsultationRunner({ stateDir, runId, enabled = false, tar
   if (!Number.isInteger(evidenceChars) || evidenceChars < 1 || evidenceChars > 12000) throw new Error("invalid consultation evidence budget");
   if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 10) throw new Error("invalid consultation request count budget");
   if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 120) throw new Error("invalid consultation timeout budget");
+  const parsedTarget = frozenTarget ? parseChatGPTTargetUrl(frozenTarget.url) : (targetUrl ? parseChatGPTTargetUrl(targetUrl) : null);
+  if (frozenTarget && (frozenTarget.alias !== targetAlias || frozenTarget.conversation_id !== parsedTarget.conversation_id)) throw new Error("frozen consultation target mismatch");
+  const expectedTarget = { alias: targetAlias, url: parsedTarget?.chat_url || null, conversation_id: targetConversationId || parsedTarget?.conversation_id || null, source: frozenTarget?.source || targetSource || "unknown", frozen_at: frozenTarget?.frozen_at || new Date().toISOString() };
   const file = path.join(stateDir, `${runId}.json`);
-  let state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : defaultState(runId, { alias: targetAlias, url: targetUrl, frozen_at: new Date().toISOString() }, { max_chars: maxChars, evidence_chars: evidenceChars, max_requests: maxRequests, timeout_minutes: timeoutMinutes });
+  let state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : defaultState(runId, expectedTarget, { max_chars: maxChars, evidence_chars: evidenceChars, max_requests: maxRequests, timeout_minutes: timeoutMinutes });
   if (state.run_id !== runId || state.protocol !== CONSULTATION_PROTOCOL || state.schema_version !== CONSULTATION_SCHEMA_VERSION) throw new Error("consultation state mismatch");
-  if (state.target?.alias !== targetAlias || (targetUrl && state.target.url && state.target.url !== targetUrl)) throw new Error("consultation target is not frozen");
+  if (state.target?.alias !== targetAlias || (expectedTarget.url && state.target.url !== expectedTarget.url) || (expectedTarget.conversation_id && state.target.conversation_id && state.target.conversation_id !== expectedTarget.conversation_id)) throw new Error("consultation target is not frozen");
+  if (expectedTarget.url && !state.target.conversation_id) state.target = { ...state.target, ...expectedTarget };
   fs.mkdirSync(stateDir, { recursive: true });
   function save() { state.updated_at = new Date().toISOString(); const tmp = `${file}.tmp-${process.pid}`; fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8"); fs.renameSync(tmp, file); }
   function result(record, extra = {}) { return { status: record.phase, request_id: record.request_id, request_sha256: record.request_sha256, target_alias: targetAlias, response_evidence: record.response_evidence || null, reason: record.reason || null, ...extra }; }

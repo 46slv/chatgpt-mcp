@@ -51,7 +51,23 @@ Edge is never selected implicitly; use `-AllowEdge` (or set
 
 ## 3. Capture and verify a target
 
-With the intended ChatGPT conversation open in the CDP Chrome window:
+You can register a user-prepared conversation directly. The URL must be
+exactly `https://chatgpt.com/c/<safe-id>` (no trailing slash, query, fragment,
+port, userinfo, or extra path):
+
+```powershell
+node tools/devexec-target.mjs set my-chat https://chatgpt.com/c/<conversation-id>
+node tools/devexec-target.mjs use my-chat
+```
+
+`register` is an equivalent spelling of `set`. The selected alias is frozen at
+the beginning of each local-worker run, before the local planner is consulted;
+the planner cannot choose a URL, target alias, MCP tool, or request ID. Resume
+reuses the persisted frozen `{alias,url,conversation_id,source,frozen_at}` and
+fails closed if the alias is missing or points to another conversation.
+
+With the intended ChatGPT conversation open in the CDP Chrome window, a target
+may also be captured and then verified:
 
 ```powershell
 node tools/devexec-target.mjs capture main
