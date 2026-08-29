@@ -72,6 +72,13 @@ $targetRegistry = Join-Path $localAppData 'DevExec\targets.json'
 $consultationStateDir = [Environment]::GetEnvironmentVariable('DEV_EXEC_CONSULTATION_STATE_DIR')
 if ([string]::IsNullOrWhiteSpace($consultationStateDir)) { $consultationStateDir = Join-Path $localAppData 'ChatGPTMCPProbe\consultation-state' }
 $consultationAlias = [Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS')
+$cdpUrlValue = [Environment]::GetEnvironmentVariable('CHATGPT_MCP_CDP_URL')
+$cdpUrlConfigured = -not [string]::IsNullOrWhiteSpace($cdpUrlValue)
+$cdpUrlValid = $null
+if ($cdpUrlConfigured) {
+    $cdpMatch = [regex]::Match($cdpUrlValue, '^http://(127\.0\.0\.1|localhost):([0-9]{1,5})$')
+    $cdpUrlValid = $cdpMatch.Success -and ([int]$cdpMatch.Groups[2].Value -ge 1) -and ([int]$cdpMatch.Groups[2].Value -le 65535)
+}
 $consultationTargetContract = [ordered]@{ alias = $consultationAlias; configured = (-not [string]::IsNullOrWhiteSpace($consultationAlias)); present = $false; canonical = $false; conversation_id_match = $false }
 if ($consultationTargetContract.configured -and (Test-Path -LiteralPath $targetRegistry)) {
     try {
@@ -128,6 +135,8 @@ $report = [ordered]@{
         chatgpt_mcp_user_data_dir_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR'))
         chatgpt_mcp_chrome_path_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHROME_PATH'))
         chatgpt_mcp_chat_url_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHAT_URL'))
+        chatgpt_mcp_cdp_url_set = $cdpUrlConfigured
+        chatgpt_mcp_cdp_url_valid = $cdpUrlValid
         chatgpt_mcp_allow_edge = ([Environment]::GetEnvironmentVariable('CHATGPT_MCP_ALLOW_EDGE') -eq '1')
         chatgpt_consultation_enabled = ([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_ENABLED') -eq '1')
         chatgpt_consultation_target_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS'))

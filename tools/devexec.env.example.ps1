@@ -45,6 +45,10 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 # $env:CHATGPT_MCP_CDP_PORT = '9222'
 # $env:CHATGPT_MCP_CHAT_URL = 'https://chatgpt.com'
 # $env:CHATGPT_MCP_ALLOW_EDGE = '0'
+# Optional attach transport: connect to an already-running, visible browser
+# instead of launching a private persistent context. Only localhost endpoints
+# are accepted, and shutdown disconnects without closing Chrome.
+# $env:CHATGPT_MCP_CDP_URL = 'http://127.0.0.1:9222'
 
 # Optional DevExec state/run roots. Keep runtime state outside this repository.
 # $env:DEV_EXEC_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\dev-exec-state'

@@ -20,6 +20,7 @@ import {
   wait,
   saveStorageState,
   isBrowserRunning,
+  isBrowserAttached,
   launchBrowser,
 } from './browser.js';
 import { fibonacciBackoff, sleep } from './utils/backoff.js';
@@ -107,7 +108,10 @@ export async function ensureReplyTargetOnPage(
 }
 
 async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
-  const page = await getPage();
+  // In CDP attach mode this re-selects the exact prepared tab before any
+  // navigation.  If it is not open, selection falls back only to a focused
+  // same-origin ChatGPT page; extension/browser UI pages are never eligible.
+  const page = await getPage(target.url);
   await ensureReplyTargetOnPage(page, target, {
     navigate: navigateTo,
     isLoggedIn: checkLoginStatus,
@@ -121,13 +125,23 @@ async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
 /**
  * Auto-start session on first call. Not exposed as a tool.
  */
-export async function ensureSession(): Promise<void> {
+export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<void> {
   if (sessionInitialized && isBrowserRunning()) {
+    if (target) await getPage(target.url);
     return;
   }
 
-  await launchBrowser();
-  const success = await navigateTo(CONFIG.chatgptUrl);
+  await launchBrowser(target?.url);
+  const currentPage = await getPage(target?.url);
+
+  // A CDP attach session already has a user-controlled ChatGPT tab.  Preserve
+  // an exact prepared target and avoid navigating it away to the home page.
+  // For an attached non-ChatGPT page, navigate the selected safe page to home
+  // so legacy ask flows still have a usable composer.
+  let success = true;
+  if (!isBrowserAttached() || !/^https:\/\/chatgpt\.com(?:\/|$)/.test(currentPage.url())) {
+    success = await navigateTo(CONFIG.chatgptUrl);
+  }
   if (!success) {
     throw new Error('Failed to navigate to ChatGPT');
   }
@@ -823,7 +837,7 @@ export async function blockingReply(
     // Legacy callers omit options and retain the historical current-chat
     // behavior.
     const target = resolveReplyTarget(options);
-    await ensureSession();
+    await ensureSession(target || undefined);
 
     if (target) {
       await ensureReplyTarget(target);
@@ -837,7 +851,7 @@ export async function blockingReply(
       // A successful poll is not sufficient evidence that the response came
       // from the frozen conversation. Re-read and validate the canonical URL
       // after generation so a redirect/tab switch becomes an explicit error.
-      const page = await getPage();
+      const page = await getPage(target.url);
       const finalTarget = parseChatGPTTargetUrl(page.url());
       if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
         throw new Error('Target conversation identity mismatch after response.');

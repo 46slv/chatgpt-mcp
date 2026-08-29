@@ -49,6 +49,22 @@ non-CDP process owns the port, it reports `blocked_port_in_use`; choose another
 Edge is never selected implicitly; use `-AllowEdge` (or set
 `CHATGPT_MCP_ALLOW_EDGE=1`) only when Edge compatibility is intentional.
 
+The MCP server can attach to that already-running browser instead of launching
+its own persistent context. Set the exact loopback endpoint in the same shell
+before starting the server:
+
+```powershell
+$env:CHATGPT_MCP_CDP_URL = 'http://127.0.0.1:9222'
+```
+
+Only `http://127.0.0.1:<port>` and `http://localhost:<port>` are accepted.
+Attach mode never launches a second profile and shutdown only disconnects the
+CDP transport; it does not close Chrome, pages, cookies, or the profile. The
+server chooses an exact prepared conversation tab first, then a focused
+same-origin ChatGPT tab, then the first same-origin tab. Extension pages,
+`chrome://` pages, DevTools, and an empty browser fail closed. Leave this
+variable unset to retain the legacy private persistent-context behavior.
+
 ## 3. Capture and verify a target
 
 You can register a user-prepared conversation directly. The URL must be
