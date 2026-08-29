@@ -55,7 +55,11 @@ async function defaultRequest(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
   let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = { text: text.slice(0, 2000) }; }
-  if (!response.ok) throw failure(response.status === 409 || response.status === 425 ? FREETOKEN_FAILURES.PORT_COLLISION : FREETOKEN_FAILURES.SERVER_FAILURE, `FreeToken HTTP ${response.status}`, { status: response.status, body });
+  if (!response.ok) {
+    const bodyCode = classifyFreeTokenFailure(new Error(typeof body === "string" ? body : JSON.stringify(body)));
+    const code = response.status === 409 || response.status === 425 ? FREETOKEN_FAILURES.PORT_COLLISION : bodyCode === FREETOKEN_FAILURES.SERVER_FAILURE ? FREETOKEN_FAILURES.SERVER_FAILURE : bodyCode;
+    throw failure(code, `FreeToken HTTP ${response.status}`, { status: response.status, body });
+  }
   return { status: response.status, body };
 }
 
@@ -137,7 +141,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       const ready = await waitReady(signal);
       return { status: "READY", owned: startedByAdapter, ready };
     } catch (error) {
-      const code = classifyFreeTokenFailure(error);
+      const code = signal?.aborted ? FREETOKEN_FAILURES.CANCELLED : classifyFreeTokenFailure(error);
       await stop();
       return { status: "BLOCKED", code, reason: String(error.message || error) };
     }
