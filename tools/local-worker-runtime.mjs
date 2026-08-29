@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 
 export const TASK_CONTRACT_VERSION = 1;
@@ -8,8 +9,11 @@ export const RESULT_CONTRACT_VERSION = 1;
 const MAX_GOAL_CHARS = 12000;
 const MAX_PATHS = 128;
 const MAX_CONSTRAINTS = 64;
+const MAX_EVIDENCE_PATHS = 256;
+const MAX_RESULT_CHANGED_FILES = 256;
 const FORBIDDEN_COMMAND = /(?:^|[^a-z])(git\s+(?:commit|reset|clean|checkout|restore|rebase|push)|(?:rm|del|erase|rmdir|remove-item|format|shutdown|restart-computer)(?:\s|$)|\b(?:curl|wget|invoke-webrequest)\b)/i;
 const SHELL_META = /[;&|><`$(){}]/;
+const SHELL_EXECUTABLE = /^(?:cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?|bash|sh|zsh|fish)(?:\.exe)?$/i;
 
 export class LocalRuntimeContractError extends Error {
   constructor(message, code = "INVALID_LOCAL_RUNTIME_CONTRACT") {
@@ -67,6 +71,10 @@ export function normalizeTestCommand(value) {
   // interpreter argument (for example `node -e "..."`) are safe. String
   // commands still need the stricter shell-metacharacter check.
   if ((!fromArray && SHELL_META.test(joined)) || FORBIDDEN_COMMAND.test(joined)) fail("test_command contains forbidden syntax", "TEST_COMMAND_DENIED");
+  // A shell launched as the test executable defeats shell:false and can
+  // reintroduce redirection/command chaining. Direct interpreters (node,
+  // python, npm, etc.) remain allowed; callers must pass argv, never a shell.
+  if (SHELL_EXECUTABLE.test(path.basename(argv[0]))) fail("test_command shell executable is not allowed", "TEST_COMMAND_DENIED");
   return argv;
 }
 
@@ -202,15 +210,28 @@ function parseStatusPorcelain(raw) {
   return entries.filter(Boolean).map((entry) => entry.replaceAll("\\", "/"));
 }
 
-export function captureGitEvidence(worktree) {
+export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } = {}) {
   const root = path.resolve(worktree);
   const head = runGit(root, ["rev-parse", "HEAD"]).toLowerCase();
   const statusRaw = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { encoding: "utf8", windowsHide: true, timeout: 20000 });
   const statusPaths = parseStatusPorcelain(statusRaw);
   const diffRaw = execFileSync("git", ["-C", root, "diff", "HEAD", "--name-only", "--no-renames"], { encoding: "utf8", windowsHide: true, timeout: 20000 });
   const diffPaths = diffRaw.split(/\r?\n/).filter(Boolean).map((x) => x.replaceAll("\\", "/"));
-  const changedPaths = [...new Set([...statusPaths, ...diffPaths])].sort();
-  return { head_commit: head, status_paths: statusPaths, diff_paths: diffPaths, changed_paths: changedPaths, diff_available: changedPaths.length > 0 };
+  const allChangedPaths = [...new Set([...statusPaths, ...diffPaths])].sort();
+  const bounded = Number.isInteger(maxPaths) && maxPaths > 0 ? maxPaths : MAX_EVIDENCE_PATHS;
+  const pathsTruncated = allChangedPaths.length > bounded;
+  // Keep evidence bounded, but retain a count so the parent can fail closed
+  // instead of accepting an incomplete changed-file claim.
+  const changedPaths = allChangedPaths.slice(0, bounded);
+  return {
+    head_commit: head,
+    status_paths: statusPaths.slice(0, bounded),
+    diff_paths: diffPaths.slice(0, bounded),
+    changed_paths: changedPaths,
+    changed_path_count: allChangedPaths.length,
+    paths_truncated: pathsTruncated,
+    diff_available: allChangedPaths.length > 0,
+  };
 }
 
 function pathAllowed(relative, allowed) {
@@ -230,7 +251,7 @@ export function killProcessTree(child, { platform = process.platform, taskkill =
   } catch { return false; }
 }
 
-export function runTestCommand(task, { timeoutMs = task.timeout, outputLimit = task.output_limit, spawnImpl = spawn, killTree = killProcessTree } = {}) {
+export function runTestCommand(task, { timeoutMs = task.timeout, outputLimit = task.output_limit, spawnImpl = spawn, killTree = killProcessTree, signal } = {}) {
   const argv = normalizeTestCommand(task.test_command);
   return new Promise((resolve) => {
     const started = Date.now();
@@ -238,36 +259,78 @@ export function runTestCommand(task, { timeoutMs = task.timeout, outputLimit = t
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let cancelled = false;
+    let settled = false;
     const append = (current, chunk) => {
       const next = current + String(chunk);
       return next.length <= outputLimit ? next : `${next.slice(0, Math.floor(outputLimit / 2))}...[TRUNCATED]...${next.slice(-Math.floor(outputLimit / 2))}`;
     };
     child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
     child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener?.("abort", onAbort); resolve(value); };
+    const onAbort = () => { cancelled = true; killTree(child); };
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeoutMs);
-    child.on("error", (error) => { clearTimeout(timer); resolve({ status: "FAIL", exit_code: null, timed_out: timedOut, stdout, stderr: append(stderr, error.message), wall_time_ms: Date.now() - started }); });
-    child.on("close", (code, signal) => { clearTimeout(timer); resolve({ status: !timedOut && code === 0 ? "PASS" : "FAIL", exit_code: code, signal: signal || null, timed_out: timedOut, stdout, stderr, wall_time_ms: Date.now() - started }); });
+    if (signal?.aborted) onAbort(); else signal?.addEventListener?.("abort", onAbort, { once: true });
+    child.on("error", (error) => finish({ status: cancelled ? "CANCELLED" : "FAIL", exit_code: null, timed_out: timedOut, cancelled, stdout, stderr: append(stderr, error.message), wall_time_ms: Date.now() - started }));
+    child.on("close", (code, closeSignal) => finish({ status: cancelled ? "CANCELLED" : (!timedOut && code === 0 ? "PASS" : "FAIL"), exit_code: code, signal: closeSignal || null, timed_out: timedOut, cancelled, stdout, stderr, wall_time_ms: Date.now() - started }));
   });
+}
+
+function normalizeTestEvidence(value, outputLimit) {
+  if (!isObject(value) || typeof value.status !== "string") return { status: "FAIL", malformed: true, stdout: "", stderr: "malformed test result" };
+  const status = ["PASS", "FAIL", "CANCELLED"].includes(value.status) ? value.status : "FAIL";
+  const limit = Number.isInteger(outputLimit) && outputLimit > 0 ? outputLimit : 4000;
+  const bound = (entry) => {
+    const text = typeof entry === "string" ? entry : entry == null ? "" : String(entry);
+    return text.length <= limit ? text : `${text.slice(0, Math.floor(limit / 2))}...[TRUNCATED]...${text.slice(-Math.floor(limit / 2))}`;
+  };
+  return { ...value, status, stdout: bound(value.stdout), stderr: bound(value.stderr) };
 }
 
 export function validateResultContract(result) {
   if (!isObject(result) || result.version !== RESULT_CONTRACT_VERSION) fail("result.version must be 1", "MALFORMED_RESULT");
   asString(result.task_id, "result.task_id", { max: 200 });
   if (!["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result.status)) fail("invalid result.status", "MALFORMED_RESULT");
-  if (!Array.isArray(result.changed_files) || result.changed_files.some((x) => typeof x !== "string")) fail("invalid result.changed_files", "MALFORMED_RESULT");
+  if (!Array.isArray(result.changed_files) || result.changed_files.length > MAX_RESULT_CHANGED_FILES || result.changed_files.some((x) => typeof x !== "string" || x.length > 1024)) fail("invalid result.changed_files", "MALFORMED_RESULT");
   if (!isObject(result.tests) || !isObject(result.diff_availability) || !isObject(result.runtime_metrics) || !isObject(result.safety_metrics) || !isObject(result.runtime_provider_identity)) fail("result evidence objects are required", "MALFORMED_RESULT");
+  if (result.diff_availability.files !== undefined && (!Array.isArray(result.diff_availability.files) || result.diff_availability.files.length > MAX_RESULT_CHANGED_FILES || result.diff_availability.files.some((x) => typeof x !== "string" || x.length > 1024))) fail("invalid result.diff_availability.files", "MALFORMED_RESULT");
+  for (const field of ["stdout", "stderr", "blocker"]) if (result.tests[field] !== undefined && (typeof result.tests[field] !== "string" || result.tests[field].length > 262144)) fail(`invalid result.tests.${field}`, "MALFORMED_RESULT");
   if (typeof result.blocker !== "string" || result.blocker.length > 4000) fail("invalid result.blocker", "MALFORMED_RESULT");
   return result;
 }
 
 export function redactStructuredLog(value, { maxString = 1000 } = {}) {
-  const sensitive = /(?:secret|token|password|authorization|api[_-]?key|cookie|credential|env(?:ironment)?)/i;
-  if (typeof value === "string") return value.length > maxString ? `${value.slice(0, maxString)}...[TRUNCATED]` : value;
+  const sensitive = /(?:secret|token|password|authorization|api[_-]?key|cookie|credential|env(?:ironment)?|source[_-]?body|request[_-]?body|response[_-]?body|prompt)/i;
+  if (typeof value === "string") {
+    const bounded = value.length > maxString ? `${value.slice(0, maxString)}...[TRUNCATED]` : value;
+    return bounded.replace(/((?:secret|token|password|api[_-]?key|authorization|cookie|credential)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  }
   if (Array.isArray(value)) return value.map((entry) => redactStructuredLog(entry, { maxString }));
   if (!isObject(value)) return value;
   const output = {};
   for (const [key, entry] of Object.entries(value)) output[key] = sensitive.test(key) ? "[REDACTED]" : redactStructuredLog(entry, { maxString });
   return output;
+}
+
+/**
+ * Small deterministic circuit breaker used by bounded retry loops. A second
+ * identical failure is enough to stop automatic repetition; callers may still
+ * inspect the fingerprint without retaining the potentially sensitive text.
+ */
+export function createFailureFingerprintGuard({ maxRepeats = 2 } = {}) {
+  const limit = Number.isInteger(maxRepeats) && maxRepeats > 0 ? maxRepeats : 2;
+  const counts = new Map();
+  return Object.freeze({
+    record(failure) {
+      const text = redactStructuredLog(String(failure?.message || failure || "failure"), { maxString: 2000 }).toLowerCase();
+      const fingerprint = crypto.createHash("sha256").update(text).digest("hex");
+      const count = (counts.get(fingerprint) || 0) + 1;
+      counts.set(fingerprint, count);
+      return { fingerprint, count, abort: count >= limit };
+    },
+    count(fingerprint) { return counts.get(fingerprint) || 0; },
+    clear() { counts.clear(); },
+  });
 }
 
 export function createInferenceAdapter(adapter) {
@@ -280,7 +343,7 @@ export function createInferenceAdapter(adapter) {
   });
 }
 
-export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now() } = {}) {
+export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null } = {}) {
   const task = validateTaskContract(inputTask, { verifyGit: false });
   const runtimeAdapter = createInferenceAdapter(adapter);
   const started = now();
@@ -293,25 +356,55 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     if (!boundary.base_matches_head) fail("base commit drift before worker start", "BASE_COMMIT_DRIFT");
     before = captureGitEvidence(task.worktree);
   } catch (error) {
-    const blocker = String(error?.message || error);
+    const blocker = redactStructuredLog(String(error?.message || error), { maxString: 4000 });
+    const drift = error?.code === "BASE_COMMIT_DRIFT" || error?.code === "BASE_COMMIT_INVALID";
     const result = {
       version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status: "BLOCKED", changed_files: [], tests: { status: "NOT_RUN" }, blocker,
       diff_availability: { available: false, files: [] }, runtime_metrics: { wall_time_ms: now() - started },
-      safety_metrics: { preflight: "BLOCKED", base_commit_verified: false, changed_paths_recomputed: true, commit_detected: false, base_drift: true },
+      safety_metrics: { preflight: "BLOCKED", base_commit_verified: false, changed_paths_recomputed: true, commit_detected: false, base_drift: drift },
       runtime_provider_identity: runtimeAdapter.identity,
     };
     return { result: validateResultContract(result), log: redactStructuredLog({ event: "local_worker_blocked", task_id: task.task_id, status: result.status, blocker }) };
   }
-  try { adapterResult = await runtimeAdapter.run(task, { boundary, before }); } catch (error) { adapterError = error; }
-  const after = captureGitEvidence(task.worktree);
+  try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal }); } catch (error) { adapterError = error; }
+  // A provider crash must not strand an owned process. Adapters are required
+  // to make stop() ownership-aware (external engines remain untouched).
+  if (adapterError) { try { await runtimeAdapter.stop(); } catch { /* cleanup is best effort */ } }
+  let after;
+  let postflightError = null;
+  try {
+    // Re-run the reparse/root checks after provider execution: a worker can
+    // create a junction after preflight and then write through it.
+    validateTaskBoundary(task);
+    after = captureGitEvidence(task.worktree);
+  } catch (error) {
+    postflightError = error;
+    after = { head_commit: before.head_commit, status_paths: [], diff_paths: [], changed_paths: [], changed_path_count: 0, paths_truncated: false, diff_available: false };
+  }
   const unexpected = after.changed_paths.filter((relative) => !pathAllowed(relative, task.allowed_paths));
+  const evidenceTruncated = !!after.paths_truncated;
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;
   let tests = { status: "NOT_RUN" };
-  if (!adapterError && !unexpected.length && !committed && !baseDrift) tests = await runTest(task);
+  if (!adapterError && !postflightError && !evidenceTruncated && !unexpected.length && !committed && !baseDrift) {
+    try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit); } catch (error) {
+      tests = { status: "FAIL", timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
+    }
+  }
   let status = "DONE";
   let blocker = "none";
-  if (adapterError) { status = "FAILED"; blocker = String(adapterError?.message || adapterError); }
+  let failureFingerprint = null;
+  if (adapterError) {
+    status = "FAILED";
+    blocker = redactStructuredLog(String(adapterError?.message || adapterError), { maxString: 4000 });
+    if (failureGuard?.record) {
+      const repeat = failureGuard.record(adapterError);
+      failureFingerprint = repeat.fingerprint;
+      if (repeat.abort) { status = "BLOCKED"; blocker = "duplicate failure fingerprint threshold reached"; }
+    }
+  }
+  else if (postflightError) { status = "BLOCKED"; blocker = redactStructuredLog(String(postflightError?.message || postflightError), { maxString: 4000 }); }
+  else if (evidenceTruncated) { status = "BLOCKED"; blocker = `changed-file evidence exceeds ${MAX_EVIDENCE_PATHS} paths`; }
   else if (unexpected.length) { status = "BLOCKED"; blocker = `unexpected changed paths: ${unexpected.join(", ")}`; }
   else if (committed) { status = "BLOCKED"; blocker = "worker commit detected; local worker must not commit"; }
   else if (baseDrift) { status = "BLOCKED"; blocker = "base commit drift detected"; }
@@ -320,12 +413,12 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
     blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : "local worker reported runtime failure";
   }
-  else if (tests.status !== "PASS") { status = "FAILED"; blocker = tests.timed_out ? "test timeout" : "tests did not pass"; }
+  else if (tests.status !== "PASS") { status = tests.status === "CANCELLED" || tests.cancelled ? "CANCELLED" : "FAILED"; blocker = tests.timed_out ? "test timeout" : tests.cancelled ? "test cancelled" : "tests did not pass"; }
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: after.changed_paths, tests, blocker,
     diff_availability: { available: after.diff_available, files: after.diff_paths },
-    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED" },
-    safety_metrics: { preflight: "PASS", base_commit_verified: true, changed_paths_recomputed: true, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, result_claim_trusted: false },
+    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint },
+    safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,
   };
   const log = redactStructuredLog({ event: "local_worker_result", task_id: task.task_id, status, changed_files: after.changed_paths, tests: { status: tests.status, exit_code: tests.exit_code ?? null }, blocker, runtime_provider_identity: runtimeAdapter.identity, wall_time_ms: result.runtime_metrics.wall_time_ms });

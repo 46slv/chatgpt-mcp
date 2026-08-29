@@ -11,11 +11,16 @@ export const FREETOKEN_FAILURES = Object.freeze({
   GPU_OOM: "GPU_OOM",
   TIMEOUT: "TIMEOUT",
   CANCELLED: "CANCELLED",
+  MALFORMED_RESULT: "MALFORMED_RESULT",
+  RESULT_TOO_LARGE: "RESULT_TOO_LARGE",
 });
 
 export function redactFreeTokenLog(value, { maxString = 1000 } = {}) {
-  const sensitive = /(?:secret|token|password|authorization|api[_-]?key|cookie|credential|modelPath|controlUrl|serveUrl)/i;
-  if (typeof value === "string") return value.length > maxString ? `${value.slice(0, maxString)}...[TRUNCATED]` : value;
+  const sensitive = /(?:secret|token|password|authorization|api[_-]?key|cookie|credential|modelPath|controlUrl|serveUrl|source[_-]?body|request[_-]?body|response[_-]?body|prompt)/i;
+  if (typeof value === "string") {
+    const bounded = value.length > maxString ? `${value.slice(0, maxString)}...[TRUNCATED]` : value;
+    return bounded.replace(/((?:secret|token|password|api[_-]?key|authorization|cookie|credential)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  }
   if (Array.isArray(value)) return value.map((entry) => redactFreeTokenLog(entry, { maxString }));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sensitive.test(key) ? "[REDACTED]" : redactFreeTokenLog(entry, { maxString })]));
@@ -41,7 +46,13 @@ export function createFreeTokenConfig(input = {}, env = process.env) {
   if (enabled) { boundedString(model, "model", 1024); boundedString(modelPath, "modelPath", 4096); }
   const startMode = input.startMode ?? "control";
   if (!["control", "cli"].includes(startMode)) throw new Error("startMode must be control or cli");
-  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), controlUrl: boundedString(String(controlUrl), "controlUrl", 256).replace(/\/$/, ""), serveUrl: boundedString(String(serveUrl), "serveUrl", 256).replace(/\/$/, ""), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: boundedNumber(input.requestTimeoutMs ?? 60000, 60000, 1000, 120000), idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
+  const localUrl = (value, name) => {
+    const normalized = boundedString(String(value), name, 256).replace(/\/$/, "");
+    let parsed; try { parsed = new URL(normalized); } catch { throw new Error(`${name} must be a valid loopback URL`); }
+    if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase())) throw new Error(`${name} must use a loopback HTTP URL`);
+    return normalized;
+  };
+  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), controlUrl: localUrl(controlUrl, "controlUrl"), serveUrl: localUrl(serveUrl, "serveUrl"), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: boundedNumber(input.requestTimeoutMs ?? 60000, 60000, 1000, 120000), idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
 }
 
 export function classifyFreeTokenFailure(error) {
@@ -50,6 +61,8 @@ export function classifyFreeTokenFailure(error) {
   const text = String(error.message || error).toLowerCase();
   if (text.includes("cancel")) return FREETOKEN_FAILURES.CANCELLED;
   if (text.includes("timeout") || text.includes("timed out") || text.includes("aborted")) return FREETOKEN_FAILURES.TIMEOUT;
+  if (text.includes("malformed") || text.includes("invalid response")) return FREETOKEN_FAILURES.MALFORMED_RESULT;
+  if (text.includes("oversized") || text.includes("too large") || text.includes("response limit")) return FREETOKEN_FAILURES.RESULT_TOO_LARGE;
   if (text.includes("out of memory") || text.includes("cuda out of memory") || /\boom\b/.test(text)) return FREETOKEN_FAILURES.GPU_OOM;
   if (text.includes("model") && (text.includes("load") || text.includes("not found") || text.includes("invalid"))) return FREETOKEN_FAILURES.MODEL_LOAD_FAILURE;
   if (text.includes("eaddrinuse") || text.includes("address already in use") || text.includes("port")) return FREETOKEN_FAILURES.PORT_COLLISION;
@@ -69,10 +82,13 @@ async function defaultRequest(url, options = {}) {
   const text = await response.text();
   let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = { text: text.slice(0, 2000) }; }
   if (!response.ok) {
-    const bodyCode = classifyFreeTokenFailure(new Error(typeof body === "string" ? body : JSON.stringify(body)));
+    const bodyText = typeof body === "string" ? body : JSON.stringify(body);
+    const bodyCode = classifyFreeTokenFailure(new Error(bodyText.slice(0, 4000)));
     const code = response.status === 409 || response.status === 425 ? FREETOKEN_FAILURES.PORT_COLLISION : bodyCode === FREETOKEN_FAILURES.SERVER_FAILURE ? FREETOKEN_FAILURES.SERVER_FAILURE : bodyCode;
-    throw failure(code, `FreeToken HTTP ${response.status}`, { status: response.status, body });
+    throw failure(code, `FreeToken HTTP ${response.status}`, { status: response.status, body: redactFreeTokenLog(body, { maxString: 4000 }) });
   }
+  const encoded = JSON.stringify(body ?? null);
+  if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
   return { status: response.status, body };
 }
 
@@ -137,15 +153,20 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   async function start({ signal } = {}) {
     if (!config.enabled) return { status: "BLOCKED", code: FREETOKEN_FAILURES.DISABLED, reason: "provider disabled" };
     const gate = await Promise.resolve(gpuProbe());
-    if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
+    if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
     const current = await health();
     if (current.status === "READY") return { status: "READY", owned: false, health: current };
+    // Only clean up a process previously spawned by this adapter. A stale
+    // owned handle must not cause a second server to be started on the same
+    // port; externally running FreeToken/LM Studio remains untouched.
+    if (ownedProcess) { try { killOwnedProcessTree(ownedProcess, options); } catch { /* best effort */ } ownedProcess = null; startedByAdapter = false; }
     try {
       if (config.startMode === "cli") {
         const args = ["serve", "--model-path", config.modelPath, "--host", "127.0.0.1", "--port", "1919"];
         ownedProcess = spawnImpl(options.ftCommand || "ft", args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
         startedByAdapter = true;
-        ownedProcess.once?.("exit", () => { ownedProcess = null; });
+        const spawnedProcess = ownedProcess;
+        ownedProcess.once?.("exit", () => { if (ownedProcess === spawnedProcess) ownedProcess = null; });
       } else {
         await request(`${config.controlUrl}/engine/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: config.modelPath, port: 1919, args: [] }), signal });
         startedByAdapter = true;
@@ -180,6 +201,9 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     const bounded = prompt.slice(0, 12000); const timer = abortableSignal(context.signal, config.requestTimeoutMs);
     try {
       const response = await request(`${config.serveUrl}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: config.model, messages: [{ role: "user", content: bounded }], max_tokens: task.max_tokens ?? 1024 }), signal: timer.signal });
+      if (!response || !response.body || typeof response.body !== "object" || Array.isArray(response.body)) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is malformed");
+      let encoded; try { encoded = JSON.stringify(response.body); } catch { throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is not serializable"); }
+      if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
       const result = { status: "PASS", response: response.body, metrics: { wall_time_ms: Date.now() - started, prompt_chars: bounded.length } };
       log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, model: config.model, wall_time_ms: result.metrics.wall_time_ms, prompt_chars: bounded.length }));
       return result;

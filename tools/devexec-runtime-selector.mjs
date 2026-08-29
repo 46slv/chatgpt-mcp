@@ -93,7 +93,7 @@ export function createDevExecEntrypoint({ selection, env = process.env, adapters
       // exact repo/worktree/base checks, test command execution, and parent
       // recomputation of changes before exposing the result.
       validateTaskContract(task, { verifyGit: false });
-      return runLocalWorkerTask(task, { adapter, runTest: context.runTest, now: context.now });
+      return runLocalWorkerTask(task, { adapter, runTest: context.runTest, now: context.now, failureGuard: context.failureGuard, signal: context.signal });
     },
     health: typeof adapter.health === "function" ? adapter.health.bind(adapter) : async () => ({ status: "UNKNOWN" }),
     stop: typeof adapter.stop === "function" ? adapter.stop.bind(adapter) : async () => ({ status: "STOPPED" }),
