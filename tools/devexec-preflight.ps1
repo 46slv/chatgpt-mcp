@@ -39,7 +39,10 @@ function Get-ConfigReport([string]$Path, [string]$Kind) {
     $report = [ordered]@{ path = $Path; exists = [bool](Test-Path -LiteralPath $Path); valid = $null; entries = @() }
     if (-not $report.exists) { return $report }
     try {
-        $value = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        # PowerShell 5.1 defaults to the active ANSI code page.  Runtime JSON
+        # is written as UTF-8 by Node, so make decoding explicit to preserve
+        # non-ASCII titles and aliases on Windows PowerShell as well as pwsh.
+        $value = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
         $report.valid = $true
         if ($Kind -eq 'mcp' -and $null -ne $value.mcpServers) {
             $report.entries = @($value.mcpServers.psobject.Properties.Name | Sort-Object)
@@ -82,7 +85,7 @@ if ($cdpUrlConfigured) {
 $consultationTargetContract = [ordered]@{ alias = $consultationAlias; configured = (-not [string]::IsNullOrWhiteSpace($consultationAlias)); present = $false; canonical = $false; conversation_id_match = $false }
 if ($consultationTargetContract.configured -and (Test-Path -LiteralPath $targetRegistry)) {
     try {
-        $targetValue = Get-Content -LiteralPath $targetRegistry -Raw | ConvertFrom-Json
+        $targetValue = Get-Content -LiteralPath $targetRegistry -Raw -Encoding UTF8 | ConvertFrom-Json
         $property = $targetValue.targets.psobject.Properties[$consultationAlias]
         $entry = if ($null -ne $property) { $property.Value } else { $null }
         if ($null -ne $entry) {
