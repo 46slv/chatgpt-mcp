@@ -1,5 +1,8 @@
 // Types and configuration for chatgpt-mcp
 
+import os from 'node:os';
+import path from 'node:path';
+
 // ============================================
 // Result interfaces
 // ============================================
@@ -110,9 +113,25 @@ export const SELECTORS = {
 // Configuration
 // ============================================
 
+function resolveUserDataDir(): string {
+  const override = process.env.CHATGPT_MCP_USER_DATA_DIR;
+  if (override && override.trim()) return override.trim();
+
+  // os.homedir() is the platform-aware source on Node. The environment
+  // fallback keeps startup usable in constrained Windows shells/test hosts.
+  let home = '';
+  try {
+    home = os.homedir();
+  } catch {
+    home = '';
+  }
+  if (!home) home = process.env.USERPROFILE || process.env.HOME || '.';
+  return path.join(home, '.chatgpt-mcp', 'user-data');
+}
+
 export const CONFIG = {
   chatgptUrl: 'https://chatgpt.com',
-  userDataDir: `${process.env.HOME}/.chatgpt-mcp/user-data`,
+  userDataDir: resolveUserDataDir(),
   defaultTimeout: 30000,
   typingDelay: 50,
   pollInterval: 5000,

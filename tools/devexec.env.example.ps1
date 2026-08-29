@@ -1,0 +1,28 @@
+# DevExec local environment template (secrets-free).
+# Dot-source this file in the shell that will run DevExec:
+#   . .\tools\devexec.env.example.ps1
+# All values are process-local. Edit the commented paths for this machine;
+# do not commit a copied, machine-specific file.
+
+# Read-only worker mode is the safe default. Set to 1 only for an explicit,
+# reviewed write work package using a separate LocalExecutor profile.
+$env:LOCAL_WORKER_ALLOW_WRITE = '0'
+
+# Optional overrides. The adapter has conservative defaults for omitted values.
+# $env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
+# $env:LOCAL_WORKER_MODEL = 'your-local-model-id'
+# $env:LOCAL_WORKER_EXECUTOR_ROOT = 'C:\Users\<user>\Documents\LocalExecutorRepo'
+# $env:LOCAL_WORKER_PROBE_ROOT = 'C:\Users\<user>\Documents\ChatGPTMCPProbe'
+# $env:LOCAL_WORKER_PROFILE = 'C:\Users\<user>\Documents\LocalExecutorRepo\profiles\chatgpt-mcp-probe-readonly.json'
+# $env:LOCAL_WORKER_PYTHON = 'python'
+# $env:LOCAL_WORKER_CONTEXT_WINDOW = '8192'
+# $env:LOCAL_WORKER_MAX_PLANNER_ROUNDS = '3'
+# $env:LOCAL_WORKER_PLANNER_TIMEOUT_MS = '75000'
+# $env:LOCAL_WORKER_PLANNER_ATTEMPTS = '2'
+
+# Optional persistent browser profile override. Keep it outside this repository.
+# $env:CHATGPT_MCP_USER_DATA_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\user-data'
+
+# Optional DevExec state/run roots. Keep runtime state outside this repository.
+# $env:DEV_EXEC_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\dev-exec-state'
+# $env:DEV_EXEC_RUNS_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\dev-exec-runs'

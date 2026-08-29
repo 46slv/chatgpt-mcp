@@ -1,0 +1,95 @@
+# DevExec on Windows
+
+This is the portable onboarding path for a new Windows machine. Replace `<user>` and other placeholders with local values; do not copy machine-specific paths or browser state into this repository.
+
+## 1. Clone and build
+
+Open PowerShell and choose a workspace outside the repository's runtime/state directories:
+
+```powershell
+Set-Location "$env:USERPROFILE\Documents"
+git clone https://github.com/parkermg/chatgpt-mcp.git ChatGPTMCPProbe
+Set-Location .\ChatGPTMCPProbe
+npm ci
+npx playwright install chromium
+npm run build
+npm test
+```
+
+`npm test` runs the deterministic DevExec MJS suite, the portability checks, and the read-only preflight. A missing LM Studio or browser listener is reported by preflight but does not make installation perform side effects.
+
+## 2. Prepare ChatGPT and Chrome CDP
+
+Use a dedicated Chrome profile so cookies remain outside the checkout. Close any Chrome instance using that profile, then start Chrome with CDP enabled (adjust the executable path if needed):
+
+```powershell
+$chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+$profile = "$env:LOCALAPPDATA\ChatGPTMCP\chrome-cdp"
+Start-Process $chrome -ArgumentList "--remote-debugging-port=9222","--user-data-dir=$profile","https://chatgpt.com"
+```
+
+Log in interactively in that window. DevExec does not accept credentials on the command line and does not store cookies in Git. If Chrome is already running, use a new `--user-data-dir` and port instead of reusing an unknown session.
+
+## 3. Capture and verify a target
+
+With the intended ChatGPT conversation open in the CDP Chrome window:
+
+```powershell
+node tools/devexec-target.mjs capture main
+node tools/devexec-target.mjs list
+node tools/devexec-target.mjs verify main
+```
+
+The target registry is external runtime state at `$env:LOCALAPPDATA\DevExec\targets.json`. `verify` must resolve exactly one open tab for the captured conversation. `TARGET_NOT_OPEN` means the conversation is not open in the CDP-enabled profile (or the wrong port/profile is being checked); open the exact URL there and retry.
+
+Before any worker action, check the selected target and use the safe dry-run:
+
+```powershell
+node tools/devexec-target.mjs current
+node tools/devexec-goal.mjs --dry-run "describe the bounded task"
+```
+
+Dry-run performs no worker start and writes no durable state. Keep `LOCAL_WORKER_ALLOW_WRITE=0` unless a separate, reviewed write work package explicitly requires otherwise.
+
+## 4. Optional local worker / LM Studio
+
+LocalExecutor and model files are separate dependencies; they are intentionally not bundled here. Provision LocalExecutor from its approved source in a separate directory, then point this checkout at it with environment variables. Start LM Studio's local server using its normal UI/CLI and confirm the model identifier before running a worker.
+
+```powershell
+. .\tools\devexec.env.example.ps1
+$env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
+$env:LOCAL_WORKER_MODEL = 'the-model-id-visible-in-lm-studio'
+$env:LOCAL_WORKER_EXECUTOR_ROOT = "$env:USERPROFILE\Documents\LocalExecutorRepo"
+$env:LOCAL_WORKER_PROBE_ROOT = "$env:USERPROFILE\Documents\ChatGPTMCPProbe"
+$env:LOCAL_WORKER_ALLOW_WRITE = '0'
+```
+
+Set `LOCAL_WORKER_PROFILE` to the external LocalExecutor read-only profile when the default profile discovery is not suitable. Other bounded controls (`LOCAL_WORKER_CONTEXT_WINDOW`, `LOCAL_WORKER_MAX_PLANNER_ROUNDS`, `LOCAL_WORKER_PLANNER_TIMEOUT_MS`, and `LOCAL_WORKER_PLANNER_ATTEMPTS`) are optional environment overrides. Never put `mcp.json`, model caches, executor credentials, or runtime state under this checkout.
+
+## 5. State and security boundaries
+
+The normal external locations are:
+
+- Browser profile: `%USERPROFILE%\.chatgpt-mcp\user-data` (override with `CHATGPT_MCP_USER_DATA_DIR`).
+- Target registry: `%LOCALAPPDATA%\DevExec\targets.json`.
+- DevExec state/runs: `%LOCALAPPDATA%\ChatGPTMCPProbe\dev-exec-state` and `dev-exec-runs` (override with `DEV_EXEC_STATE_DIR` / `DEV_EXEC_RUNS_DIR`).
+- LM Studio MCP configuration: `%USERPROFILE%\.lmstudio\mcp.json`.
+
+Keep these outside Git and back them up using the machine's normal protected backup mechanism. Do not commit `.env` files, copied PowerShell environment files, cookies, browser profiles, target registries, `mcp.json`, LocalExecutor trees, model weights, state, run logs, or generated reports. The tracked env file is an example only and contains no secrets.
+
+## 6. Read-only preflight and troubleshooting
+
+Run the preflight whenever changing machines, profiles, or ports:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\devexec-preflight.ps1
+```
+
+It reports command availability, repository/build paths, existence and validity of config files (names only), localhost listeners, and whether the worker write flag/model overrides are set. It never installs, launches, logs in, writes state, or changes power/network/browser settings.
+
+- `TARGET_NOT_OPEN`: start the CDP Chrome profile on port 9222, open the exact captured `chatgpt.com/c/<id>` URL, and run `node tools/devexec-target.mjs verify <alias>` again.
+- `403` when publishing: the GitHub identity lacks write permission to the upstream repository. Push to an authorized fork/remote or obtain permission; do not force-push or rewrite history.
+- Missing model / `MODEL_NOT_FOUND`: inspect the model id shown by LM Studio, set `LOCAL_WORKER_MODEL` exactly, ensure the LM Studio local server is listening on its configured port, and rerun preflight. No model is downloaded automatically.
+- `CDP_UNAVAILABLE`: verify the port, profile, and Chrome process; do not broaden network exposure beyond localhost.
+
+For a new machine, the bounded completion check is: `npm ci`, Playwright Chromium installed, `npm run build`, `npm test` passing, target captured and verified, then a dry-run with write disabled. Live ChatGPT or LM Studio success depends on external login and local services and should be recorded separately from deterministic repository tests.
