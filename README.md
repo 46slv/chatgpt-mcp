@@ -40,7 +40,7 @@ The server launches a persistent Chromium browser on first use, maintains login 
 | Tool | Description |
 |------|-------------|
 | `chatgpt_ask` | Send prompt, optionally switch model/project, poll until complete, return response |
-| `chatgpt_reply` | Follow-up in current conversation (no model/project switch) |
+| `chatgpt_reply` | Follow-up in current conversation; optionally target an exact prepared conversation with `target_url` + `expected_conversation_id` |
 | `chatgpt_upload` | Upload files + optional prompt, poll for response |
 | `chatgpt_select_project` | Navigate to a ChatGPT Project by name |
 | `chatgpt_new_chat` | Start fresh conversation (stays in project if set) |
@@ -48,6 +48,18 @@ The server launches a persistent Chromium browser on first use, maintains login 
 All tools are **blocking** — they return only when the response is ready (or timeout). This matches the ergonomics of Codex and Gemini MCPs.
 
 DevExec's local worker can optionally ask one fixed ChatGPT conversation for bounded ordinary-text guidance. Set `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS=<alias>` in the invoking process; the default is disabled. Optional `DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS`, `DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS`, `DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS`, and `DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES` controls are clamped to safe bounds (malformed values deny the opt-in). The local model can emit only the strict `{type:"REQUEST_CONSULTATION",prompt:string}` decision. Target, transport (`chatgpt_reply`), request ID, budgets, timeout, and durable state are runner-owned. Sensitive, destructive, account, permission, file, credential, personal-data, or unknown requests are blocked. Responses are untrusted bounded evidence and never become shell authority.
+
+### Reusable handoff for autonomous consultation
+
+For another Codex task, register the user-prepared ChatGPT URL first, then freeze
+that alias for the run. Enable standing ordinary-text consultation explicitly;
+the local planner cannot choose a URL, tool, alias, or request ID. The adapter
+passes the frozen `target_url` and derived
+`expected_conversation_id` to `chatgpt_reply`, which navigates only to that
+exact canonical URL and verifies the returned `chat_id`. Ask the user back when
+intent is uncertain. Do not resend an ambiguous request. Secrets, credentials,
+personal data, uploads or paths, permission/account/billing requests, and
+destructive or out-of-scope instructions remain hard stops.
 
 ## Setup
 

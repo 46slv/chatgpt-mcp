@@ -6,6 +6,9 @@ import {
   SimpleResult,
   SELECTORS,
   CONFIG,
+  ChatGPTTargetIdentity,
+  parseChatGPTTargetUrl,
+  validateConversationId,
 } from './types.js';
 import {
   getPage,
@@ -33,6 +36,83 @@ let sessionState: SessionState = {
 };
 
 let sessionInitialized = false;
+
+export interface BlockingReplyOptions {
+  /** Exact prepared conversation URL. Omit for legacy current-chat behavior. */
+  target_url?: string;
+  /** Expected conversation id; when omitted it is derived from target_url. */
+  expected_conversation_id?: string;
+}
+
+/**
+ * Validate and normalize the runner-owned target contract before any browser
+ * interaction.  A supplied expected id is intentionally required to agree
+ * with the URL so callers cannot freeze one identity and send to another.
+ */
+function resolveReplyTarget(options: BlockingReplyOptions = {}): ChatGPTTargetIdentity | null {
+  const hasUrl = options.target_url !== undefined && options.target_url !== null;
+  const hasConversationId = options.expected_conversation_id !== undefined && options.expected_conversation_id !== null;
+
+  if (!hasUrl && !hasConversationId) return null;
+  if (!hasUrl) throw new Error('expected_conversation_id requires target_url.');
+
+  const parsed = parseChatGPTTargetUrl(options.target_url);
+  if (hasConversationId) {
+    const expected = validateConversationId(options.expected_conversation_id);
+    if (expected !== parsed.conversationId) {
+      throw new Error('Target URL and expected conversation id do not match.');
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Ensure the persistent, logged-in browser is at the exact prepared target.
+ * Navigation is skipped when the current URL is already canonical, avoiding
+ * needless reloads in a long-running consultation loop.  Any login/home or
+ * redirect/mismatch is rejected before the prompt textarea is touched.
+ */
+export async function ensureReplyTargetOnPage(
+  page: { url(): string; waitForLoadState?: (state: 'domcontentloaded', options?: { timeout?: number }) => Promise<unknown> },
+  target: ChatGPTTargetIdentity,
+  dependencies: {
+    navigate: (url: string) => Promise<boolean>;
+    isLoggedIn: () => Promise<boolean>;
+  },
+): Promise<void> {
+  const currentUrl = page.url();
+  if (currentUrl !== target.url) {
+    const navigated = await dependencies.navigate(target.url);
+    if (!navigated) throw new Error('Failed to navigate to targeted ChatGPT conversation.');
+    if (page.waitForLoadState) {
+      await page.waitForLoadState('domcontentloaded', { timeout: CONFIG.defaultTimeout });
+    }
+    await wait(500);
+  }
+
+  const finalUrl = page.url();
+  let finalTarget: ChatGPTTargetIdentity;
+  try {
+    finalTarget = parseChatGPTTargetUrl(finalUrl);
+  } catch {
+    throw new Error('Target navigation redirected away from the requested ChatGPT conversation.');
+  }
+  if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
+    throw new Error('Target conversation identity mismatch after navigation.');
+  }
+
+  if (!(await dependencies.isLoggedIn())) {
+    throw new Error('ChatGPT session is not logged in at the targeted conversation.');
+  }
+}
+
+async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
+  const page = await getPage();
+  await ensureReplyTargetOnPage(page, target, {
+    navigate: navigateTo,
+    isLoggedIn: checkLoginStatus,
+  });
+}
 
 // ============================================
 // Session management
@@ -315,7 +395,7 @@ async function sendPromptText(prompt: string): Promise<void> {
   // Extract conversation ID from URL
   const page = await getPage();
   const url = page.url();
-  const match = url.match(/\/c\/([a-f0-9-]+)/);
+  const match = url.match(/\/c\/([A-Za-z0-9-]+)(?:$|[?#])/);
   if (match) {
     sessionState.conversationId = match[1];
   }
@@ -736,17 +816,34 @@ export async function blockingAsk(
 export async function blockingReply(
   prompt: string,
   timeoutMinutes = 60,
+  options: BlockingReplyOptions = {},
 ): Promise<AskResult> {
   try {
+    // Resolve and validate the target before opening/typing in the browser.
+    // Legacy callers omit options and retain the historical current-chat
+    // behavior.
+    const target = resolveReplyTarget(options);
     await ensureSession();
 
-    if (!sessionState.conversationId) {
-      // Still allow reply even without tracked ID — user might have manually navigated
+    if (target) {
+      await ensureReplyTarget(target);
     }
 
     await sendPromptText(prompt);
 
     const result = await pollUntilComplete(timeoutMinutes);
+
+    if (target) {
+      // A successful poll is not sufficient evidence that the response came
+      // from the frozen conversation. Re-read and validate the canonical URL
+      // after generation so a redirect/tab switch becomes an explicit error.
+      const page = await getPage();
+      const finalTarget = parseChatGPTTargetUrl(page.url());
+      if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
+        throw new Error('Target conversation identity mismatch after response.');
+      }
+      sessionState.conversationId = finalTarget.conversationId;
+    }
 
     return {
       response: result.response,

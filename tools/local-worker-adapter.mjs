@@ -142,7 +142,7 @@ export function makeConsultationCallback(id, overrides = {}){
     let mcpConfig; try { mcpConfig=JSON.parse(fs.readFileSync(path.join(os.homedir(),".lmstudio","mcp.json"),"utf8")); } catch { return {status:"BLOCKED",request_id:requestId,reason:"mcp_config_unavailable"}; }
     const server=mcpConfig?.mcpServers?.["chatgpt-web-probe"];
     if(!server?.command)return {status:"BLOCKED",request_id:requestId,reason:"chatgpt_web_probe_unavailable"};
-    transport=createChatgptReplyAdapter({timeoutMinutes:config.timeoutMinutes,callTool:async(tool)=>{
+    transport=createChatgptReplyAdapter({timeoutMinutes:config.timeoutMinutes,targetUrl:target.url,targetConversationId:target.conversation_id,callTool:async(tool)=>{
      const client=new Client({name:"devexec-local-consultation",version:"1.0.0"});
      const channel=new StdioClientTransport({command:server.command,args:server.args||[],env:{...process.env,...(server.env||{}),CHATGPT_MCP_CHAT_URL:target.url,DEV_EXEC_TARGET_ID:target.alias,DEV_EXEC_TARGET_SOURCE:target.source}});
      try { await client.connect(channel); const listed=await client.listTools(); if(!listed.tools.some(x=>x.name==="chatgpt_reply"))throw new Error("chatgpt_reply unavailable"); return await client.callTool(tool); } finally { try{await client.close();}catch{} }

@@ -118,6 +118,18 @@ $env:DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS = 'main'
 
 The runner uses only the fixed `chatgpt_reply` adapter. Prompts containing secrets or credentials, personal data, file upload/path requests, permissions, account or billing actions, destructive instructions, external/out-of-scope work, or unknown intent are durably `BLOCKED`. Requests are bounded to 12,000 characters; responses are retained as untrusted, truncated evidence (6,000 characters) and must re-enter the local planner before any typed LocalExecutor action. Request SHA-256 deduplication prevents duplicate replies. A transport failure is durable `DELIVERY_UNKNOWN`; an ambiguous request is never automatically resent. Disable the feature by omitting the opt-in variable (the default).
 
+The adapter supplies `chatgpt_reply` with the frozen `target_url` and its
+derived `expected_conversation_id`; these fields are never planner input. The
+MCP server uses a persistent dedicated profile, navigates only when the
+current canonical URL differs, waits for the page to load, verifies the final
+origin/path and login state before typing, and rejects redirects to home/login
+or another conversation. A response is accepted only when its `chat_id`
+matches the frozen conversation id; an identity mismatch is recorded as
+`DELIVERY_UNKNOWN` and is never retried. This handoff is reusable for each
+other Codex task: ask the user back when intent is uncertain, and keep
+secrets, credentials, personal data, uploads/paths, permissions, account or
+billing requests, destructive actions, and out-of-scope instructions blocked.
+
 ## 6. State and security boundaries
 
 The normal external locations are:

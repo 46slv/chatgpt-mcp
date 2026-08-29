@@ -124,7 +124,15 @@ export function createConsultationRunner({ stateDir, runId, enabled = false, tar
     if (classification.decision !== "ALLOW") { record.phase = "BLOCKED"; record.reason = classification.reason; record.blocked_at = new Date().toISOString(); state.phase = "BLOCKED"; save(); return result(record); }
     record.phase = "IN_FLIGHT"; record.sent_at = new Date().toISOString(); state.phase = "IN_FLIGHT"; save();
     let raw;
-    try { raw = await transport.chatgpt_reply({ prompt: text, targetAlias, requestId: id, timeoutMinutes }); }
+    try {
+      const request = { prompt: text, targetAlias, requestId: id, timeoutMinutes };
+      // Target identity is runner-owned. Keep it out of the planner schema,
+      // but carry the frozen URL/id across the transport boundary so the MCP
+      // server can navigate and verify the exact prepared conversation.
+      if (state.target?.url) request.target_url = state.target.url;
+      if (state.target?.conversation_id) request.expected_conversation_id = state.target.conversation_id;
+      raw = await transport.chatgpt_reply(request);
+    }
     catch (error) { record.phase = "DELIVERY_UNKNOWN"; record.reason = String(error?.message || error); record.delivery_unknown_at = new Date().toISOString(); state.phase = "DELIVERY_UNKNOWN"; save(); return result(record, { retry: false }); }
     const response = typeof raw === "string" ? raw : raw?.response;
     if (typeof response !== "string" || !response.trim() || response.length > maxChars * 4) { record.phase = "BLOCKED"; record.reason = "malformed_or_overlong_response"; record.blocked_at = new Date().toISOString(); state.phase = "BLOCKED"; save(); return result(record); }
@@ -135,17 +143,49 @@ export function createConsultationRunner({ stateDir, runId, enabled = false, tar
   return { file, target: { ...state.target }, request, snapshot };
 }
 
-export function createChatgptReplyAdapter({ callTool, timeoutMinutes = 30 } = {}) {
+export function createChatgptReplyAdapter({ callTool, timeoutMinutes = 30, targetUrl = null, targetConversationId = null } = {}) {
   if (typeof callTool !== "function") throw new Error("callTool required");
-  return { chatgpt_reply: async ({ prompt, targetAlias, requestId } = {}) => {
+  let fixedTarget = null;
+  if (targetUrl !== null && targetUrl !== undefined) {
+    const parsed = parseChatGPTTargetUrl(targetUrl);
+    if (targetConversationId !== null && targetConversationId !== undefined && targetConversationId !== parsed.conversation_id) throw new Error("fixed target URL and conversation id mismatch");
+    fixedTarget = { url: parsed.chat_url, conversation_id: parsed.conversation_id };
+  } else if (targetConversationId !== null && targetConversationId !== undefined) {
+    throw new Error("fixed target conversation id requires target URL");
+  }
+  return { chatgpt_reply: async ({ prompt, targetAlias, requestId, target_url, expected_conversation_id } = {}) => {
     if (typeof prompt !== "string" || !prompt.trim() || typeof targetAlias !== "string" || typeof requestId !== "string") throw new Error("fixed chatgpt_reply request fields required");
-    const result = await callTool({ name: "chatgpt_reply", arguments: { prompt, timeout_minutes: timeoutMinutes } }, { targetAlias, requestId });
+    const requestedUrl = fixedTarget?.url || target_url || null;
+    const requestedId = fixedTarget?.conversation_id || expected_conversation_id || null;
+    let requestTarget = null;
+    if (requestedUrl !== null || requestedId !== null) {
+      if (requestedUrl === null) throw new Error("target_url required for targeted chatgpt_reply");
+      const parsed = parseChatGPTTargetUrl(requestedUrl);
+      if (requestedId !== null && requestedId !== parsed.conversation_id) throw new Error("target URL and expected conversation id mismatch");
+      requestTarget = parsed;
+    }
+    const argumentsValue = { prompt, timeout_minutes: timeoutMinutes };
+    if (requestTarget) {
+      argumentsValue.target_url = requestTarget.chat_url;
+      argumentsValue.expected_conversation_id = requestTarget.conversation_id;
+    }
+    const meta = { targetAlias, requestId };
+    if (requestTarget) {
+      meta.target_url = requestTarget.chat_url;
+      meta.expected_conversation_id = requestTarget.conversation_id;
+    }
+    const result = await callTool({ name: "chatgpt_reply", arguments: argumentsValue }, meta);
     if (result?.isError) throw new Error("chatgpt_reply MCP error");
     const blocks = (result?.content || []).filter(item => item.type === "text").map(item => item.text);
     if (blocks.length !== 1) throw new Error("chatgpt_reply expected exactly one text block");
     let value; try { value = JSON.parse(blocks[0]); } catch { throw new Error("chatgpt_reply malformed JSON"); }
     if (typeof value.error === "string" && value.error.trim()) throw new Error(value.error.trim());
     if (typeof value.response !== "string" || !value.response.trim()) throw new Error("chatgpt_reply empty response");
+    if (requestTarget && value.chat_id !== requestTarget.conversation_id) {
+      const error = new Error("chatgpt_reply conversation identity mismatch");
+      error.code = "TARGET_CONVERSATION_MISMATCH";
+      throw error;
+    }
     return value.response;
   } };
 }

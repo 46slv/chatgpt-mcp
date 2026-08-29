@@ -83,11 +83,61 @@ test("local-worker adapter wires standing opt-in, fixed target, bounded env, and
   const first = await callback("ordinary question", "C-R01-01");
   const cached = await callback("ordinary question", "C-R02-01");
   assert.equal(first.status, "RESPONSE_RECEIVED"); assert.equal(cached.cached, true); assert.equal(calls, 1);
-  assert.deepEqual(seen, { prompt: "ordinary question", targetAlias: "main", requestId: "C-R01-01", timeoutMinutes: 7 });
+  assert.deepEqual(seen, { prompt: "ordinary question", targetAlias: "main", requestId: "C-R01-01", timeoutMinutes: 7, target_url: "https://chatgpt.com/c/fixed", expected_conversation_id: "fixed" });
   const state = JSON.parse(fs.readFileSync(path.join(root, "LW-adapter-enabled.json"), "utf8"));
   assert.deepEqual(state.limits, { max_chars: 64, evidence_chars: 9, max_requests: 2, timeout_minutes: 7 });
   assert.equal(state.target.alias, "main"); assert.equal(state.target.url, "https://chatgpt.com/c/fixed");
   assert.equal(state.requests["C-R01-01"].response_evidence.text, "012345678...[TRUNCATED]");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("targeted adapter propagates the frozen URL and requires matching chat_id", async () => {
+  let seen = null;
+  const adapter = createChatgptReplyAdapter({
+    timeoutMinutes: 9,
+    targetUrl: "https://chatgpt.com/c/fixed-123",
+    targetConversationId: "fixed-123",
+    callTool: async (tool, meta) => {
+      seen = { tool, meta };
+      return { content: [{ type: "text", text: JSON.stringify({ response: "ok", chat_id: "fixed-123" }) }] };
+    },
+  });
+  assert.equal(await adapter.chatgpt_reply({ prompt: "hello", targetAlias: "main", requestId: "C-1" }), "ok");
+  assert.deepEqual(seen.tool.arguments, { prompt: "hello", timeout_minutes: 9, target_url: "https://chatgpt.com/c/fixed-123", expected_conversation_id: "fixed-123" });
+  assert.equal(seen.meta.expected_conversation_id, "fixed-123");
+
+  const mismatch = createChatgptReplyAdapter({
+    targetUrl: "https://chatgpt.com/c/fixed-123",
+    callTool: async () => ({ content: [{ type: "text", text: JSON.stringify({ response: "wrong", chat_id: "other-456" }) }] }),
+  });
+  await assert.rejects(() => mismatch.chatgpt_reply({ prompt: "hello", targetAlias: "main", requestId: "C-2" }), error => error.code === "TARGET_CONVERSATION_MISMATCH");
+});
+
+test("targeted adapter rejects non-canonical target URLs before calling MCP", async () => {
+  let calls = 0;
+  assert.throws(() => createChatgptReplyAdapter({ targetUrl: "https://chatgpt.com/c/fixed-123?x=1", callTool: async () => { calls += 1; } }));
+  const adapter = createChatgptReplyAdapter({ callTool: async () => { calls += 1; return { content: [{ type: "text", text: JSON.stringify({ response: "ok" }) }] }; } });
+  await assert.rejects(() => adapter.chatgpt_reply({ prompt: "hello", targetAlias: "main", requestId: "C-3", target_url: "https://chatgpt.com/c/fixed-123/" }), /Target URL/);
+  assert.equal(calls, 0);
+});
+
+test("conversation identity mismatch is durable DELIVERY_UNKNOWN and never retried", async () => {
+  const root = temp();
+  let calls = 0;
+  const adapter = createChatgptReplyAdapter({
+    targetUrl: "https://chatgpt.com/c/fixed-123",
+    callTool: async () => {
+      calls += 1;
+      return { content: [{ type: "text", text: JSON.stringify({ response: "wrong", chat_id: "other-456" }) }] };
+    },
+  });
+  const runner = createConsultationRunner({ stateDir: root, runId: "LW-identity", enabled: true, targetAlias: "main", targetUrl: "https://chatgpt.com/c/fixed-123", transport: adapter });
+  const first = await runner.request("ordinary question", "C-01");
+  const second = await runner.request("ordinary question", "C-02");
+  assert.equal(first.status, "DELIVERY_UNKNOWN");
+  assert.equal(second.status, "DELIVERY_UNKNOWN");
+  assert.equal(calls, 1);
+  assert.equal(second.retry, false);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

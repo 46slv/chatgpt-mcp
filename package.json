@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
-    "test:devexec": "node --test \"tools/*.test.mjs\"",
+    "test:devexec": "npm run build && node --test \"tools/*.test.mjs\"",
     "test:portability": "npm run build && node --test tools/portability.test.mjs",
     "check:preflight": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/devexec-preflight.ps1",
     "test": "npm run test:devexec && npm run test:portability && npm run check:preflight"
