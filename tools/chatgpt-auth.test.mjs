@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   checkLoginStatusOnPage,
+  checkLoginStatusWithRetries,
   loginReadinessFromSnapshot,
 } from "../dist/chatgpt.js";
 
@@ -70,4 +71,29 @@ test("targeted readiness requires the exact conversation URL", async () => {
     composerEnabled: true,
     authChallengeVisible: false,
   }), target), true);
+});
+
+test("targeted login retries preserve the exact target identity", async () => {
+  const seen = [];
+  let attempts = 0;
+  const result = await checkLoginStatusWithRetries(target, async (received) => {
+    seen.push(received);
+    attempts += 1;
+    return attempts === 2;
+  }, async () => {});
+  assert.equal(result, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(seen, [target, target]);
+});
+
+test("legacy login retries retain the no-target call contract", async () => {
+  const seen = [];
+  let attempts = 0;
+  const result = await checkLoginStatusWithRetries(undefined, async (received) => {
+    seen.push(received);
+    attempts += 1;
+    return attempts === 2;
+  }, async () => {});
+  assert.equal(result, true);
+  assert.deepEqual(seen, [undefined, undefined]);
 });

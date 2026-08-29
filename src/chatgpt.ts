@@ -149,13 +149,7 @@ export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<voi
   // (Cloudflare checks or slow loads can cause false negatives)
   await wait(3000);
 
-  let isLoggedIn = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    isLoggedIn = await checkLoginStatus();
-    if (isLoggedIn) break;
-    console.error(`[session] Login check attempt ${attempt + 1} failed, retrying...`);
-    await wait(3000);
-  }
+  const isLoggedIn = await checkLoginStatusWithRetries(target);
 
   sessionState.isLoggedIn = isLoggedIn;
   sessionInitialized = true;
@@ -189,6 +183,29 @@ export interface LoginReadinessSnapshot {
   composerEnabled: boolean;
   authChallengeVisible: boolean;
   actualUrl?: string;
+}
+
+/**
+ * Check login readiness while preserving the caller's exact target identity.
+ *
+ * The optional dependencies keep this small retry policy deterministic in
+ * tests; production callers use the browser-backed defaults.  Passing the
+ * target on every attempt is important because an untargeted retry can select
+ * a different ChatGPT tab and report readiness for the wrong conversation.
+ */
+export async function checkLoginStatusWithRetries(
+  target?: ChatGPTTargetIdentity,
+  check: (target?: ChatGPTTargetIdentity) => Promise<boolean> = checkLoginStatus,
+  retryWait: () => Promise<void> = () => wait(3000),
+): Promise<boolean> {
+  let isLoggedIn = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    isLoggedIn = await check(target);
+    if (isLoggedIn) break;
+    console.error(`[session] Login check attempt ${attempt + 1} failed, retrying...`);
+    await retryWait();
+  }
+  return isLoggedIn;
 }
 
 /**
