@@ -14,6 +14,11 @@ const MAX_RESULT_CHANGED_FILES = 256;
 const FORBIDDEN_COMMAND = /(?:^|[^a-z])(git\s+(?:commit|reset|clean|checkout|restore|rebase|push)|(?:rm|del|erase|rmdir|remove-item|format|shutdown|restart-computer)(?:\s|$)|\b(?:curl|wget|invoke-webrequest)\b)/i;
 const SHELL_META = /[;&|><`$(){}]/;
 const SHELL_EXECUTABLE = /^(?:cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?|bash|sh|zsh|fish)(?:\.exe)?$/i;
+// A private marker prevents a worker/model supplied object that merely says
+// {status:"PASS"} from being accepted as parent-controlled test evidence.
+// The marker is intentionally not exported and is therefore not forgeable by
+// adapters or inference responses.
+const PARENT_TEST_EVIDENCE = Symbol("parent-test-evidence");
 
 export class LocalRuntimeContractError extends Error {
   constructor(message, code = "INVALID_LOCAL_RUNTIME_CONTRACT") {
@@ -268,23 +273,40 @@ export function runTestCommand(task, { timeoutMs = task.timeout, outputLimit = t
     child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
     child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
     const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener?.("abort", onAbort); resolve(value); };
+    const evidence = { command: [...argv], evidence_source: "parent-runner", parent_controlled: true };
     const onAbort = () => { cancelled = true; killTree(child); };
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeoutMs);
     if (signal?.aborted) onAbort(); else signal?.addEventListener?.("abort", onAbort, { once: true });
-    child.on("error", (error) => finish({ status: cancelled ? "CANCELLED" : "FAIL", exit_code: null, timed_out: timedOut, cancelled, stdout, stderr: append(stderr, error.message), wall_time_ms: Date.now() - started }));
-    child.on("close", (code, closeSignal) => finish({ status: cancelled ? "CANCELLED" : (!timedOut && code === 0 ? "PASS" : "FAIL"), exit_code: code, signal: closeSignal || null, timed_out: timedOut, cancelled, stdout, stderr, wall_time_ms: Date.now() - started }));
+    child.on("error", (error) => finish({ ...evidence, [PARENT_TEST_EVIDENCE]: true, status: cancelled ? "CANCELLED" : "FAIL", exit_code: null, timed_out: timedOut, cancelled, stdout, stderr: append(stderr, error.message), wall_time_ms: Date.now() - started }));
+    child.on("close", (code, closeSignal) => finish({ ...evidence, [PARENT_TEST_EVIDENCE]: true, status: cancelled ? "CANCELLED" : (!timedOut && code === 0 ? "PASS" : "FAIL"), exit_code: code, signal: closeSignal || null, timed_out: timedOut, cancelled, stdout, stderr, wall_time_ms: Date.now() - started }));
   });
 }
 
-function normalizeTestEvidence(value, outputLimit) {
-  if (!isObject(value) || typeof value.status !== "string") return { status: "FAIL", malformed: true, stdout: "", stderr: "malformed test result" };
+function sameArgv(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]); }
+
+export function isParentControlledTestEvidence(value, task) {
+  return isObject(value) && value[PARENT_TEST_EVIDENCE] === true
+    && value.evidence_source === "parent-runner"
+    && value.parent_controlled === true
+    && sameArgv(value.command, task?.test_command);
+}
+
+function normalizeTestEvidence(value, outputLimit, task) {
+  if (!isObject(value) || typeof value.status !== "string") return { status: "FAIL", malformed: true, evidence_valid: false, stdout: "", stderr: "malformed test result" };
   const status = ["PASS", "FAIL", "CANCELLED"].includes(value.status) ? value.status : "FAIL";
   const limit = Number.isInteger(outputLimit) && outputLimit > 0 ? outputLimit : 4000;
   const bound = (entry) => {
     const text = typeof entry === "string" ? entry : entry == null ? "" : String(entry);
     return text.length <= limit ? text : `${text.slice(0, Math.floor(limit / 2))}...[TRUNCATED]...${text.slice(-Math.floor(limit / 2))}`;
   };
-  return { ...value, status, stdout: bound(value.stdout), stderr: bound(value.stderr) };
+  const evidenceValid = isParentControlledTestEvidence(value, task);
+  const normalized = { ...value, status, evidence_valid: evidenceValid, stdout: bound(value.stdout), stderr: bound(value.stderr) };
+  if (status === "PASS" && !evidenceValid) {
+    normalized.status = "FAIL";
+    normalized.invalid_evidence = true;
+    normalized.evidence_reason = "test evidence is not parent-controlled or does not match requested test command";
+  }
+  return normalized;
 }
 
 export function validateResultContract(result) {
@@ -385,10 +407,10 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   const evidenceTruncated = !!after.paths_truncated;
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;
-  let tests = { status: "NOT_RUN" };
+  let tests = { status: "NOT_RUN", evidence_valid: false };
   if (!adapterError && !postflightError && !evidenceTruncated && !unexpected.length && !committed && !baseDrift) {
-    try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit); } catch (error) {
-      tests = { status: "FAIL", timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
+    try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit, task); } catch (error) {
+      tests = { status: "FAIL", evidence_valid: false, timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
     }
   }
   let status = "DONE";
@@ -413,7 +435,14 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
     blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : "local worker reported runtime failure";
   }
-  else if (tests.status !== "PASS") { status = tests.status === "CANCELLED" || tests.cancelled ? "CANCELLED" : "FAILED"; blocker = tests.timed_out ? "test timeout" : tests.cancelled ? "test cancelled" : "tests did not pass"; }
+  else if (!after.diff_available || !after.changed_paths.length) { status = "FAILED"; blocker = "no nonempty bounded diff was produced"; }
+  else if (tests.status !== "PASS" || tests.evidence_valid !== true) {
+    status = tests.status === "CANCELLED" || tests.cancelled ? "CANCELLED" : "FAILED";
+    if (tests.timed_out) blocker = "test timeout (requested test command exceeded deadline)";
+    else if (tests.cancelled) blocker = "test cancelled";
+    else if (tests.invalid_evidence || tests.evidence_valid !== true) blocker = "test evidence is not parent-controlled or does not match requested test command";
+    else blocker = "tests did not pass";
+  }
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: after.changed_paths, tests, blocker,
     diff_availability: { available: after.diff_available, files: after.diff_paths },

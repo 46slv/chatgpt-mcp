@@ -4,7 +4,6 @@ import { resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
 function usage() {
   process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
 }
-
 const args = process.argv.slice(2);
 const command = args.shift();
 if (command !== "select") { usage(); process.exitCode = 2; }
@@ -23,4 +22,3 @@ else {
   try { process.stdout.write(`${JSON.stringify(resolveDevExecRuntimeSelection(selection), null, 2)}\n`); process.exitCode = 0; }
   catch (error) { process.stderr.write(`${String(error?.message || error)}\n`); process.exitCode = 2; }
 }
-

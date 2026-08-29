@@ -87,3 +87,58 @@ test("FreeToken adapter wires the OpenAI-compatible response into the same harne
   assert.equal(JSON.parse(calls.find((x) => x.url.includes("chat/completions")).options.body).tools.length, 5);
   assert.equal(fs.readFileSync(path.join(f.root, "src", "value.txt"), "utf8"), "2\n");
 });
+
+test("verified-evidence fallback stays cancelled when abort happens during delayed final run_test", async () => {
+  const f = fixture();
+  const controller = new AbortController();
+  const queue = [response(["patch", { path: "src/value.txt", content: "2\n" }]), response(["run_test", {}], ["git_diff", { path: "src/value.txt" }])];
+  const result = await runMinimalHarness(f.task, {
+    infer: async () => queue.shift(),
+    signal: controller.signal,
+    maxToolCalls: 3,
+    runTest: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); controller.abort(new Error("cancelled")); return { status: "PASS" }; },
+  });
+  assert.equal(result.status, "CANCELLED");
+  assert.equal(result.code, "CANCELLED");
+  assert.match(result.reason, /cancelled/i);
+});
+
+test("verified-evidence fallback distinguishes a harness deadline from max tool calls", async () => {
+  const f = fixture();
+  let calls = 0;
+  const result = await runMinimalHarness(f.task, {
+    infer: async () => { calls += 1; await new Promise((resolve) => setTimeout(resolve, 1100)); return response(["patch", { path: "src/value.txt", content: "2\n" }]); },
+    timeoutMs: 1000,
+    maxToolCalls: 1,
+  });
+  assert.equal(calls, 1);
+  assert.notEqual(result.status, "PASS");
+  assert.equal(result.code, "HARNESS_TIMEOUT");
+  assert.match(result.reason, /deadline exceeded/i);
+});
+
+test("verified-evidence fallback rejects an empty diff even with a passing test", async () => {
+  const f = fixture();
+  const queue = [response(["patch", { path: "src/value.txt", content: "1\n" }]), response(["run_test", {}], ["git_diff", { path: "src/value.txt" }])];
+  const result = await runMinimalHarness(f.task, { infer: async () => queue.shift(), runTest: runTestCommand, maxToolCalls: 3 });
+  assert.equal(result.status, "PARTIAL");
+  assert.equal(result.code, "HARNESS_MAX_TOOL_CALLS");
+  assert.equal(result.observations.some((x) => x.name === "git_diff" && x.ok), false);
+});
+
+test("verified-evidence fallback rejects a fake PASS test result", async () => {
+  const f = fixture();
+  const queue = [response(["patch", { path: "src/value.txt", content: "2\n" }]), response(["run_test", {}], ["git_diff", { path: "src/value.txt" }])];
+  const result = await runMinimalHarness(f.task, { infer: async () => queue.shift(), runTest: async () => ({ status: "PASS" }), maxToolCalls: 3 });
+  assert.equal(result.status, "PARTIAL");
+  assert.equal(result.code, "HARNESS_MAX_TOOL_CALLS");
+  assert.equal(result.observations.some((x) => x.name === "run_test" && x.ok), false);
+});
+
+test("verified-evidence fallback accepts only nonempty diff plus parent test evidence", async () => {
+  const f = fixture();
+  const queue = [response(["patch", { path: "src/value.txt", content: "2\n" }]), response(["run_test", {}], ["git_diff", { path: "src/value.txt" }])];
+  const result = await runMinimalHarness(f.task, { infer: async () => queue.shift(), runTest: runTestCommand, maxToolCalls: 3 });
+  assert.equal(result.status, "PASS");
+  assert.match(result.summary, /parent-verified evidence/i);
+});

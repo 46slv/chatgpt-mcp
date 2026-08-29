@@ -10,7 +10,7 @@ import {
   DEVEXEC_RUNTIME,
   DEVEXEC_PROVIDER,
 } from "./devexec-runtime-selector.mjs";
-import { createTaskContract } from "./local-worker-runtime.mjs";
+import { createTaskContract, runTestCommand } from "./local-worker-runtime.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-selector-"));
@@ -38,7 +38,7 @@ test("explicit local FreeToken selection uses only the supplied adapter", async 
   const task = fixture();
   const provider = { identity: { runtime: "local", provider: "freetoken" }, async run() { fs.mkdirSync(path.join(task.worktree, "src")); fs.writeFileSync(path.join(task.worktree, "src/value.txt"), "ok\n"); return { status: "PASS" }; } };
   const entry = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: provider } });
-  const outcome = await entry.run(task, { runTest: async () => ({ status: "PASS" }) });
+  const outcome = await entry.run(task, { runTest: runTestCommand });
   assert.equal(outcome.result.status, "DONE");
   assert.equal(outcome.result.runtime_provider_identity.provider, "freetoken");
 });

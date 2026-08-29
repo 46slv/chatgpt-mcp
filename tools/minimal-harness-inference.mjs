@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { runTestCommand } from "./local-worker-runtime.mjs";
+import { isParentControlledTestEvidence, runTestCommand } from "./local-worker-runtime.mjs";
 
 // This module is provider neutral: an OpenAI-compatible `infer` function is
 // the only model dependency. The parent runtime still owns the repository
@@ -195,6 +195,18 @@ function failureFingerprint(error) {
   return crypto.createHash("sha256").update(String(error?.code || "ERROR") + ":" + String(error?.message || error)).digest("hex");
 }
 
+function nonEmptyBoundedDiff(result) {
+  if (!result || typeof result.diff !== "string") return false;
+  const diff = result.diff.trim();
+  return diff.length > 0 && !diff.includes("[TRUNCATED]");
+}
+
+function progressFromObservations(observations) {
+  return observations.some((entry) => entry.name === "patch" && entry.ok)
+    || observations.some((entry) => entry.name === "run_test" && entry.ok)
+    || observations.some((entry) => entry.name === "git_diff" && entry.ok);
+}
+
 export async function runMinimalHarness(task, { infer, signal, runTest, maxToolCalls = task.max_tool_calls, maxHistory = MAX_HISTORY, timeoutMs = task.timeout, outputLimit = task.output_limit, logger = () => {} } = {}) {
   if (typeof infer !== "function") return { status: "FAILED", code: "INFERENCE_UNAVAILABLE", reason: "inference function is required", tool_calls: 0 };
   const started = Date.now();
@@ -238,18 +250,27 @@ export async function runMinimalHarness(task, { infer, signal, runTest, maxToolC
         if (count >= 2) return { status: "BLOCKED", code: "DUPLICATE_FAILURE", reason: "duplicate tool failure threshold reached", tool_calls: toolCalls, observations };
         result = { error: code, message: bounded(error?.message || error, 1000) };
       }
-      const toolOk = !result?.error && (name !== "run_test" || result?.status === "PASS");
-      observations.push({ name, ok: toolOk });
+      const toolOk = !result?.error
+        && (name !== "run_test" || (result?.status === "PASS" && isParentControlledTestEvidence(result, task)))
+        && (name !== "git_diff" || nonEmptyBoundedDiff(result));
+      observations.push({ name, ok: toolOk, ...(name === "run_test" ? { test: result } : {}), ...(name === "git_diff" ? { diff: result } : {}) });
       const encoded = bounded(JSON.stringify(result), MAX_OUTPUT);
       messages.push({ role: "tool", tool_call_id: callId, name, content: encoded });
-      logger({ event: "harness_tool", name, ok: !result?.error, tool_calls: toolCalls });
+      logger({ event: "harness_tool", name, ok: toolOk, tool_calls: toolCalls });
       if (Date.now() >= deadline) break;
     }
   }
+  // This is only a narrow, evidence-based fallback for a worker that ran out
+  // of tool-call budget without returning its final text. It is never valid
+  // after cancellation/deadline and never trusts model-reported PASS values.
   const completedEvidence = observations.some((x) => x.name === "patch" && x.ok)
-    && observations.some((x) => x.name === "run_test" && x.ok)
-    && observations.some((x) => x.name === "git_diff" && x.ok);
-  if (completedEvidence) return { status: "PASS", summary: "bounded harness completed after tool-call limit", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+    && observations.some((x) => x.name === "run_test" && x.ok && isParentControlledTestEvidence(x.test, task))
+    && observations.some((x) => x.name === "git_diff" && x.ok && nonEmptyBoundedDiff(x.diff));
+  const cancelled = !!signal?.aborted;
   const timedOut = Date.now() >= deadline;
-  return { status: "FAILED", code: timedOut ? "HARNESS_TIMEOUT" : "HARNESS_MAX_TOOL_CALLS", reason: timedOut ? "harness deadline exceeded" : "maximum tool calls reached", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  if (completedEvidence && !cancelled && !timedOut) return { status: "PASS", summary: "bounded harness completed after tool-call limit with parent-verified evidence", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  const progressed = progressFromObservations(observations);
+  if (cancelled) return { status: "CANCELLED", code: "CANCELLED", reason: "harness cancelled before verified completion", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  if (timedOut) return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_TIMEOUT", reason: "harness deadline exceeded before verified completion", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_MAX_TOOL_CALLS", reason: progressed ? "maximum tool calls reached before verified completion" : "maximum tool calls reached", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
 }

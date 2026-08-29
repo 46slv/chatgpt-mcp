@@ -72,6 +72,23 @@ test("parent recomputes allowed edits and ignores worker claims", async () => {
   assert.equal(outcome.log.runtime_provider_identity.token, "[REDACTED]");
 });
 
+test("parent postflight rejects a fake PASS test result even when the worker edits an allowed file", async () => {
+  const { root, task } = fixture();
+  const outcome = await runLocalWorkerTask(task, {
+    adapter: { identity: { runtime: "local", provider: "fake" }, async run() { fs.mkdirSync(path.join(root, "src")); fs.writeFileSync(path.join(root, "src/value.txt"), "1\n"); return { status: "PASS" }; } },
+    runTest: async () => ({ status: "PASS" }),
+  });
+  assert.equal(outcome.result.status, "FAILED");
+  assert.match(outcome.result.blocker, /parent-controlled|test evidence/i);
+});
+
+test("parent postflight rejects a provider PASS with no nonempty diff", async () => {
+  const { task } = fixture();
+  const outcome = await runLocalWorkerTask(task, { adapter: { identity: { runtime: "local", provider: "fake" }, async run() { return { status: "PASS" }; } } });
+  assert.equal(outcome.result.status, "FAILED");
+  assert.match(outcome.result.blocker, /nonempty.*diff/i);
+});
+
 test("scope escape is blocked even when adapter reports success", async () => {
   const { root, task } = fixture();
   const outcome = await runLocalWorkerTask(task, {
