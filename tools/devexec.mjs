@@ -22,7 +22,7 @@ const RUNS_DIR = process.env.DEV_EXEC_RUNS_DIR || path.join(BASE, "ChatGPTMCPPro
 const TERMINAL_PHASES = new Set(["COMPLETE", "FAILED", "NEEDS_HUMAN", "CANCELLED"]);
 
 function validateRunId(runId) {
- if (!runId || !/^[A-Za-z0-9._-]+$/.test(runId)) {
+ if (!runId || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(runId) || runId.includes("..") || runId.includes("/") || runId.includes("\\") || path.isAbsolute(runId)) {
  throw new Error("Invalid run id.");
  }
  return runId;
@@ -42,7 +42,7 @@ function loadRunState(runId) {
 }
 
 function makeContinueRunId() {
- return process.env.DEV_EXEC_CONTINUE_RUN_ID || ("DEV-EXEC-CONTINUE-" + Date.now() + "-" + crypto.randomBytes(3).toString("hex"));
+ return validateRunId(process.env.DEV_EXEC_CONTINUE_RUN_ID || ("DEV-EXEC-CONTINUE-" + Date.now() + "-" + crypto.randomBytes(3).toString("hex")));
 }
 
 function runNode(script, args, env = process.env) {

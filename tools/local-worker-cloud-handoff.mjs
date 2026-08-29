@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import {writeMissionEscalation} from "./mission-supervisor-io.mjs";
 export function defaultLocalWorkerEscalationFile(runId=process.env.DEV_EXEC_RUN_ID){
- if(!runId||!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error("valid DEV_EXEC_RUN_ID required");
+ if(!runId||!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(runId)||runId.includes("..")||path.isAbsolute(runId)) throw new Error("valid DEV_EXEC_RUN_ID required");
  const base=process.env.LOCALAPPDATA||path.join(os.homedir(),"AppData","Local");
  return path.join(base,"ChatGPTMCPProbe","dev-exec-runs",runId,"mission-escalation.json");
 }

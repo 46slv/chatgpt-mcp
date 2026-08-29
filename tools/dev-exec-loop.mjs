@@ -15,9 +15,17 @@ import { loadOpsSyncPacket, appendOpsSyncToReport } from "./devexec-ops-sync-env
 import { loadStopAlert, appendStopAlertToReport } from "./devexec-stop-alert-envelope.mjs";
 import { inspectLocalAgentGoalCompletion } from "./devexec-local-agent-goal-state.mjs";
 
-const RUN_ID =
+function validateRunId(value, label = "run id") {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value) || value.includes("..") || value.includes("/") || value.includes("\\") || path.isAbsolute(value)) {
+    throw new Error(`Invalid ${label}.`);
+  }
+  return value;
+}
+
+const RUN_ID = validateRunId(
   process.env.DEV_EXEC_RUN_ID ||
-  `DEV-EXEC-${Date.now()}`;
+  `DEV-EXEC-${Date.now()}`
+);
 
 process.env.DEV_EXEC_RUN_ID = RUN_ID;
 
@@ -26,7 +34,7 @@ const EXPLICIT_TARGET_ALIAS =
   null;
 
 const PARENT_RUN_ID =
- process.env.DEV_EXEC_PARENT_RUN_ID ||
+ process.env.DEV_EXEC_PARENT_RUN_ID ? validateRunId(process.env.DEV_EXEC_PARENT_RUN_ID, "parent run id") :
  null;
 
 const CONTINUE_FROM_PHASE =

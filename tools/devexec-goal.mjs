@@ -20,6 +20,10 @@ for(let i=0;i<argv.length;i++){
 const goal=parts.join(" ").trim();
 if(!goal)throw new Error("goal required");
 const id="DEV-EXEC-GOAL-"+Date.now();
+if(dry){
+ console.log(JSON.stringify({run_id:id,goal,target,decision:"DRY_RUN",worker_started:false,supervisor_used:false,durable_state_written:false},null,2));
+ process.exit(0);
+}
 const env={...process.env,DEV_EXEC_RUN_ID:id};
 if(target)env.DEV_EXEC_TARGET_ALIAS=target;
 const r=spawnSync(process.execPath,[AGENT,"start",goal],{encoding:"utf8",env,windowsHide:true});
@@ -36,10 +40,6 @@ fs.mkdirSync(dir,{recursive:true});
 const owner={protocol:"devexec.local-agent-owner",schema_version:1,dev_exec_run_id:id,agent_run_id:agent.run_id,worker_run_id:agent.worker_run_id,goal};
 fs.writeFileSync(path.join(dir,"local-agent-owner.json"),JSON.stringify(owner,null,2)+"\n");
 if(reportOnly)env.DEV_EXEC_REPORT_ONLY="1";
-if(dry){
- console.log(JSON.stringify({...owner,decision:"NEEDS_SUPERVISOR",supervisor_used:false},null,2));
- process.exit(2);
-}
 env.DEV_EXEC_PURPOSE="Supervise Local Agent only after local escalation.";
 env.DEV_EXEC_TARGET="Apply bounded typed repair, then resume Local Agent "+agent.run_id+". Keep ordinary execution local.";
 const loop=spawnSync(process.execPath,[LOOP],{stdio:"inherit",env,windowsHide:true});
