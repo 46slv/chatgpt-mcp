@@ -80,6 +80,7 @@ export function createTaskContract(input) {
     cwd: input.cwd ?? input.worktree ?? input.repo,
     base_commit: input.base_commit,
     goal: input.goal,
+    classification: input.classification ?? input.task_classification ?? input.category ?? null,
     allowed_paths: input.allowed_paths ?? [],
     constraints: input.constraints ?? [],
     test_command: input.test_command,
@@ -93,7 +94,7 @@ export function createTaskContract(input) {
 
 export function validateTaskContract(task, { verifyGit = false } = {}) {
   if (!isObject(task) || task.version !== TASK_CONTRACT_VERSION) fail("task.version must be 1");
-  const allowedKeys = new Set(["version", "task_id", "repo", "worktree", "cwd", "base_commit", "goal", "allowed_paths", "constraints", "test_command", "timeout", "max_tool_calls", "output_limit"]);
+  const allowedKeys = new Set(["version", "task_id", "repo", "worktree", "cwd", "base_commit", "goal", "classification", "allowed_paths", "constraints", "test_command", "timeout", "max_tool_calls", "output_limit"]);
   const unknownKeys = Object.keys(task).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length) fail(`unknown task fields: ${unknownKeys.join(", ")}`);
   asString(task.task_id, "task_id", { max: 200 });
@@ -104,6 +105,7 @@ export function validateTaskContract(task, { verifyGit = false } = {}) {
   asString(task.base_commit, "base_commit", { max: 80 });
   if (!/^[0-9a-f]{40}$/i.test(task.base_commit)) fail("base_commit must be a full commit id");
   asString(task.goal, "goal", { max: MAX_GOAL_CHARS });
+  validateTaskSuitability(task);
   if (!Array.isArray(task.allowed_paths) || task.allowed_paths.length > MAX_PATHS) fail("allowed_paths must be a bounded array");
   const allowedPaths = task.allowed_paths.map((entry) => normalizeRelativePath(entry, "allowed_paths entry"));
   if (!Array.isArray(task.constraints) || task.constraints.length > MAX_CONSTRAINTS || task.constraints.some((x) => typeof x !== "string" || x.length > 1000)) fail("constraints must be bounded strings");
@@ -114,6 +116,25 @@ export function validateTaskContract(task, { verifyGit = false } = {}) {
   const normalized = { ...task, repo, worktree, cwd, base_commit: task.base_commit.toLowerCase(), goal: task.goal.trim(), allowed_paths: [...new Set(allowedPaths)], test_command: testCommand, constraints: [...task.constraints] };
   if (verifyGit) return { task: normalized, boundary: validateTaskBoundary(normalized) };
   return normalized;
+}
+
+const UNSUITABLE_TASK_CLASSIFICATIONS = Object.freeze(new Set([
+  "architecture", "authority", "integration", "multi-repo", "multi_repo", "destructive", "final-audit", "final_audit",
+]));
+
+/**
+ * Local inference is intentionally limited to bounded implementation tasks.
+ * Classification is an explicit caller-owned field; this gate never guesses
+ * from free-form prose and therefore cannot silently reroute a task.
+ */
+export function validateTaskSuitability(task) {
+  const classification = task?.classification;
+  if (classification == null || classification === "") return { suitable: true, classification: null };
+  if (typeof classification !== "string" || classification.length > 128) fail("classification must be a bounded string", "TASK_UNSUITABLE");
+  const normalized = classification.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const denied = UNSUITABLE_TASK_CLASSIFICATIONS.has(normalized) || ["architecture-", "authority-", "integration-", "multi-repo-", "multi_repository-", "destructive-", "final-audit-"].some((prefix) => normalized.startsWith(prefix));
+  if (denied) fail(`task classification is not suitable for local runtime: ${normalized}`, "TASK_UNSUITABLE");
+  return { suitable: true, classification: normalized };
 }
 
 function runGit(worktree, args) {
@@ -294,7 +315,11 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   else if (unexpected.length) { status = "BLOCKED"; blocker = `unexpected changed paths: ${unexpected.join(", ")}`; }
   else if (committed) { status = "BLOCKED"; blocker = "worker commit detected; local worker must not commit"; }
   else if (baseDrift) { status = "BLOCKED"; blocker = "base commit drift detected"; }
-  else if (adapterResult && typeof adapterResult.status === "string" && !["PASS", "DONE", "SUCCESS"].includes(adapterResult.status)) { status = "FAILED"; blocker = "local worker reported runtime failure"; }
+  else if (!adapterResult || typeof adapterResult !== "object" || typeof adapterResult.status !== "string") { status = "FAILED"; blocker = "malformed local worker provider result"; }
+  else if (adapterResult && typeof adapterResult.status === "string" && !["PASS", "DONE", "SUCCESS"].includes(adapterResult.status)) {
+    status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
+    blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : "local worker reported runtime failure";
+  }
   else if (tests.status !== "PASS") { status = "FAILED"; blocker = tests.timed_out ? "test timeout" : "tests did not pass"; }
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: after.changed_paths, tests, blocker,

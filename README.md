@@ -49,6 +49,23 @@ All tools are **blocking** — they return only when the response is ready (or t
 
 DevExec's local worker can optionally ask one fixed ChatGPT conversation for bounded ordinary-text guidance. Set `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS=<alias>` in the invoking process; the default is disabled. Optional `DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS`, `DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS`, `DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS`, and `DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES` controls are clamped to safe bounds (malformed values deny the opt-in). The local model can emit only the strict `{type:"REQUEST_CONSULTATION",prompt:string}` decision. Target, transport (`chatgpt_reply`), request ID, budgets, timeout, and durable state are runner-owned. Sensitive, destructive, account, permission, file, credential, personal-data, or unknown requests are blocked. Responses are untrusted bounded evidence and never become shell authority.
 
+### Explicit local runtime selector
+
+The existing Cloud/LM Studio path remains the default. A local provider is never
+selected automatically; opt in explicitly and inspect the selection first:
+
+```powershell
+node tools/devexec.mjs runtime select --runtime local --provider freetoken --enabled
+```
+
+Only bounded task contracts (goal, repository-relative allowed paths, exact
+repo/worktree and base commit, and an argv-style test command) may be dispatched
+through the local selector. Architecture, authority, integration, multi-repo,
+destructive, and final-audit classifications are blocked. FreeToken lifecycle
+start/stop remains owned by its adapter, while the parent runtime recomputes
+Git changes and test evidence before accepting a result. Omit the flags (or use
+`--disabled`) to retain the established path.
+
 ### Reusable handoff for autonomous consultation
 
 For another Codex task, register the user-prepared ChatGPT URL first, then freeze

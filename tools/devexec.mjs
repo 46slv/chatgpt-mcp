@@ -14,6 +14,7 @@ import { queueTerminalStopAlert } from "./devexec-stop-alert-runtime.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const targetCli = path.join(here, "devexec-target.mjs");
 const localAgentCli = path.join(here, "local-agent-facade.mjs");
+const runtimeCli = path.join(here, "devexec-runtime-cli.mjs");
 const goalCli = path.join(here, "devexec-goal.mjs");
 const runner = process.env.DEV_EXEC_RUNNER_PATH || path.join(here, "dev-exec-loop.mjs");
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
@@ -73,6 +74,7 @@ function usage() {
  " devexec agent start <goal>",
  " devexec agent resume <local-agent-run-id>",
  " devexec agent status <local-agent-run-id>",
+ " devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
  " devexec recover inspect <run-id>",
@@ -98,6 +100,13 @@ if (command === "agent") {
  const subcommand = args[0];
  if (!["start", "resume", "status"].includes(subcommand)) throw new Error("agent requires start, resume, or status.");
  const code = await runNode(localAgentCli, args, process.env);
+ process.exit(code);
+}
+
+if (command === "runtime") {
+ const subcommand = args[0];
+ if (subcommand !== "select") throw new Error("runtime requires select.");
+ const code = await runNode(runtimeCli, args, process.env);
  process.exit(code);
 }
 
