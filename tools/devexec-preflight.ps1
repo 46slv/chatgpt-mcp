@@ -81,6 +81,7 @@ $report = [ordered]@{
         package_lock = [bool](Test-Path -LiteralPath (Join-Path $repoRoot 'package-lock.json'))
         node_modules = [bool](Test-Path -LiteralPath (Join-Path $repoRoot 'node_modules'))
         dist = [bool](Test-Path -LiteralPath (Join-Path $repoRoot 'dist'))
+        cdp_launcher = [bool](Test-Path -LiteralPath (Join-Path $repoRoot 'tools\start-chatgpt-cdp.ps1'))
     }
     prerequisites = [ordered]@{
         node = Get-CommandReport 'node'
@@ -98,6 +99,7 @@ $report = [ordered]@{
         consultation_state = Get-PathReport $consultationStateDir
         lmstudio_mcp = Get-ConfigReport $mcpConfig 'mcp'
         local_executor_root = [Environment]::GetEnvironmentVariable('LOCAL_WORKER_EXECUTOR_ROOT')
+        cdp_launcher_profile = $userDataDir
     }
     listeners = [ordered]@{
         cdp_127_0_0_1 = [ordered]@{ port = $CdpPort; listening = (Test-LocalListener $CdpPort) }
@@ -108,6 +110,9 @@ $report = [ordered]@{
         local_worker_model_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_MODEL'))
         local_worker_lms_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_LMS'))
         chatgpt_mcp_user_data_dir_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR'))
+        chatgpt_mcp_chrome_path_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHROME_PATH'))
+        chatgpt_mcp_chat_url_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHAT_URL'))
+        chatgpt_mcp_allow_edge = ([Environment]::GetEnvironmentVariable('CHATGPT_MCP_ALLOW_EDGE') -eq '1')
         chatgpt_consultation_enabled = ([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_ENABLED') -eq '1')
         chatgpt_consultation_target_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS'))
     }

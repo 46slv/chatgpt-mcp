@@ -20,15 +20,34 @@ npm test
 
 ## 2. Prepare ChatGPT and Chrome CDP
 
-Use a dedicated Chrome profile so cookies remain outside the checkout. Close any Chrome instance using that profile, then start Chrome with CDP enabled (adjust the executable path if needed):
+Use a dedicated Chrome profile so cookies remain outside the checkout. The
+portable launcher selects an explicit `CHATGPT_MCP_CHROME_PATH`, then stable
+system Chrome locations, then a `chrome` command, and finally the installed
+Playwright Chromium. It starts a visible browser on localhost CDP port 9222;
+the profile is selected by `CHATGPT_MCP_USER_DATA_DIR` or the home-relative
+default. It never kills an existing browser, deletes a profile, edits the
+registry, or writes browser configuration.
+
+Preview path selection and arguments without launching:
 
 ```powershell
-$chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-$profile = "$env:LOCALAPPDATA\ChatGPTMCP\chrome-cdp"
-Start-Process $chrome -ArgumentList "--remote-debugging-port=9222","--user-data-dir=$profile","https://chatgpt.com"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\start-chatgpt-cdp.ps1 `
+  -Plan -UserDataDir "$env:LOCALAPPDATA\ChatGPTMCP\chrome-cdp" -ChatUrl https://chatgpt.com
 ```
 
-Log in interactively in that window. DevExec does not accept credentials on the command line and does not store cookies in Git. If Chrome is already running, use a new `--user-data-dir` and port instead of reusing an unknown session.
+Start the visible session after reviewing the plan:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\start-chatgpt-cdp.ps1 `
+  -UserDataDir "$env:LOCALAPPDATA\ChatGPTMCP\chrome-cdp" -ChatUrl https://chatgpt.com
+```
+
+Log in interactively in that window. If port 9222 is already a CDP listener,
+the launcher reports `reuse_existing` and does not open another browser. If a
+non-CDP process owns the port, it reports `blocked_port_in_use`; choose another
+`-CdpPort` and pass the same port to target capture/verification. Microsoft
+Edge is never selected implicitly; use `-AllowEdge` (or set
+`CHATGPT_MCP_ALLOW_EDGE=1`) only when Edge compatibility is intentional.
 
 ## 3. Capture and verify a target
 
@@ -103,6 +122,8 @@ It reports command availability, repository/build paths, existence and validity 
 - `403` when publishing: the GitHub identity lacks write permission to the upstream repository. Push to an authorized fork/remote or obtain permission; do not force-push or rewrite history.
 - Missing model / `MODEL_NOT_FOUND`: inspect the model id shown by LM Studio, set `LOCAL_WORKER_MODEL` exactly, ensure the LM Studio local server is listening on its configured port, and rerun preflight. No model is downloaded automatically.
 - `CDP_UNAVAILABLE`: verify the port, profile, and Chrome process; do not broaden network exposure beyond localhost.
+- `browser_not_found`: set `CHATGPT_MCP_CHROME_PATH` to an existing Chrome executable or install Playwright Chromium with `npx playwright install chromium`. Use `-Plan` first; no browser is started in plan mode.
+- `early_exit` / `startup_timeout`: the browser was not terminated by the launcher. Check the reported executable/profile and existing process lock, then retry with a dedicated profile and bounded `-StartupTimeoutSeconds`.
 - Consultation remains disabled unless `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and a valid `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS` are present. `BLOCKED` and `DELIVERY_UNKNOWN` are expected fail-closed outcomes, not permission prompts to bypass.
 
 For a new machine, the bounded completion check is: `npm ci`, Playwright Chromium installed, `npm run build`, `npm test` passing, target captured and verified, then a dry-run with write disabled. Live ChatGPT or LM Studio success depends on external login and local services and should be recorded separately from deterministic repository tests.

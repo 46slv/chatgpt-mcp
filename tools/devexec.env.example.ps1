@@ -29,6 +29,13 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 
 # Optional persistent browser profile override. Keep it outside this repository.
 # $env:CHATGPT_MCP_USER_DATA_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\user-data'
+# Optional visible Chrome CDP launcher overrides. The launcher never kills an
+# existing browser or deletes this profile. Edge is disabled unless explicitly
+# opted in with CHATGPT_MCP_ALLOW_EDGE=1 or the launcher's -AllowEdge switch.
+# $env:CHATGPT_MCP_CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+# $env:CHATGPT_MCP_CDP_PORT = '9222'
+# $env:CHATGPT_MCP_CHAT_URL = 'https://chatgpt.com'
+# $env:CHATGPT_MCP_ALLOW_EDGE = '0'
 
 # Optional DevExec state/run roots. Keep runtime state outside this repository.
 # $env:DEV_EXEC_STATE_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\dev-exec-state'
