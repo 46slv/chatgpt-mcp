@@ -46,6 +46,22 @@ test("targeted reply performs one exact navigation before send", async () => {
   assert.equal(fake.page.url(), "https://chatgpt.com/c/prepared-2");
 });
 
+test("targeted reply preserves a project-scoped conversation URL", async () => {
+  const targetUrl = "https://chatgpt.com/g/g-p-slug/c/prepared-project-2";
+  const fake = fakePage("https://chatgpt.com");
+  let navigationTarget = null;
+  await ensureReplyTargetOnPage(
+    fake.page,
+    parseChatGPTTargetUrl(targetUrl),
+    {
+      navigate: async (url) => { navigationTarget = url; fake.setUrl(url); return true; },
+      isLoggedIn: async () => true,
+    },
+  );
+  assert.equal(navigationTarget, targetUrl);
+  assert.equal(fake.page.url(), targetUrl);
+});
+
 test("redirects, login state, and identity mismatches fail before typing", async () => {
   const target = parseChatGPTTargetUrl("https://chatgpt.com/c/prepared-3");
   const redirected = fakePage("https://chatgpt.com");
@@ -75,4 +91,3 @@ test("redirects, login state, and identity mismatches fail before typing", async
     /identity mismatch|redirected/,
   );
 });
-

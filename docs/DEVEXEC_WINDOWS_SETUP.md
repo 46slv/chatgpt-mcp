@@ -68,11 +68,16 @@ variable unset to retain the legacy private persistent-context behavior.
 ## 3. Capture and verify a target
 
 You can register a user-prepared conversation directly. The URL must be
-exactly `https://chatgpt.com/c/<safe-id>` (no trailing slash, query, fragment,
-port, userinfo, or extra path):
+exactly `https://chatgpt.com/c/<safe-id>` or
+`https://chatgpt.com/g/<safe-slug>/c/<safe-id>` (no trailing slash, query,
+fragment, port, userinfo, encoded separators, dot segments, or extra path).
+The full URL is retained for navigation while the final conversation segment
+is stored as `conversation_id`:
 
 ```powershell
 node tools/devexec-target.mjs set my-chat https://chatgpt.com/c/<conversation-id>
+# Project/custom-GPT-scoped conversation (also accepted):
+node tools/devexec-target.mjs set my-project-chat https://chatgpt.com/g/<project-or-g-slug>/c/<conversation-id>
 node tools/devexec-target.mjs use my-chat
 ```
 
@@ -168,7 +173,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\devexec-preflight.ps
 
 It reports command availability, repository/build paths, existence and validity of config files (names only), localhost listeners, and whether the worker write flag/model overrides are set. It never installs, launches, logs in, writes state, or changes power/network/browser settings.
 
-- `TARGET_NOT_OPEN`: start the CDP Chrome profile on port 9222, open the exact captured `chatgpt.com/c/<id>` URL, and run `node tools/devexec-target.mjs verify <alias>` again.
+- `TARGET_NOT_OPEN`: start the CDP Chrome profile on port 9222, open the exact captured `chatgpt.com/c/<id>` or `chatgpt.com/g/<slug>/c/<id>` URL, and run `node tools/devexec-target.mjs verify <alias>` again.
 - `403` when publishing: the GitHub identity lacks write permission to the upstream repository. Push to an authorized fork/remote or obtain permission; do not force-push or rewrite history.
 - Missing model / `MODEL_NOT_FOUND`: inspect the model id shown by LM Studio, set `LOCAL_WORKER_MODEL` exactly, ensure the LM Studio local server is listening on its configured port, and rerun preflight. No model is downloaded automatically.
 - `CDP_UNAVAILABLE`: verify the port, profile, and Chrome process; do not broaden network exposure beyond localhost.

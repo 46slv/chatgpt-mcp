@@ -80,7 +80,7 @@ Returns: { response, elapsed_seconds, model, chat_id, poll_count }`,
     inputSchema: z.object({
       prompt: z.string().min(1).describe('The follow-up prompt to send'),
       timeout_minutes: z.number().min(1).max(120).default(60).describe('Max wait time in minutes (default: 60)'),
-      target_url: z.string().optional().describe('Runner-owned exact https://chatgpt.com/c/<safe-id> target; omit for legacy current-chat behavior'),
+      target_url: z.string().optional().describe('Runner-owned exact https://chatgpt.com/c/<safe-id> or https://chatgpt.com/g/<safe-slug>/c/<safe-id> target; omit for legacy current-chat behavior'),
       expected_conversation_id: z.string().optional().describe('Runner-owned conversation id; must match target_url when supplied'),
     }),
     annotations: {

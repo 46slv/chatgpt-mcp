@@ -140,7 +140,10 @@ export interface ChatGPTTargetIdentity {
 }
 
 /**
- * Parse the only URL form accepted for a targeted ChatGPT reply.
+ * Parse one of the two canonical URL forms accepted for a targeted ChatGPT
+ * reply: a direct conversation or a conversation scoped to a /g/<slug>
+ * project/custom-GPT path.  The complete URL is retained for navigation;
+ * conversation identity is always extracted from the final safe segment.
  *
  * Keep this validator equivalent to tools/target-registry.mjs: accepting a
  * URL that the registry would reject would let a runner freeze one identity
@@ -153,10 +156,10 @@ export function parseChatGPTTargetUrl(value: unknown): ChatGPTTargetIdentity {
     throw new Error('Target URL must be an exact non-empty string.');
   }
 
-  const match = /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9-]+)$/.exec(value);
+  const match = /^https:\/\/chatgpt\.com\/(?:c\/([A-Za-z0-9-]+)|g\/([A-Za-z0-9-]+)\/c\/([A-Za-z0-9-]+))$/.exec(value);
   if (!match) {
     throw new Error(
-      'Target URL must exactly match https://chatgpt.com/c/<safe-id> without query, fragment, port, userinfo, trailing slash, or extra path.'
+      'Target URL must exactly match https://chatgpt.com/c/<safe-id> or https://chatgpt.com/g/<safe-slug>/c/<safe-id> without query, fragment, port, userinfo, trailing slash, or extra path.'
     );
   }
 
@@ -168,12 +171,12 @@ export function parseChatGPTTargetUrl(value: unknown): ChatGPTTargetIdentity {
     parsed.port ||
     parsed.search ||
     parsed.hash ||
-    parsed.pathname !== `/c/${match[1]}`
+    parsed.pathname !== value.slice('https://chatgpt.com'.length)
   ) {
     throw new Error('Target URL is not canonical.');
   }
 
-  return { url: value, conversationId: match[1] };
+  return { url: value, conversationId: match[1] || match[3] };
 }
 
 /** Validate a runner-owned conversation id using the same safe-id contract. */

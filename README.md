@@ -52,7 +52,11 @@ DevExec's local worker can optionally ask one fixed ChatGPT conversation for bou
 ### Reusable handoff for autonomous consultation
 
 For another Codex task, register the user-prepared ChatGPT URL first, then freeze
-that alias for the run. Enable standing ordinary-text consultation explicitly;
+that alias for the run. Both direct conversation URLs
+(`https://chatgpt.com/c/<safe-id>`) and project/custom-GPT-scoped URLs
+(`https://chatgpt.com/g/<safe-slug>/c/<safe-id>`) are accepted; the complete URL
+is preserved for navigation and the final segment is used as the conversation
+identity. Enable standing ordinary-text consultation explicitly;
 the local planner cannot choose a URL, tool, alias, or request ID. The adapter
 passes the frozen `target_url` and derived
 `expected_conversation_id` to `chatgpt_reply`, which navigates only to that

@@ -88,9 +88,10 @@ if ($consultationTargetContract.configured -and (Test-Path -LiteralPath $targetR
         if ($null -ne $entry) {
             $consultationTargetContract.present = $true
             $url = [string]$entry.chat_url
-            $match = [regex]::Match($url, '^https://chatgpt\.com/c/([A-Za-z0-9-]+)$')
+            $match = [regex]::Match($url, '^https://chatgpt\.com/(?:c/([A-Za-z0-9-]+)|g/[A-Za-z0-9-]+/c/([A-Za-z0-9-]+))$')
             $consultationTargetContract.canonical = $match.Success
-            $consultationTargetContract.conversation_id_match = $match.Success -and ([string]$entry.conversation_id -eq $match.Groups[1].Value)
+            $conversationId = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+            $consultationTargetContract.conversation_id_match = $match.Success -and ([string]$entry.conversation_id -eq $conversationId)
         }
     } catch { }
 }

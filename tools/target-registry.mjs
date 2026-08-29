@@ -9,14 +9,22 @@ export function defaultRegistryPath(env = process.env) {
   return path.join(base, "DevExec", "targets.json");
 }
 
-/** Parse the only URL form accepted for a prepared ChatGPT target. */
+/**
+ * Parse one of the two URL forms accepted for a prepared ChatGPT target.
+ *
+ * The optional /g/<slug>/ segment is preserved verbatim in chat_url so
+ * navigation and frozen-target checks retain the user-selected project/chat
+ * context.  Conversation identity remains the final safe segment.
+ */
 export function parseChatGPTTargetUrl(value) {
   if (typeof value !== "string" || value.length === 0 || value !== value.trim()) throw new Error("Target URL must be an exact non-empty string.");
-  const match = /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9-]+)$/.exec(value);
-  if (!match) throw new Error("Target URL must exactly match https://chatgpt.com/c/<safe-id> without query, fragment, port, userinfo, trailing slash, or extra path.");
+  const match = /^https:\/\/chatgpt\.com\/(?:c\/([A-Za-z0-9-]+)|g\/([A-Za-z0-9-]+)\/c\/([A-Za-z0-9-]+))$/.exec(value);
+  if (!match) throw new Error("Target URL must exactly match https://chatgpt.com/c/<safe-id> or https://chatgpt.com/g/<safe-slug>/c/<safe-id> without query, fragment, port, userinfo, trailing slash, or extra path.");
+  const conversationId = match[1] || match[3];
   const parsed = new URL(value);
-  if (parsed.origin !== "https://chatgpt.com" || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== `/c/${match[1]}`) throw new Error("Target URL is not canonical.");
-  return { chat_url: value, conversation_id: match[1] };
+  const rawPath = value.slice("https://chatgpt.com".length);
+  if (parsed.origin !== "https://chatgpt.com" || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== rawPath) throw new Error("Target URL is not canonical.");
+  return { chat_url: value, conversation_id: conversationId };
 }
 
 export const normalizeChatUrl = parseChatGPTTargetUrl;
@@ -212,7 +220,7 @@ export async function captureCurrentChat({ cdpBase = "http://127.0.0.1:9222" } =
   const targets = await response.json();
   const candidates = targets.filter((target) =>
     target.type === "page" &&
-    /^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]+$/.test(target.url || "") &&
+    /^https:\/\/chatgpt\.com\/(?:c\/[A-Za-z0-9-]+|g\/[A-Za-z0-9-]+\/c\/[A-Za-z0-9-]+)$/.test(target.url || "") &&
     target.webSocketDebuggerUrl
   );
   const inspected = [];
