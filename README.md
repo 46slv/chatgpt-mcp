@@ -66,6 +66,24 @@ start/stop remains owned by its adapter, while the parent runtime recomputes
 Git changes and test evidence before accepting a result. Omit the flags (or use
 `--disabled`) to retain the established path.
 
+The public task entrypoint is explicit and contract-first. `--task` points to a
+version-1 `TaskContract` JSON file; the file is size-bounded and unknown fields
+are rejected before any provider is constructed. Results are a bounded,
+redacted `ResultContract` on stdout. Use `--evidence <path>` (or `--log`) to
+atomically save the same result plus a structured, redacted evidence record;
+when omitted, the record is written under the user AppData directory rather
+than this checkout. A test-only `--adapter-module` seam permits deterministic
+fake providers without changing runtime routing:
+
+```powershell
+node tools/devexec.mjs runtime run --task .\task-contract.json `
+  --runtime local --provider freetoken --evidence "$env:TEMP\devexec-evidence.json"
+```
+
+Local execution is never entered when the runtime/provider flags are omitted or
+disabled. Exit status is `0` for `DONE`, `1` for `FAILED`, `2` for blocked or
+invalid input, and `130` for cancellation.
+
 The FreeToken adapter uses a provider-neutral minimal harness loop for local
 coding tasks. OpenAI-compatible tool calls are bounded by the task's timeout,
 call, history, search, and output limits. The typed tools are `read`, `search`,

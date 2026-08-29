@@ -75,6 +75,7 @@ function usage() {
  " devexec agent resume <local-agent-run-id>",
  " devexec agent status <local-agent-run-id>",
  " devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]",
+ " devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
  " devexec recover inspect <run-id>",
@@ -105,7 +106,7 @@ if (command === "agent") {
 
 if (command === "runtime") {
  const subcommand = args[0];
- if (subcommand !== "select") throw new Error("runtime requires select.");
+ if (!["select", "run"].includes(subcommand)) throw new Error("runtime requires select or run.");
  const code = await runNode(runtimeCli, args, process.env);
  process.exit(code);
 }
