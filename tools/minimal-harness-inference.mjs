@@ -10,7 +10,7 @@ import { isParentControlledTestEvidence, runTestCommand } from "./local-worker-r
 export const MINIMAL_HARNESS_TOOLS = Object.freeze([
   { type: "function", function: { name: "read", description: "Read a bounded repository-relative text file.", parameters: { type: "object", properties: { path: { type: "string" }, max_chars: { type: "integer", minimum: 1, maximum: 16000 } }, required: ["path"], additionalProperties: false } } },
   { type: "function", function: { name: "search", description: "Search bounded text in repository files.", parameters: { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 200 }, path: { type: "string" }, max_results: { type: "integer", minimum: 1, maximum: 40 } }, required: ["query"], additionalProperties: false } } },
-  { type: "function", function: { name: "patch", description: "Replace or unified-patch one allowed file with bounded content after an optional SHA-256 check.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string", maxLength: 65536 }, patch: { type: "string", maxLength: 65536 }, expected_sha256: { type: "string", pattern: "^[0-9a-fA-F]{64}$" } }, required: ["path"], additionalProperties: false } } },
+  { type: "function", function: { name: "apply_patch", description: "Apply one bounded exact old/new (or search/replace) replacement, or a unified patch, to one allowed file after an optional SHA-256 check. Never rewrite a whole file.", parameters: { type: "object", properties: { path: { type: "string" }, old: { type: "string", minLength: 1, maxLength: 1800 }, new: { type: "string", maxLength: 2200 }, search: { type: "string", minLength: 1, maxLength: 1800 }, replace: { type: "string", maxLength: 2200 }, content: { type: "string", maxLength: 65536 }, patch: { type: "string", maxLength: 65536 }, expected_sha256: { type: "string", pattern: "^[0-9a-fA-F]{64}$" } }, required: ["path"], additionalProperties: false } } },
   { type: "function", function: { name: "run_test", description: "Run the task's fixed argv test command.", parameters: { type: "object", properties: {}, additionalProperties: false } } },
   { type: "function", function: { name: "git_diff", description: "Return bounded diff metadata/content for allowed paths.", parameters: { type: "object", properties: { path: { type: "string" }, max_chars: { type: "integer", minimum: 1, maximum: 16000 } }, additionalProperties: false } } },
 ]);
@@ -20,6 +20,9 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "venv", "__pycache__
 const MAX_HISTORY = 20;
 const MAX_OUTPUT = 16000;
 const MAX_SEARCH_FILES = 300;
+const MAX_EXACT_OLD = 1800;
+const MAX_EXACT_NEW = 2200;
+const MAX_EXACT_LINES = 35;
 
 function bounded(value, max, fallback = "") {
   const text = value == null ? fallback : String(value);
@@ -67,6 +70,34 @@ function parseArgs(raw) {
 
 function hashFile(file) {
   try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+}
+
+function validateExactReplacement(old, replacement) {
+  if (typeof old !== "string" || old.length === 0) throw new Error("old/search snippet is required");
+  if (typeof replacement !== "string") throw new Error("new/replace text is required");
+  if (old.length > MAX_EXACT_OLD || replacement.length > MAX_EXACT_NEW) throw new Error("targeted patch is bounded");
+  if (old.split(/\r?\n/).length > MAX_EXACT_LINES || replacement.split(/\r?\n/).length > MAX_EXACT_LINES) throw new Error("targeted patch has too many lines");
+}
+
+function applyExactReplacement(original, old, replacement) {
+  validateExactReplacement(old, replacement);
+  const count = String(original).split(old).length - 1;
+  if (count !== 1) throw new Error(`old snippet match count is ${count}, expected 1`);
+  if (old === replacement) throw new Error("targeted patch is a no-op");
+  return String(original).replace(old, replacement);
+}
+
+function atomicWrite(file, content, root, relative) {
+  assertNoReparse(root, relative);
+  const temporary = `${file}.devexec-tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs.writeFileSync(temporary, content, "utf8");
+    assertNoReparse(root, relative);
+    fs.renameSync(temporary, file);
+  } catch (error) {
+    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch { /* best effort */ }
+    throw error;
+  }
 }
 
 function applyUnifiedPatch(original, patch) {
@@ -148,7 +179,7 @@ async function executeTool(name, rawArgs, task, context) {
     }
     return { query, hits, truncated: hits.length >= maxResults || files.length >= MAX_SEARCH_FILES };
   }
-  if (name === "patch") {
+  if (name === "patch" || name === "apply_patch") {
     const { relative, candidate } = safeRelative(root, args.path);
     assertNoReparse(root, relative);
     if (!allowedWrite(relative, task)) {
@@ -158,13 +189,16 @@ async function executeTool(name, rawArgs, task, context) {
     }
     const currentHash = hashFile(candidate);
     if (args.expected_sha256 && currentHash !== String(args.expected_sha256).toLowerCase()) throw new Error("expected_sha256 mismatch");
+    const original = fs.existsSync(candidate) ? fs.readFileSync(candidate, "utf8") : "";
     let content;
-    if (typeof args.content === "string") content = args.content;
-    else if (typeof args.patch === "string") content = applyUnifiedPatch(fs.existsSync(candidate) ? fs.readFileSync(candidate, "utf8") : "", args.patch);
-    else throw new Error("content or unified patch is required");
+    if (typeof args.old === "string" || typeof args.new === "string") content = applyExactReplacement(original, args.old, args.new);
+    else if (typeof args.search === "string" || typeof args.replace === "string") content = applyExactReplacement(original, args.search, args.replace);
+    else if (typeof args.patch === "string") content = applyUnifiedPatch(original, args.patch);
+    else if (typeof args.content === "string") content = args.content;
+    else throw new Error("old/new, search/replace, content, or unified patch is required");
     if (content.length > 65536) throw new Error("patch content is bounded");
     fs.mkdirSync(path.dirname(candidate), { recursive: true });
-    fs.writeFileSync(candidate, content, "utf8");
+    atomicWrite(candidate, content, root, relative);
     return { path: relative, sha256: hashFile(candidate), bytes: Buffer.byteLength(content, "utf8") };
   }
   if (name === "run_test") {
@@ -202,7 +236,7 @@ function nonEmptyBoundedDiff(result) {
 }
 
 function progressFromObservations(observations) {
-  return observations.some((entry) => entry.name === "patch" && entry.ok)
+  return observations.some((entry) => (entry.name === "patch" || entry.name === "apply_patch") && entry.ok)
     || observations.some((entry) => entry.name === "run_test" && entry.ok)
     || observations.some((entry) => entry.name === "git_diff" && entry.ok);
 }
@@ -263,7 +297,7 @@ export async function runMinimalHarness(task, { infer, signal, runTest, maxToolC
   // This is only a narrow, evidence-based fallback for a worker that ran out
   // of tool-call budget without returning its final text. It is never valid
   // after cancellation/deadline and never trusts model-reported PASS values.
-  const completedEvidence = observations.some((x) => x.name === "patch" && x.ok)
+  const completedEvidence = observations.some((x) => (x.name === "patch" || x.name === "apply_patch") && x.ok)
     && observations.some((x) => x.name === "run_test" && x.ok && isParentControlledTestEvidence(x.test, task))
     && observations.some((x) => x.name === "git_diff" && x.ok && nonEmptyBoundedDiff(x.diff));
   const cancelled = !!signal?.aborted;

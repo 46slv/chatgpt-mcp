@@ -42,6 +42,51 @@ test("fixture A: model patch, regression test, and diff through the generic loop
   assert.equal(result.observations.some((x) => x.name === "git_diff" && x.ok), true);
 });
 
+test("benchmark-compatible apply_patch old/new arguments are accepted", async () => {
+  const f = fixture();
+  const queue = [
+    response(["apply_patch", { path: "src/value.txt", old: "1\n", new: "2\n" }]),
+    response(["run_test", {}], ["git_diff", { path: "src/value.txt" }]),
+    { choices: [{ message: { role: "assistant", content: "DONE" } }] },
+  ];
+  const result = await runMinimalHarness(f.task, { infer: async () => queue.shift(), runTest: runTestCommand });
+  assert.equal(result.status, "PASS");
+  assert.equal(result.tool_calls, 3);
+  assert.equal(fs.readFileSync(path.join(f.root, "src", "value.txt"), "utf8"), "2\n");
+  assert.equal(result.observations.some((x) => x.name === "apply_patch" && x.ok), true);
+});
+
+test("apply_patch search/replace aliases remain exact and reject ambiguous preimages", async () => {
+  const f = fixture();
+  const queue = [
+    response(["apply_patch", { path: "src/value.txt", search: "1\n", replace: "2\n" }]),
+    { choices: [{ message: { role: "assistant", content: "DONE" } }] },
+  ];
+  const success = await runMinimalHarness(f.task, { infer: async () => queue.shift() });
+  assert.equal(success.status, "PASS");
+  assert.equal(fs.readFileSync(path.join(f.root, "src", "value.txt"), "utf8"), "2\n");
+
+  fs.writeFileSync(path.join(f.root, "src", "value.txt"), "1\n1\n");
+  const repeated = [
+    response(["apply_patch", { path: "src/value.txt", old: "1\n", new: "2\n" }]),
+    response(["apply_patch", { path: "src/value.txt", old: "1\n", new: "2\n" }]),
+  ];
+  const blocked = await runMinimalHarness(f.task, { infer: async () => repeated.shift(), maxToolCalls: 4 });
+  assert.equal(blocked.status, "BLOCKED");
+  assert.equal(blocked.code, "DUPLICATE_FAILURE");
+  assert.equal(fs.readFileSync(path.join(f.root, "src", "value.txt"), "utf8"), "1\n1\n");
+});
+
+test("apply_patch keeps scope and targeted-size guards for compatibility aliases", async () => {
+  const f = fixture();
+  const outside = await runMinimalHarness(f.task, { infer: async () => response(["apply_patch", { path: "README.md", old: "fixture\n", new: "outside\n" }]) });
+  assert.equal(outside.status, "BLOCKED");
+  assert.equal(outside.code, "SCOPE_VIOLATION");
+  const oversized = await runMinimalHarness(f.task, { infer: async () => response(["apply_patch", { path: "src/value.txt", old: "x".repeat(1801), new: "2" }]) });
+  assert.notEqual(oversized.status, "PASS");
+  assert.equal(fs.readFileSync(path.join(f.root, "src", "value.txt"), "utf8"), "1\n");
+});
+
 test("fixture B: a patch outside allowed_paths is rejected before writing", async () => {
   const f = fixture();
   const result = await runMinimalHarness(f.task, { infer: async () => response(["patch", { path: "README.md", content: "outside\n" }]) });
