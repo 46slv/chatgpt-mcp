@@ -56,6 +56,12 @@ export function classifyFreeTokenFailure(error) {
   return FREETOKEN_FAILURES.SERVER_FAILURE;
 }
 
+export function buildFreeTokenStartPlan(input = {}) {
+  const config = input.enabled !== undefined || input.model || input.modelPath || input.controlUrl || input.serveUrl ? createFreeTokenConfig(input, {}) : input;
+  if (!config?.modelPath) throw new Error("modelPath required for start plan");
+  return Object.freeze({ mode: config.startMode || "control", control: { method: "POST", url: `${config.controlUrl || FREETOKEN_CONTROL_URL}/engine/start`, body: { model: config.modelPath, port: 1919, args: [] } }, cli: { command: input.ftCommand || "ft", args: ["serve", "--model-path", config.modelPath, "--host", "127.0.0.1", "--port", "1919"] }, readiness: { url: `${config.serveUrl || FREETOKEN_SERVE_URL}/health`, timeout_ms: config.readyTimeoutMs || 30000 } });
+}
+
 function failure(code, message, details = {}) { const error = new Error(message); error.code = code; Object.assign(error, details); return error; }
 
 async function defaultRequest(url, options = {}) {

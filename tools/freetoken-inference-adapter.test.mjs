@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFreeTokenInferenceAdapter, createFreeTokenConfig, classifyFreeTokenFailure, redactFreeTokenLog, FREETOKEN_FAILURES } from "./freetoken-inference-adapter.mjs";
+import { createFreeTokenInferenceAdapter, createFreeTokenConfig, buildFreeTokenStartPlan, classifyFreeTokenFailure, redactFreeTokenLog, FREETOKEN_FAILURES } from "./freetoken-inference-adapter.mjs";
 
 function fakeRequest(sequence = []) {
   const calls = [];
@@ -11,6 +11,11 @@ test("explicit configuration defaults disabled and enabled requires model", () =
   assert.equal(createFreeTokenConfig({}, {}).enabled, false);
   assert.throws(() => createFreeTokenConfig({ enabled: true }, {}), /model/);
   assert.equal(createFreeTokenConfig({ enabled: true, model: "m" }).enabled, true);
+});
+
+test("start plan is explicit and provider-neutral", () => {
+  const plan = buildFreeTokenStartPlan(createFreeTokenConfig({ enabled: true, model: "m", modelPath: "weights" }));
+  assert.equal(plan.control.method, "POST"); assert.match(plan.control.url, /1900\/engine\/start$/); assert.deepEqual(plan.control.body, { model: "weights", port: 1919, args: [] }); assert.equal(plan.cli.args.at(-1), "1919");
 });
 
 test("health reports disabled and control/serve readiness", async () => {
