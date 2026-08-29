@@ -26,6 +26,11 @@ function boundedString(value, name, max = 4096) {
   return value.trim();
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
 export function createFreeTokenConfig(input = {}, env = process.env) {
   const enabled = input.enabled ?? (env.FREETOKEN_ENABLED === "1");
   if (typeof enabled !== "boolean") throw new Error("enabled must be boolean");
@@ -34,7 +39,9 @@ export function createFreeTokenConfig(input = {}, env = process.env) {
   const controlUrl = input.controlUrl ?? env.FREETOKEN_CONTROL_URL ?? FREETOKEN_CONTROL_URL;
   const serveUrl = input.serveUrl ?? env.FREETOKEN_SERVE_URL ?? FREETOKEN_SERVE_URL;
   if (enabled) { boundedString(model, "model", 1024); boundedString(modelPath, "modelPath", 4096); }
-  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), controlUrl: boundedString(String(controlUrl), "controlUrl", 256).replace(/\/$/, ""), serveUrl: boundedString(String(serveUrl), "serveUrl", 256).replace(/\/$/, ""), startMode: input.startMode ?? "control", readyTimeoutMs: Math.min(120000, Math.max(1000, Number(input.readyTimeoutMs ?? 30000))), requestTimeoutMs: Math.min(120000, Math.max(1000, Number(input.requestTimeoutMs ?? 60000))), idleStopMs: Math.min(120000, Math.max(0, Number(input.idleStopMs ?? 0))) });
+  const startMode = input.startMode ?? "control";
+  if (!["control", "cli"].includes(startMode)) throw new Error("startMode must be control or cli");
+  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), controlUrl: boundedString(String(controlUrl), "controlUrl", 256).replace(/\/$/, ""), serveUrl: boundedString(String(serveUrl), "serveUrl", 256).replace(/\/$/, ""), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: boundedNumber(input.requestTimeoutMs ?? 60000, 60000, 1000, 120000), idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
 }
 
 export function classifyFreeTokenFailure(error) {
