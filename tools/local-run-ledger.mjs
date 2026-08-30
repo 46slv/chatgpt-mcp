@@ -57,24 +57,25 @@ function resource(input = {}) {
   return { before: finite(clean.before, { min: 0, max: 3_600_000 }), peak: finite(clean.peak, { min: 0, max: 3_600_000 }), after: finite(clean.after, { min: 0, max: 3_600_000 }), availability, available };
 }
 const METRIC_NAMES = ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens"];
-function metricSet(input = {}) { const out = {}; for (const key of METRIC_NAMES) out[key] = finite(input?.[key], { min: 0, max: key === "tool_calls" ? 1000 : 3_600_000, integer: key === "tool_calls" || key.endsWith("tokens") }); out.first_tool = input?.first_tool == null ? null : safeLogical(input.first_tool, "unknown"); return out; }
+const METRIC_SOURCES = new Set(["parent_measured", "harness_reported", "adapter_reported", "provider_usage", "unknown"]);
+function metricSet(input = {}, source = input?.source || "unknown") { const out = {}; for (const key of METRIC_NAMES) out[key] = finite(input?.[key], { min: 0, max: key === "tool_calls" ? 1000 : 3_600_000, integer: key === "tool_calls" || key.endsWith("tokens") }); out.first_tool = input?.first_tool == null ? null : safeLogical(input.first_tool, "unknown"); out.source = METRIC_SOURCES.has(source) ? source : "unknown"; return out; }
 function normalizeRecord(input = {}) {
   const baseline = isObject(input.baseline) ? input.baseline : {}; const outcome = isObject(input.outcome) ? input.outcome : {}; const evidence = isObject(input.evidence) ? input.evidence : {}; const flat = isObject(input.harness) ? input.harness : {};
   const parent = isObject(flat.parent_measured) ? flat.parent_measured : { wall_time_ms: flat.wall_time_ms, first_tool_latency_ms: flat.first_tool_latency_ms, first_tool: flat.first_tool, tool_calls: flat.tool_calls };
   const reported = isObject(flat.harness_reported) ? flat.harness_reported : flat; const usage = isObject(flat.provider_usage) ? flat.provider_usage : flat;
-  return { schema: LOCAL_RUN_RECORD_SCHEMA, version: LOCAL_RUN_RECORD_VERSION, run_id: safeLogical(input.run_id, "unknown", MAX_ID), selection: { runtime: safeLogical(input.selection?.runtime, "local"), provider: safeLogical(input.selection?.provider, "unknown"), harness: safeLogical(input.selection?.harness, "minimal-harness"), model: safeModel(input.selection?.model) }, contract_fingerprint: strictDigest(input.contract_fingerprint), base_commit: strictDigest(input.base_commit), baseline: { clean: baseline.clean === true ? true : baseline.clean === false ? false : null, modified: finite(baseline.modified, { min: 0, max: MAX_PATHS, integer: true }), added: finite(baseline.added, { min: 0, max: MAX_PATHS, integer: true }), deleted: finite(baseline.deleted, { min: 0, max: MAX_PATHS, integer: true }), untracked: finite(baseline.untracked, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(baseline.digest) }, lifecycle_ms: lifecycle(input.lifecycle_ms), harness: { ...metricSet(flat), parent_measured: metricSet(parent), harness_reported: metricSet(reported), provider_usage: metricSet(usage) }, resources: { ram_mb: resource(input.resources?.ram_mb), vram_mb: resource(input.resources?.vram_mb) }, outcome: { status: enumValue(outcome.status, ENUMS.status), changed: observation(outcome.changed), diff: observation(outcome.diff), attribution: attribution(outcome.attribution), tests: { status: TEST_STATUS.has(outcome.tests?.status) ? outcome.tests.status : "NOT_RUN", count: finite(outcome.tests?.count, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(outcome.tests?.digest) }, base_drift: outcome.base_drift === true ? true : outcome.base_drift === false ? false : null, commit_detected: outcome.commit_detected === true ? true : outcome.commit_detected === false ? false : null, evidence_digest: strictDigest(evidence.digest) }, ownership: { provider: enumValue(input.ownership?.provider, ENUMS.ownership), cleanup: enumValue(input.ownership?.cleanup, ENUMS.cleanup), cleanup_verified: input.ownership?.cleanup_verified === true ? true : input.ownership?.cleanup_verified === false ? false : null } };
+  return { schema: LOCAL_RUN_RECORD_SCHEMA, version: LOCAL_RUN_RECORD_VERSION, run_id: safeLogical(input.run_id, "unknown", MAX_ID), selection: { runtime: safeLogical(input.selection?.runtime, "local"), provider: safeLogical(input.selection?.provider, "unknown"), harness: safeLogical(input.selection?.harness, "minimal-harness"), model: safeModel(input.selection?.model) }, contract_fingerprint: strictDigest(input.contract_fingerprint), base_commit: strictDigest(input.base_commit), baseline: { clean: baseline.clean === true ? true : baseline.clean === false ? false : null, modified: finite(baseline.modified, { min: 0, max: MAX_PATHS, integer: true }), added: finite(baseline.added, { min: 0, max: MAX_PATHS, integer: true }), deleted: finite(baseline.deleted, { min: 0, max: MAX_PATHS, integer: true }), untracked: finite(baseline.untracked, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(baseline.digest) }, lifecycle_ms: lifecycle(input.lifecycle_ms), harness: { ...metricSet(flat, "unknown"), parent_measured: metricSet(parent, "parent_measured"), harness_reported: metricSet(reported, "harness_reported"), adapter_reported: metricSet(input.adapter_reported || flat.adapter_reported || {}, "adapter_reported"), provider_usage: metricSet(usage, "provider_usage") }, resources: { ram_mb: resource(input.resources?.ram_mb), vram_mb: resource(input.resources?.vram_mb) }, outcome: { status: enumValue(outcome.status, ENUMS.status), changed: observation(outcome.changed), diff: observation(outcome.diff), attribution: attribution(outcome.attribution), tests: { status: TEST_STATUS.has(outcome.tests?.status) ? outcome.tests.status : "NOT_RUN", count: finite(outcome.tests?.count, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(outcome.tests?.digest) }, base_drift: outcome.base_drift === true ? true : outcome.base_drift === false ? false : null, commit_detected: outcome.commit_detected === true ? true : outcome.commit_detected === false ? false : null, evidence_digest: strictDigest(evidence.digest) }, ownership: { provider: enumValue(input.ownership?.provider, ENUMS.ownership), cleanup: enumValue(input.ownership?.cleanup, ENUMS.cleanup), cleanup_verified: input.ownership?.cleanup_verified === true ? true : input.ownership?.cleanup_verified === false ? false : null } };
 }
 export function createLocalRunRecord(input = {}) { if (input.run_id !== undefined && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id) || input.run_id.includes(".."))) throw new Error("invalid local run id"); return normalizeRecord({ ...input, run_id: input.run_id || crypto.randomUUID() }); }
-const EXACT_KEYS = Object.freeze({ root: ["schema", "version", "run_id", "selection", "contract_fingerprint", "base_commit", "baseline", "lifecycle_ms", "harness", "resources", "outcome", "ownership"], selection: ["runtime", "provider", "harness", "model"], baseline: ["clean", "modified", "added", "deleted", "untracked", "digest"], lifecycle: ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"], metric: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool"], resources: ["ram_mb", "vram_mb"], resource: ["before", "peak", "after", "availability", "available"], outcome: ["status", "changed", "diff", "attribution", "tests", "base_drift", "commit_detected", "evidence_digest"], attribution: ["paths", "details"], attribution_side: ["status", "fingerprint", "fingerprint_bounded"], observation: ["count", "digest"], tests: ["status", "count", "digest"], ownership: ["provider", "cleanup", "cleanup_verified"], harness: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool", "parent_measured", "harness_reported", "provider_usage"] });
+const EXACT_KEYS = Object.freeze({ root: ["schema", "version", "run_id", "selection", "contract_fingerprint", "base_commit", "baseline", "lifecycle_ms", "harness", "resources", "outcome", "ownership"], selection: ["runtime", "provider", "harness", "model"], baseline: ["clean", "modified", "added", "deleted", "untracked", "digest"], lifecycle: ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"], metric: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool", "source"], resources: ["ram_mb", "vram_mb"], resource: ["before", "peak", "after", "availability", "available"], outcome: ["status", "changed", "diff", "attribution", "tests", "base_drift", "commit_detected", "evidence_digest"], attribution: ["paths", "details"], attribution_side: ["status", "fingerprint", "fingerprint_bounded"], observation: ["count", "digest"], tests: ["status", "count", "digest"], ownership: ["provider", "cleanup", "cleanup_verified"], harness: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool", "source", "parent_measured", "harness_reported", "adapter_reported", "provider_usage"] });
 function exact(value, keys, name) { if (!isObject(value)) throw new Error(`${name} must be an object`); const got = Object.keys(value).sort(); const expected = [...keys].sort(); if (got.length !== expected.length || got.some((x, i) => x !== expected[i])) throw new Error(`${name} has unknown or missing keys`); }
 function nullableNum(v, name, max = 3_600_000) { if (v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max)) throw new Error(`${name} must be finite or null`); }
 function validateObservation(v, name) { exact(v, EXACT_KEYS.observation, name); if (!Number.isInteger(v.count) || v.count < 0 || v.count > MAX_PATHS) throw new Error(`${name}.count invalid`); if (v.digest !== null && !HEX.test(v.digest)) throw new Error(`${name}.digest invalid`); }
-function validateMetric(v, name) { exact(v, EXACT_KEYS.metric, name); for (const key of METRIC_NAMES) nullableNum(v[key], `${name}.${key}`, key === "tool_calls" ? 1000 : 3_600_000); if (v.tool_calls !== null && !Number.isInteger(v.tool_calls)) throw new Error(`${name}.tool_calls invalid`); for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"]) if (v[key] !== null && !Number.isInteger(v[key])) throw new Error(`${name}.${key} invalid`); if (v.first_tool !== null && (typeof v.first_tool !== "string" || !LOGICAL.test(v.first_tool))) throw new Error(`${name}.first_tool invalid`); }
+function validateMetric(v, name) { exact(v, EXACT_KEYS.metric, name); for (const key of METRIC_NAMES) nullableNum(v[key], `${name}.${key}`, key === "tool_calls" ? 1000 : 3_600_000); if (v.tool_calls !== null && !Number.isInteger(v.tool_calls)) throw new Error(`${name}.tool_calls invalid`); for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"]) if (v[key] !== null && !Number.isInteger(v[key])) throw new Error(`${name}.${key} invalid`); if (v.first_tool !== null && (typeof v.first_tool !== "string" || !LOGICAL.test(v.first_tool))) throw new Error(`${name}.first_tool invalid`); if (!METRIC_SOURCES.has(v.source)) throw new Error(`${name}.source invalid`); }
 export function validateLocalRunRecord(record) {
   exact(record, EXACT_KEYS.root, "local run record"); if (record.schema !== LOCAL_RUN_RECORD_SCHEMA || record.version !== LOCAL_RUN_RECORD_VERSION) throw new Error("unsupported local run record schema"); if (typeof record.run_id !== "string" || !RUN_ID.test(record.run_id) || record.run_id.includes("..")) throw new Error("invalid local run id");
   exact(record.selection, EXACT_KEYS.selection, "selection"); for (const key of Object.keys(record.selection)) if (typeof record.selection[key] !== "string" || !LOGICAL.test(record.selection[key])) throw new Error(`selection.${key} invalid`); for (const key of ["contract_fingerprint", "base_commit"]) if (record[key] !== null && !HEX.test(record[key])) throw new Error(`invalid ${key}`);
   exact(record.baseline, EXACT_KEYS.baseline, "baseline"); if (record.baseline.clean !== null && typeof record.baseline.clean !== "boolean") throw new Error("baseline.clean invalid"); for (const key of ["modified", "added", "deleted", "untracked"]) if (record.baseline[key] !== null && (!Number.isInteger(record.baseline[key]) || record.baseline[key] < 0 || record.baseline[key] > MAX_PATHS)) throw new Error(`baseline.${key} invalid`); if (record.baseline.digest !== null && !HEX.test(record.baseline.digest)) throw new Error("baseline.digest invalid");
-  exact(record.lifecycle_ms, EXACT_KEYS.lifecycle, "lifecycle_ms"); for (const key of EXACT_KEYS.lifecycle) nullableNum(record.lifecycle_ms[key], `lifecycle_ms.${key}`); exact(record.harness, EXACT_KEYS.harness, "harness"); const flatMetrics = Object.fromEntries([...METRIC_NAMES, "first_tool"].map((key) => [key, record.harness[key]])); validateMetric(flatMetrics, "harness"); validateMetric(record.harness.parent_measured, "harness.parent_measured"); validateMetric(record.harness.harness_reported, "harness.harness_reported"); validateMetric(record.harness.provider_usage, "harness.provider_usage");
+  exact(record.lifecycle_ms, EXACT_KEYS.lifecycle, "lifecycle_ms"); for (const key of EXACT_KEYS.lifecycle) nullableNum(record.lifecycle_ms[key], `lifecycle_ms.${key}`); exact(record.harness, EXACT_KEYS.harness, "harness"); const flatMetrics = Object.fromEntries([...METRIC_NAMES, "first_tool", "source"].map((key) => [key, record.harness[key]])); validateMetric(flatMetrics, "harness"); validateMetric(record.harness.parent_measured, "harness.parent_measured"); validateMetric(record.harness.harness_reported, "harness.harness_reported"); validateMetric(record.harness.adapter_reported, "harness.adapter_reported"); validateMetric(record.harness.provider_usage, "harness.provider_usage");
   exact(record.resources, EXACT_KEYS.resources, "resources"); for (const key of EXACT_KEYS.resources) { exact(record.resources[key], EXACT_KEYS.resource, `resources.${key}`); for (const n of ["before", "peak", "after"]) nullableNum(record.resources[key][n], `resources.${key}.${n}`); if (!ENUMS.availability.has(record.resources[key].availability) || (record.resources[key].available !== null && typeof record.resources[key].available !== "boolean")) throw new Error(`resources.${key} invalid`); const expected = record.resources[key].availability === "AVAILABLE" ? true : record.resources[key].availability === "UNAVAILABLE" ? false : null; if (record.resources[key].available !== expected) throw new Error(`resources.${key} availability mismatch`); }
   exact(record.outcome, EXACT_KEYS.outcome, "outcome"); if (!ENUMS.status.has(record.outcome.status)) throw new Error("outcome.status invalid"); validateObservation(record.outcome.changed, "outcome.changed"); validateObservation(record.outcome.diff, "outcome.diff"); exact(record.outcome.attribution, EXACT_KEYS.attribution, "outcome.attribution"); if (!Array.isArray(record.outcome.attribution.paths) || record.outcome.attribution.paths.length > MAX_PATHS || record.outcome.attribution.paths.some((p) => typeof p !== "string" || !safePath(p))) throw new Error("outcome.attribution.paths invalid"); if (!isObject(record.outcome.attribution.details) || Object.keys(record.outcome.attribution.details).some((p) => !record.outcome.attribution.paths.includes(p))) throw new Error("outcome.attribution.details invalid"); for (const p of Object.keys(record.outcome.attribution.details)) { const d = record.outcome.attribution.details[p]; exact(d, ["before", "after"], `outcome.attribution.details.${p}`); for (const side of ["before", "after"]) { if (d[side] === null) continue; exact(d[side], EXACT_KEYS.attribution_side, `outcome.attribution.details.${p}.${side}`); if (typeof d[side].status !== "string" || !LOGICAL.test(d[side].status) || (d[side].fingerprint !== null && !HEX.test(d[side].fingerprint)) || typeof d[side].fingerprint_bounded !== "boolean") throw new Error("outcome.attribution side invalid"); } } exact(record.outcome.tests, EXACT_KEYS.tests, "outcome.tests"); if (!TEST_STATUS.has(record.outcome.tests.status) || (record.outcome.tests.count !== null && (!Number.isInteger(record.outcome.tests.count) || record.outcome.tests.count < 0 || record.outcome.tests.count > MAX_PATHS)) || (record.outcome.tests.digest !== null && !HEX.test(record.outcome.tests.digest))) throw new Error("outcome.tests invalid"); for (const key of ["base_drift", "commit_detected"]) if (record.outcome[key] !== null && typeof record.outcome[key] !== "boolean") throw new Error(`outcome.${key} invalid`); if (record.outcome.evidence_digest !== null && !HEX.test(record.outcome.evidence_digest)) throw new Error("outcome.evidence_digest invalid"); exact(record.ownership, EXACT_KEYS.ownership, "ownership"); if (!ENUMS.ownership.has(record.ownership.provider) || !ENUMS.cleanup.has(record.ownership.cleanup) || (record.ownership.cleanup_verified !== null && typeof record.ownership.cleanup_verified !== "boolean")) throw new Error("ownership invalid"); return record;
 }
@@ -94,66 +95,58 @@ export function writeLocalRunRecordAtomic(directory, record, { fsImpl = fs } = {
   // stale-temp sweep can delete another run's data.
   let temporary = null;
   let owned = false;
-  let createFd = null;
+  let fd = null;
+  let fdStat = null;
   let lastError = null;
   const removeOwnedTemp = (file) => {
     try { if (typeof fsImpl.unlinkSync === "function") { fsImpl.unlinkSync(file); return true; } } catch { /* try next bounded remover */ }
     try { if (typeof fsImpl.rmSync === "function") { fsImpl.rmSync(file, { force: true }); return true; } } catch { /* try real fs fallback */ }
     try { fs.rmSync(file, { force: true }); return true; } catch { return false; }
   };
+  if (typeof fsImpl.openSync !== "function" || typeof fsImpl.closeSync !== "function") throw new Error("atomic ledger writer requires fd-capable filesystem");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const candidate = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
     try {
-      if (typeof fsImpl.openSync === "function") {
-        createFd = fsImpl.openSync(candidate, "wx", 0o600);
-        temporary = candidate;
-        owned = true;
-        break;
-      }
-      // Compatibility fallback for narrowly mocked fs implementations. The
-      // generated name is unique to this invocation and is treated as owned
-      // only after exclusive creation succeeds.
-      try {
-        fsImpl.writeFileSync(candidate, "", { encoding: "utf8", flag: "wx" });
-        temporary = candidate;
-        owned = true;
-        break;
-      } catch (error) {
-        if (error?.code === "EEXIST" && attempt < 2) { lastError = error; continue; }
-        // The exclusive create was the only ownership proof available to a
-        // minimal mock. Remove only this invocation's generated name before
-        // surfacing a write failure.
-        removeOwnedTemp(candidate);
-        throw error;
-      }
+      // The descriptor returned by wx is the sole ownership proof.  Keep it
+      // open through write + fsync; reopening the temporary path would permit
+      // a worker-created reparse point or replacement inode to be followed.
+      fd = fsImpl.openSync(candidate, "wx", 0o600);
+      temporary = candidate;
+      owned = true;
+      break;
     } catch (error) {
       lastError = error;
       if (error?.code !== "EEXIST" || attempt === 2) throw error;
-    } finally {
-      if (createFd !== null) {
-        try { fsImpl.closeSync?.(createFd); } finally { createFd = null; }
-      }
     }
   }
   if (!temporary || !owned) throw lastError || new Error("temporary ledger file creation failed");
   try {
-    fsImpl.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "w" });
-    if (typeof fsImpl.openSync === "function" && typeof fsImpl.fsyncSync === "function") {
-      let syncFd = null;
-      try {
-        syncFd = fsImpl.openSync(temporary, "r+");
-        fsImpl.fsyncSync(syncFd);
-      } finally {
-        if (syncFd !== null) {
-          try { fsImpl.closeSync?.(syncFd); } catch { /* preserve write/link error */ }
-        }
-      }
-    }
+    if (typeof fsImpl.writeSync === "function") {
+      const bytes = Buffer.from(encoded, "utf8");
+      let offset = 0;
+      while (offset < bytes.length) { const written = fsImpl.writeSync(fd, bytes, offset, bytes.length - offset); if (!Number.isInteger(written) || written <= 0) throw new Error("atomic ledger write made no progress"); offset += written; }
+    } else if (typeof fsImpl.writeFileSync === "function") {
+      // Node accepts an fd for writeFileSync and leaves it open; this branch
+      // exists for compatible fd-backed mocks only and never reopens by path.
+      fsImpl.writeFileSync(fd, encoded, { encoding: "utf8" });
+    } else throw new Error("atomic ledger writer requires write capability");
+    if (typeof fsImpl.fsyncSync === "function") fsImpl.fsyncSync(fd);
+    if (typeof fsImpl.fstatSync === "function") fdStat = fsImpl.fstatSync(fd);
+    fsImpl.closeSync(fd);
+    fd = null;
+    const tempStat = fsImpl.lstatSync(temporary);
+    if (!tempStat.isFile() || tempStat.isSymbolicLink() || (Number.isInteger(tempStat.nlink) && tempStat.nlink > 1)) throw new Error("temporary ledger inode is unsafe");
+    // fstat/lstat identity comparison is available on normal Node fs and
+    // prevents linking a path that was swapped after close.  Some mocked
+    // filesystems omit dev/ino; in that case the lstat safety checks above are
+    // still required and remain fail-closed for reparse/hard-link paths.
+    if (fdStat && Number.isInteger(fdStat.dev) && Number.isInteger(fdStat.ino) && Number.isInteger(tempStat.dev) && Number.isInteger(tempStat.ino) && (fdStat.dev !== tempStat.dev || fdStat.ino !== tempStat.ino)) throw new Error("temporary ledger inode changed");
     fsImpl.linkSync(temporary, target);
     fsImpl.unlinkSync(temporary);
     owned = false;
     return target;
   } finally {
+    if (fd !== null) { try { fsImpl.closeSync(fd); } catch { /* preserve original failure */ } fd = null; }
     if (owned && temporary) {
       try { fsImpl.unlinkSync(temporary); }
       catch { removeOwnedTemp(temporary); }

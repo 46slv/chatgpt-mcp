@@ -72,10 +72,45 @@ export function classifyFreeTokenFailure(error) {
   return FREETOKEN_FAILURES.SERVER_FAILURE;
 }
 
+function logicalModelNames(config) {
+  return [...new Set([config?.model, config?.modelPath].filter(Boolean).flatMap((value) => {
+    const text = String(value).trim();
+    return [text.toLowerCase(), text.replace(/\\/g, "/").split("/").pop().toLowerCase()];
+  }))];
+}
+
+function modelEntryNames(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+  return [entry.id, entry.model, entry.name, entry.model_name, entry.modelPath].filter((value) => typeof value === "string").flatMap((value) => {
+    const text = value.trim();
+    return [text.toLowerCase(), text.replace(/\\/g, "/").split("/").pop().toLowerCase()];
+  });
+}
+
+// Readiness is positive-schema based.  A 200 response containing an error,
+// arbitrary text, or an empty model list is not evidence that inference can
+// start.  `/v1/models` must expose the configured logical model identity; a
+// provider-specific explicit ready field is accepted as a documented
+// fallback for control/health payloads.
+export function classifyFreeTokenReadiness(body, config = {}) {
+  if (body === null || body === undefined) return { status: "NOT_READY", reason: "empty_readiness_payload" };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { status: "MALFORMED", reason: "readiness_payload_not_object" };
+  if (Object.prototype.hasOwnProperty.call(body, "error")) return { status: "MALFORMED", reason: "readiness_payload_error" };
+  if (body.ready === true || body.engineRunning === true || ["ready", "healthy"].includes(String(body.status || "").toLowerCase()) || (String(body.status || "").toLowerCase() === "ok" && typeof body.model === "string" && body.model.trim())) return { status: "READY", reason: "explicit_ready_field" };
+  if (Object.prototype.hasOwnProperty.call(body, "data")) {
+    if (!Array.isArray(body.data)) return { status: "MALFORMED", reason: "models_data_not_array" };
+    if (!body.data.length) return { status: "NOT_READY", reason: "models_data_empty" };
+    const expected = logicalModelNames(config);
+    if (body.data.some((entry) => modelEntryNames(entry).some((name) => expected.includes(name)))) return { status: "READY", reason: "configured_model_present" };
+    return { status: "NOT_READY", reason: "configured_model_absent" };
+  }
+  return { status: "MALFORMED", reason: "readiness_schema_unknown" };
+}
+
 export function buildFreeTokenStartPlan(input = {}) {
   const config = input.enabled !== undefined || input.model || input.modelPath || input.controlUrl || input.serveUrl ? createFreeTokenConfig(input, {}) : input;
   if (!config?.modelPath) throw new Error("modelPath required for start plan");
-  return Object.freeze({ mode: config.startMode || "control", control: { method: "POST", url: `${config.controlUrl || FREETOKEN_CONTROL_URL}/engine/start`, body: { model: config.modelPath, port: 1919, args: [] } }, cli: { command: input.ftCommand || "ft", args: ["serve", "--model-path", config.modelPath, "--host", "127.0.0.1", "--port", "1919"] }, readiness: { url: `${config.serveUrl || FREETOKEN_SERVE_URL}/health`, timeout_ms: config.readyTimeoutMs || 30000 } });
+  return Object.freeze({ mode: config.startMode || "control", control: { method: "POST", url: `${config.controlUrl || FREETOKEN_CONTROL_URL}/engine/start`, body: { model: config.modelPath, port: 1919, args: [] } }, cli: { command: input.ftCommand || "ft", args: ["serve", "--model-path", config.modelPath, "--host", "127.0.0.1", "--port", "1919"] }, readiness: { url: `${config.serveUrl || FREETOKEN_SERVE_URL}/v1/models`, timeout_ms: config.readyTimeoutMs || 30000 } });
 }
 
 function failure(code, message, details = {}) { const error = new Error(message); error.code = code; Object.assign(error, details); return error; }
@@ -147,16 +182,26 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     if (!config.enabled) return { status: "DISABLED", code: FREETOKEN_FAILURES.DISABLED, control: null, serve: null };
     let control = null; let serve = null;
     try { control = (await get("/health")).body; } catch (error) { return { status: "UNAVAILABLE", code: FREETOKEN_FAILURES.UNAVAILABLE, reason: String(error.message || error) }; }
-    try { serve = (await get("/health", config.serveUrl)).body; } catch { /* readiness is false while stopped */ }
-    return { status: control?.engineRunning || control?.status === "ok" ? (serve ? "READY" : "CONTROL_READY") : "IDLE", code: null, control, serve };
+    try { serve = (await get("/v1/models", config.serveUrl)).body; } catch { /* readiness is false while stopped */ }
+    const controlReadiness = classifyFreeTokenReadiness(control, config);
+    const controlReady = controlReadiness.status === "READY";
+    const readiness = classifyFreeTokenReadiness(serve, config);
+    const status = controlReady || (control && readiness.status === "READY") ? "READY" : readiness.status;
+    return { status, code: status === "MALFORMED" ? FREETOKEN_FAILURES.MALFORMED_RESULT : null, reason: controlReady ? controlReadiness.reason : readiness.reason, control, serve };
   }
   async function waitReady(signal) {
     const started = Date.now(); let last = null;
     while (Date.now() - started <= config.readyTimeoutMs) {
       if (signal?.aborted) throw failure(FREETOKEN_FAILURES.CANCELLED, "FreeToken readiness cancelled");
-      try { const result = await get("/health", config.serveUrl); if (result.body?.status === "ok" || result.body?.ready === true || result.body?.model) return result.body; } catch (error) { last = error; }
+      try {
+        const result = await get("/v1/models", config.serveUrl);
+        const readiness = classifyFreeTokenReadiness(result.body, config);
+        if (readiness.status === "READY") return result.body;
+        if (readiness.status === "MALFORMED") last = failure(FREETOKEN_FAILURES.MALFORMED_RESULT, readiness.reason);
+      } catch (error) { last = error; }
       await sleep(100);
     }
+    if (last?.code === FREETOKEN_FAILURES.MALFORMED_RESULT) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken readiness payload malformed", { cause: last?.message });
     throw failure(FREETOKEN_FAILURES.TIMEOUT, "FreeToken readiness timeout", { cause: last?.message });
   }
   async function start({ signal, onLifecycle } = {}) {

@@ -29,7 +29,7 @@ test("model path is reduced to a safe basename and query is removed", () => { co
 test("atomic writer is no-overwrite under same-run concurrency", async () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-ledger-concurrency-")); const record = createLocalRunRecord({ run_id: "same-run", contract_fingerprint: SHA, base_commit: SHA }); const outcomes = await Promise.all(Array.from({ length: 20 }, () => Promise.resolve().then(() => { try { return writeLocalRunRecordAtomic(dir, record), "ok"; } catch { return "failed"; } }))); assert.equal(outcomes.filter((x) => x === "ok").length, 1); assert.deepEqual(fs.readdirSync(dir), ["same-run.json"]); });
 test("atomic writer removes its owned temp on write/link/unlink failures", () => {
   const cases = [
-    { name: "write", mutate: (base) => ({ ...base, writeFileSync(file, ...args) { if (String(file).includes(".tmp-")) throw new Error("simulated write"); return fs.writeFileSync(file, ...args); } }) },
+    { name: "write", mutate: (base) => ({ ...base, writeSync(fd, ...args) { throw new Error("simulated write"); } }) },
     { name: "link", mutate: (base) => ({ ...base, linkSync() { throw new Error("simulated link"); } }) },
     { name: "unlink", mutate: (base) => { let first = true; return { ...base, unlinkSync(file) { if (String(file).includes(".tmp-") && first) { first = false; throw new Error("simulated unlink"); } return fs.unlinkSync(file); } }; } },
   ];
@@ -77,4 +77,23 @@ test("hard-linked worktree files are rejected before harness read/write and attr
     try { fs.unlinkSync(external); } catch {}
   }
 });
-test("parent wall metric is not overwritten by adapter metrics and first_tool is retained", async () => { const f = fixture(); const result = await runLocalWorkerTask(f.task, { adapter: passAdapter(async (task) => fs.writeFileSync(path.join(task.worktree, "allowed.txt"), "ok\n")), runLedgerDir: f.root }); assert.notEqual(result.result.runtime_metrics.wall_time_ms, 999999); const ledger = JSON.parse(fs.readFileSync(path.join(f.root, `${result.run_id}.json`), "utf8")); assert.notEqual(ledger.harness.parent_measured.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.first_tool, "https___bad.example__token_x"); });
+test("adapter-created junction is recursively inspected and cannot claim success", async (t) => {
+  const f = fixture();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-junction-external-"));
+  const junction = path.join(f.root, "src", "j");
+  fs.mkdirSync(path.dirname(junction), { recursive: true });
+  try {
+    try { fs.symlinkSync(external, junction, process.platform === "win32" ? "junction" : "dir"); }
+    catch (error) { t.skip(`junction creation is unavailable: ${error.code || error.message}`); return; }
+    const outcome = await runLocalWorkerTask({ ...f.task, allowed_paths: ["src"] }, { adapter: passAdapter(async () => { fs.writeFileSync(path.join(junction, "x.txt"), "external-write\n"); }) });
+    assert.notEqual(outcome.result.status, "DONE");
+    assert.equal(outcome.result.safety_metrics.invalid_paths, true);
+    assert.ok(outcome.result.safety_metrics.reparse_paths.includes("src/j") || outcome.result.safety_metrics.invalid_path_list.some((p) => p.startsWith("src/j")));
+    assert.doesNotMatch(JSON.stringify(outcome.result), /external-write/);
+    assert.equal(fs.readFileSync(path.join(external, "x.txt"), "utf8"), "external-write\n");
+  } finally {
+    try { fs.unlinkSync(junction); } catch {}
+    try { fs.rmSync(external, { recursive: true, force: true }); } catch {}
+  }
+});
+test("metric provenance keeps worker observations out of parent_measured", async () => { const f = fixture(); const result = await runLocalWorkerTask(f.task, { adapter: passAdapter(async (task) => fs.writeFileSync(path.join(task.worktree, "allowed.txt"), "ok\n")), runLedgerDir: f.root }); assert.notEqual(result.result.runtime_metrics.wall_time_ms, 999999); const ledger = JSON.parse(fs.readFileSync(path.join(f.root, `${result.run_id}.json`), "utf8")); assert.notEqual(ledger.harness.parent_measured.wall_time_ms, 999999); assert.equal(ledger.harness.parent_measured.first_tool, null); assert.equal(ledger.harness.parent_measured.source, "parent_measured"); assert.equal(ledger.harness.harness_reported.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.source, "harness_reported"); assert.equal(ledger.harness.adapter_reported.first_tool, "https___bad.example__token_x"); assert.equal(ledger.harness.adapter_reported.source, "adapter_reported"); });

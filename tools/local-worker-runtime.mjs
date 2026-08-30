@@ -184,6 +184,41 @@ function rejectReparseSegments(root, relative) {
   }
 }
 
+// Inspect a repository-relative path without ever traversing through an
+// unsafe segment.  Git status/diff output is untrusted: a worker can create a
+// junction after preflight, and following it while fingerprinting would read
+// or mutate data outside the worktree.  Every existing ancestor is therefore
+// lstat'ed from the Git root before any content operation is attempted.
+function inspectPathSegments(root, relative) {
+  if (!safeGitRelative(relative)) return { unsafe: true, unsafe_path: true, reparse: false, hard_link: false, segments: [] };
+  const segments = [];
+  let current = path.resolve(root);
+  try {
+    const rootStat = fs.lstatSync(current);
+    if (rootStat.isSymbolicLink()) return { unsafe: true, unsafe_path: true, reparse: true, hard_link: false, segments };
+    segments.push({ relative: "", stat: rootStat });
+  } catch {
+    return { unsafe: true, unsafe_path: true, reparse: false, hard_link: false, segments };
+  }
+  for (const part of relative.split("/")) {
+    current = path.join(current, part);
+    let stat;
+    try { stat = fs.lstatSync(current); }
+    catch (error) {
+      // A missing leaf is a valid state for deleted paths.  Permission and
+      // other inspection errors are unsafe and must fail closed.
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") break;
+      return { unsafe: true, unsafe_path: true, reparse: false, hard_link: false, segments };
+    }
+    const segmentRelative = segments.length ? `${segments[segments.length - 1].relative ? `${segments[segments.length - 1].relative}/` : ""}${part}` : part;
+    const reparse = stat.isSymbolicLink();
+    const hardLink = stat.isFile() && Number.isInteger(stat.nlink) && stat.nlink > 1;
+    segments.push({ relative: segmentRelative, stat });
+    if (reparse || hardLink) return { unsafe: true, unsafe_path: reparse, reparse, hard_link: hardLink, segments };
+  }
+  return { unsafe: false, unsafe_path: false, reparse: false, hard_link: false, segments };
+}
+
 function rejectHardLinkFile(root, relative, { code = "PATH_HARDLINK_REJECTED" } = {}) {
   const candidate = path.resolve(root, relative);
   if (!fs.existsSync(candidate)) return;
@@ -236,12 +271,12 @@ function fingerprintPath(root, relative, status) {
   if (!safeGitRelative(relative)) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, unsafe_path: true };
   const maxBytes = 512 * 1024; const candidate = path.resolve(root, relative);
   try {
-    const linkStat = fs.existsSync(candidate) ? fs.lstatSync(candidate) : null;
-    if (linkStat?.isFile() && Number.isInteger(linkStat.nlink) && linkStat.nlink > 1) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, hard_link: true };
+    const safety = inspectPathSegments(root, relative);
+    if (safety.unsafe) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, unsafe_path: safety.unsafe_path || false, reparse: safety.reparse || false, hard_link: safety.hard_link || false };
     const diff = execFileSync("git", ["-C", root, "diff", "HEAD", "--no-ext-diff", "--no-color", "--no-renames", "--", relative], { encoding: "utf8", windowsHide: true, timeout: 20000, maxBuffer: maxBytes });
     if (Buffer.byteLength(diff, "utf8") > maxBytes) return { status, diff: !!diff, fingerprint: null, fingerprint_bounded: false };
     if (diff) return { status, diff: true, fingerprint: sha256Digest(`${status}\0${diff}`), fingerprint_bounded: true };
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+    if (fs.existsSync(candidate) && fs.lstatSync(candidate).isFile()) {
       const stat = fs.lstatSync(candidate); if (stat.nlink > 1) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, hard_link: true }; if (stat.size > maxBytes) return { status, diff: false, fingerprint: null, fingerprint_bounded: false };
       return { status, diff: false, fingerprint: sha256Digest(`${status}\0${fs.readFileSync(candidate)}`), fingerprint_bounded: true };
     }
@@ -263,7 +298,13 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
   // Keep evidence bounded, but retain a count so the parent can fail closed
   // instead of accepting an incomplete changed-file claim.
   const changedPaths = allChangedPaths.slice(0, bounded);
-  const invalidPaths = allChangedPaths.filter((relative) => !safeGitRelative(relative));
+  // Inspect every status/diff path, including paths beyond the bounded
+  // evidence payload.  Truncating before safety inspection would allow an
+  // unsafe tail path to be silently omitted and a false DONE claim to pass.
+  const safetyByPath = Object.fromEntries(allChangedPaths.map((relative) => [relative, inspectPathSegments(root, relative)]));
+  const invalidPathList = allChangedPaths.filter((relative) => !safeGitRelative(relative) || safetyByPath[relative]?.unsafe);
+  const reparsePaths = allChangedPaths.filter((relative) => safetyByPath[relative]?.reparse === true);
+  const hardLinkAllPaths = allChangedPaths.filter((relative) => safetyByPath[relative]?.hard_link === true);
   const statusMap = new Map(statusEntries.map((entry) => [entry.path, entry.status]));
   const pathDetails = Object.fromEntries(changedPaths.map((relative) => [relative, fingerprintPath(root, relative, statusMap.get(relative) || "DIFF")]));
   const hardLinkPaths = changedPaths.filter((relative) => pathDetails[relative]?.hard_link === true);
@@ -276,8 +317,10 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
     paths_truncated: pathsTruncated,
     diff_available: allChangedPaths.length > 0,
     path_details: pathDetails,
-    invalid_paths: invalidPaths.length > 0 || hardLinkPaths.length > 0,
-    hard_link_paths: hardLinkPaths,
+    invalid_paths: invalidPathList.length > 0,
+    invalid_path_list: invalidPathList,
+    reparse_paths: reparsePaths,
+    hard_link_paths: [...new Set([...hardLinkAllPaths, ...hardLinkPaths])].sort(),
     status_counts: (() => {
       const counts = { modified: 0, added: 0, deleted: 0, untracked: 0 };
       for (const record of statusRaw.split("\0")) {
@@ -444,9 +487,13 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
         } : {},
         lifecycle_ms: lifecycle.snapshot(),
         harness: {
-          parent_measured: { wall_time_ms: parentWall, first_tool: result?.runtime_metrics?.first_tool || null },
-          harness_reported: { first_tool: adapterMetrics.first_tool, first_tool_latency_ms: adapterMetrics.first_tool_latency_ms, tool_calls: adapterMetrics.tool_calls, wall_time_ms: adapterMetrics.wall_time_ms },
-          provider_usage: { prompt_tokens: adapterMetrics.prompt_tokens, completion_tokens: adapterMetrics.completion_tokens, total_tokens: adapterMetrics.total_tokens },
+          // Only values captured by this parent belong in parent_measured.
+          // first_tool/tool_calls/tokens are worker-reported observations and
+          // must carry an explicit non-parent provenance.
+          parent_measured: { wall_time_ms: parentWall, first_tool: null, source: "parent_measured" },
+          harness_reported: { first_tool: adapterMetrics.first_tool, first_tool_latency_ms: adapterMetrics.first_tool_latency_ms, tool_calls: adapterMetrics.tool_calls, wall_time_ms: adapterMetrics.wall_time_ms, source: "harness_reported" },
+          adapter_reported: { first_tool: adapterMetrics.first_tool, first_tool_latency_ms: adapterMetrics.first_tool_latency_ms, tool_calls: adapterMetrics.tool_calls, wall_time_ms: adapterMetrics.wall_time_ms, source: "adapter_reported" },
+          provider_usage: { prompt_tokens: adapterMetrics.prompt_tokens, completion_tokens: adapterMetrics.completion_tokens, total_tokens: adapterMetrics.total_tokens, source: "provider_usage" },
         },
         resources: adapterResult?.resources || {
           ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) ? true : null },
@@ -513,6 +560,9 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   }
   lifecycle.mark("postflight_end");
   const invalidPaths = !!(before.invalid_paths || after.invalid_paths);
+  const invalidPathList = [...new Set([...(before.invalid_path_list || []), ...(after.invalid_path_list || [])])].sort();
+  const reparsePaths = [...new Set([...(before.reparse_paths || []), ...(after.reparse_paths || [])])].sort();
+  const hardLinkEvidencePaths = [...new Set([...(before.hard_link_paths || []), ...(after.hard_link_paths || [])])].sort();
   // Do not let malformed path evidence enter the ledger/result serializer;
   // captureGitEvidence has already recorded the fail-closed condition.
   let attributed = { paths: [], diff_paths: [], details: {}, uncertain_paths: [] };
@@ -569,7 +619,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: attributedPaths, tests, blocker,
     diff_availability: { available: attributed.diff_paths.length > 0, files: attributed.diff_paths },
     runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null },
-    safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, attributed_paths: attributedPaths, preexisting_paths_excluded: before.changed_paths.filter((p) => !attributedPaths.includes(p)), attribution: attributed.details, attribution_uncertain: attributionUncertain, invalid_paths: !!invalidPaths, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
+    safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, attributed_paths: attributedPaths, preexisting_paths_excluded: before.changed_paths.filter((p) => !attributedPaths.includes(p)), attribution: attributed.details, attribution_uncertain: attributionUncertain, invalid_paths: !!invalidPaths, invalid_path_list: invalidPathList, reparse_paths: reparsePaths, hard_link_paths: hardLinkEvidencePaths, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,
   };
   const log = redactStructuredLog({ event: "local_worker_result", task_id: task.task_id, status, changed_files: attributedPaths, tests: { status: tests.status, exit_code: tests.exit_code ?? null }, blocker, runtime_provider_identity: runtimeAdapter.identity, wall_time_ms: result.runtime_metrics.wall_time_ms });

@@ -12,6 +12,11 @@ through a same-filesystem temporary file and atomic no-replace hard-link; a dupl
 replacing the existing record. Ledger failures are reported as observability
 metadata and never change the Task/Result outcome.
 
+The temporary file is opened once with an exclusive `wx` descriptor, written
+and fsynced on that same descriptor, closed, then `lstat`-checked and linked.
+The writer never reopens a temporary path by name and compares `fstat`/`lstat`
+identity where the platform exposes it.
+
 The writer cleans up the temporary file it owns on write, fsync, link, or
 unlink failure and retries only that invocation's bounded temp name. A process
 terminated abruptly (for example, `TerminateProcess` or power loss) can leave
@@ -20,8 +25,11 @@ directory-wide cleanup is attempted automatically.
 
 The v1 record keeps the explicit `availability` enum and its derived boolean
 `available` field while separating
-`harness.parent_measured`, `harness.harness_reported`, and
-`harness.provider_usage`. Parent wall/lifecycle measurements are authoritative.
+`harness.parent_measured`, `harness.harness_reported`,
+`harness.adapter_reported`, and `harness.provider_usage`. Every metric carries
+a `source` enum. Parent measurements contain only values captured by the
+parent (wall time and lifecycle/resource samples); first-tool, tool-call, and
+token values are never labelled `parent_measured`.
 When constructing a record, `availability` is accepted only as one of the
 exact enum values (`AVAILABLE`, `UNAVAILABLE`, `NOT_COLLECTED`) and is mapped
 to the matching boolean (or `null`); conflicting or unknown aliases are
@@ -29,9 +37,12 @@ rejected rather than silently converted to `null`.
 Git attribution stores bounded before/after status and SHA fingerprints;
 pre-existing dirty paths are excluded unless their status or fingerprint changes
 during the run.
-Parent evidence uses `lstat` link counts and marks any regular file with
-`nlink > 1` as invalid (`hard_link_paths`); such paths cannot be read, patched,
-or attributed. Directory link counts are not treated as hard-link aliases.
+Parent pre/post evidence recursively `lstat`s the Git root, every ancestor, and
+every status/diff path before fingerprinting. Reparse points (including
+junctions/symlinks) and regular files with `nlink > 1` are recorded in
+`reparse_paths`/`hard_link_paths`; `invalid_paths` is true and such paths are
+never read, patched, fingerprinted, or attributed. Safety inspection covers
+all paths even when the bounded evidence list is truncated.
 
 Read-only summary:
 

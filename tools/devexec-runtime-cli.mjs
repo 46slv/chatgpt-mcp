@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
@@ -79,9 +80,32 @@ function atomicWrite(file, value) {
   fs.mkdirSync(parent, { recursive: true });
   const encoded = JSON.stringify(value, null, 2) + "\n";
   if (Buffer.byteLength(encoded, "utf8") > MAX_OUTPUT_BYTES) throw new Error("output exceeds evidence limit");
-  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "wx" });
-  try { fs.renameSync(temporary, target); } catch (error) { try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; }
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
+  let fd = null;
+  let owned = false;
+  try {
+    // Keep the exclusive descriptor through write+fsync.  Never reopen the
+    // temporary path: a replacement reparse point must not redirect evidence
+    // outside the requested destination.
+    fd = fs.openSync(temporary, "wx", 0o600);
+    owned = true;
+    const bytes = Buffer.from(encoded, "utf8");
+    let offset = 0;
+    while (offset < bytes.length) { const written = fs.writeSync(fd, bytes, offset, bytes.length - offset); if (!Number.isInteger(written) || written <= 0) throw new Error("evidence write made no progress"); offset += written; }
+    fs.fsyncSync(fd);
+    const fdStat = fs.fstatSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    const tempStat = fs.lstatSync(temporary);
+    if (!tempStat.isFile() || tempStat.isSymbolicLink() || (Number.isInteger(tempStat.nlink) && tempStat.nlink > 1)) throw new Error("evidence temporary inode is unsafe");
+    if (Number.isInteger(fdStat.dev) && Number.isInteger(fdStat.ino) && Number.isInteger(tempStat.dev) && Number.isInteger(tempStat.ino) && (fdStat.dev !== tempStat.dev || fdStat.ino !== tempStat.ino)) throw new Error("evidence temporary inode changed");
+    fs.linkSync(temporary, target);
+    fs.unlinkSync(temporary);
+    owned = false;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* preserve original failure */ } }
+    if (owned) { try { fs.unlinkSync(temporary); } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ } } }
+  }
   return target;
 }
 
