@@ -107,6 +107,39 @@ export function classifyFreeTokenReadiness(body, config = {}) {
   return { status: "MALFORMED", reason: "readiness_schema_unknown" };
 }
 
+const CONTROL_FAILURE_STATES = new Set(["error", "failed", "failure", "crashed", "stopping"]);
+const CONTROL_NOT_READY_STATES = new Set(["loading", "starting", "stopped", "offline", "unavailable", "not_ready", "not-ready"]);
+
+function controlModelCompatible(body, config) {
+  const expected = logicalModelNames(config);
+  const advertised = [body?.model, body?.modelPath, body?.model_name, body?.modelName]
+    .filter((value) => typeof value === "string" && value.trim())
+    .flatMap((value) => {
+      const text = value.trim();
+      return [text.toLowerCase(), text.replace(/\\/g, "/").split("/").pop().toLowerCase()];
+    });
+  return advertised.length === 0 || advertised.some((name) => expected.includes(name));
+}
+
+// The control plane is authoritative about lifecycle state.  In particular,
+// a successful `/v1/models` response cannot turn an explicit control error,
+// malformed payload, or stopping/failed engine into READY.  `status: "ok"`
+// alone is deliberately insufficient: a positive engine state is required.
+export function classifyFreeTokenControlState(body, config = {}) {
+  if (body === null || body === undefined) return { status: "UNAVAILABLE", reason: "control_health_empty" };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { status: "MALFORMED", reason: "control_health_payload_not_object" };
+  if (Object.prototype.hasOwnProperty.call(body, "error")) return { status: "FAILED", reason: "control_health_error" };
+
+  const state = String(body.state ?? body.engineState ?? body.status ?? "").trim().toLowerCase();
+  if (CONTROL_FAILURE_STATES.has(state)) return { status: state === "stopping" ? "STOPPING" : "FAILED", reason: `control_engine_${state}` };
+  if (CONTROL_NOT_READY_STATES.has(state)) return { status: "NOT_READY", reason: `control_engine_${state}` };
+  if (body.engineRunning === false || body.ready === false) return { status: "NOT_READY", reason: "control_engine_not_running" };
+  if (!controlModelCompatible(body, config)) return { status: "NOT_READY", reason: "control_model_mismatch" };
+  if (body.engineRunning === true || body.ready === true || ["ready", "healthy"].includes(state)) return { status: "READY", reason: "control_engine_ready" };
+  if (state === "ok") return { status: "NOT_READY", reason: "control_engine_state_unconfirmed" };
+  return { status: "MALFORMED", reason: "control_health_schema_unknown" };
+}
+
 export function buildFreeTokenStartPlan(input = {}) {
   const config = input.enabled !== undefined || input.model || input.modelPath || input.controlUrl || input.serveUrl ? createFreeTokenConfig(input, {}) : input;
   if (!config?.modelPath) throw new Error("modelPath required for start plan");
@@ -180,14 +213,37 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   async function get(path, base = config.controlUrl) { return request(`${base}${path}`, { method: "GET" }); }
   async function health() {
     if (!config.enabled) return { status: "DISABLED", code: FREETOKEN_FAILURES.DISABLED, control: null, serve: null };
-    let control = null; let serve = null;
-    try { control = (await get("/health")).body; } catch (error) { return { status: "UNAVAILABLE", code: FREETOKEN_FAILURES.UNAVAILABLE, reason: String(error.message || error) }; }
-    try { serve = (await get("/v1/models", config.serveUrl)).body; } catch { /* readiness is false while stopped */ }
-    const controlReadiness = classifyFreeTokenReadiness(control, config);
-    const controlReady = controlReadiness.status === "READY";
-    const readiness = classifyFreeTokenReadiness(serve, config);
-    const status = controlReady || (control && readiness.status === "READY") ? "READY" : readiness.status;
-    return { status, code: status === "MALFORMED" ? FREETOKEN_FAILURES.MALFORMED_RESULT : null, reason: controlReady ? controlReadiness.reason : readiness.reason, control, serve };
+    let control = null; let serve = null; let controlError = null; let serveError = null;
+    try { control = (await get("/health")).body; } catch (error) { controlError = error; }
+    try { serve = (await get("/v1/models", config.serveUrl)).body; } catch (error) { serveError = error; }
+
+    const serveReadiness = classifyFreeTokenReadiness(serve, config);
+    const serveReady = serveReadiness.status === "READY";
+    // A transport failure with no HTTP status means the control plane cannot
+    // be observed.  A serve endpoint that positively advertises the configured
+    // model is safe to reuse, but ownership remains EXTERNAL/unknown and stop()
+    // must not be sent for it.  HTTP failures and malformed/explicit control
+    // states remain authoritative failures and cannot be masked by serve.
+    if (controlError) {
+      const httpFailure = Number.isFinite(Number(controlError?.status));
+      if (!httpFailure && serveReady) {
+        return { status: "READY", ownership: "EXTERNAL", owned: false, code: null, reason: "external_serve_ready_control_unavailable", control: null, serve, control_readiness: { status: "UNAVAILABLE", reason: "control_health_unavailable" }, serve_readiness: serveReadiness, control_error: String(controlError.message || controlError), serve_error: serveError ? String(serveError.message || serveError) : null };
+      }
+      const status = httpFailure ? "FAILED" : "UNAVAILABLE";
+      return { status, ownership: "UNKNOWN", owned: false, code: httpFailure ? FREETOKEN_FAILURES.SERVER_FAILURE : FREETOKEN_FAILURES.UNAVAILABLE, reason: httpFailure ? "control_health_http_failure" : "control_health_unavailable", control: null, serve, control_readiness: { status, reason: "control_health_unavailable" }, serve_readiness: serveReadiness, control_error: String(controlError.message || controlError), serve_error: serveError ? String(serveError.message || serveError) : null };
+    }
+
+    const controlReadiness = classifyFreeTokenControlState(control, config);
+    // Control error/malformed/failure/stopping states dominate even when the
+    // serve endpoint still exposes a stale or externally running model.
+    if (controlReadiness.status !== "READY") {
+      const code = controlReadiness.status === "MALFORMED" ? FREETOKEN_FAILURES.MALFORMED_RESULT : ["FAILED", "STOPPING"].includes(controlReadiness.status) ? FREETOKEN_FAILURES.SERVER_FAILURE : null;
+      return { status: controlReadiness.status, ownership: "UNKNOWN", owned: false, code, reason: controlReadiness.reason, control, serve, control_readiness: controlReadiness, serve_readiness: serveReadiness, serve_error: serveError ? String(serveError.message || serveError) : null };
+    }
+    if (!serveReady) {
+      return { status: serveReadiness.status, ownership: "UNKNOWN", owned: false, code: serveReadiness.status === "MALFORMED" ? FREETOKEN_FAILURES.MALFORMED_RESULT : null, reason: serveReadiness.reason, control, serve, control_readiness: controlReadiness, serve_readiness: serveReadiness, serve_error: serveError ? String(serveError.message || serveError) : null };
+    }
+    return { status: "READY", ownership: "EXTERNAL", owned: false, code: null, reason: "control_and_serve_ready", control, serve, control_readiness: controlReadiness, serve_readiness: serveReadiness };
   }
   async function waitReady(signal) {
     const started = Date.now(); let last = null;
@@ -213,6 +269,9 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     onLifecycle?.("start_start");
     const current = await health();
     if (current.status === "READY") { onLifecycle?.("start_end"); onLifecycle?.("ready_start"); onLifecycle?.("ready_end"); return { status: "READY", owned: false, health: current }; }
+    if (["FAILED", "MALFORMED", "STOPPING"].includes(current.status)) {
+      return { status: "BLOCKED", code: current.code || FREETOKEN_FAILURES.SERVER_FAILURE, reason: `control health ${String(current.status).toLowerCase()}`, health: current };
+    }
     // Only clean up a process previously spawned by this adapter. A stale
     // owned handle must not cause a second server to be started on the same
     // port; externally running FreeToken/LM Studio remains untouched.

@@ -37,6 +37,54 @@ test("health reports disabled and control/serve readiness", async () => {
   assert.equal(h.status, "READY"); assert.equal(f.calls.length, 2);
 });
 
+test("health truth table keeps control failures authoritative over serve readiness", async () => {
+  const config = { enabled: true, model: "m", modelPath: "m" };
+  const cases = [
+    { name: "control error", control: { status: "ok", error: "engine failed" }, expected: "FAILED" },
+    { name: "control malformed", control: {}, expected: "MALFORMED" },
+    { name: "control stopping", control: { status: "stopping", engineRunning: true }, expected: "STOPPING" },
+    { name: "control engine false with stale serve", control: { status: "ok", engineRunning: false }, expected: "NOT_READY" },
+    { name: "control engine true with serve ready", control: { status: "ok", engineRunning: true }, expected: "READY" },
+  ];
+  for (const entry of cases) {
+    const f = fakeRequest([{ body: entry.control }, { body: { data: [{ id: "m" }] } }]);
+    const h = await createFreeTokenInferenceAdapter({ config, request: f.request }).health();
+    assert.equal(h.status, entry.expected, entry.name);
+    assert.equal(h.serve_readiness.status, "READY", entry.name);
+  }
+});
+
+test("control unavailable may reuse a positively identified external serve without claiming ownership", async () => {
+  const f = fakeRequest([new Error("ECONNREFUSED"), { body: { data: [{ id: "m" }] } }, new Error("ECONNREFUSED"), { body: { data: [{ id: "m" }] } }]);
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", modelPath: "m" }, request: f.request, gpuProbe: () => ({ status: "CLEAR" }) });
+  const h = await adapter.health();
+  assert.equal(h.status, "READY");
+  assert.equal(h.ownership, "EXTERNAL");
+  assert.equal(h.owned, false);
+  assert.equal(h.reason, "external_serve_ready_control_unavailable");
+  const started = await adapter.start();
+  assert.equal(started.status, "READY");
+  assert.equal(started.owned, false);
+  assert.equal(f.calls.some((call) => call.url.endsWith("/engine/start")), false);
+});
+
+test("configured model mismatch is never ready even when control reports a running engine", async () => {
+  const f = fakeRequest([{ body: { status: "ok", engineRunning: true } }, { body: { data: [{ id: "other-model" }] } }]);
+  const h = await createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", modelPath: "m" }, request: f.request }).health();
+  assert.equal(h.status, "NOT_READY");
+  assert.equal(h.control_readiness.status, "READY");
+  assert.equal(h.serve_readiness.reason, "configured_model_absent");
+});
+
+test("start blocks explicit control failure instead of masking it with a stale serve", async () => {
+  const f = fakeRequest([{ body: { status: "failed", error: "engine failed" } }, { body: { data: [{ id: "m" }] } }]);
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", modelPath: "m" }, request: f.request, gpuProbe: () => ({ status: "CLEAR" }) });
+  const result = await adapter.start();
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.code, FREETOKEN_FAILURES.SERVER_FAILURE);
+  assert.equal(f.calls.some((call) => call.url.endsWith("/engine/start")), false);
+});
+
 test("GPU conflict blocks start before control API and does not stop anything", async () => {
   const f = fakeRequest();
   const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m" }, request: f.request, gpuProbe: () => ({ status: "CONFLICT", reason: "lm_studio" }) });

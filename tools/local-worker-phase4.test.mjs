@@ -58,6 +58,7 @@ test("FreeToken config is loopback-only and malformed provider bodies fail close
   assert.throws(() => createFreeTokenConfig({ enabled: true, model: "m", controlUrl: "https://example.invalid" }), /loopback/i);
   const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m" }, gpuProbe: () => ({ status: "CLEAR" }), sleep: async () => {}, request: async (url) => {
     if (url.endsWith("/health")) return { body: { status: "ok", engineRunning: true } };
+    if (url.endsWith("/v1/models")) return { body: { data: [{ id: "m" }] } };
     return { body: null };
   } });
   const result = await adapter.run({ goal: "hello" });
