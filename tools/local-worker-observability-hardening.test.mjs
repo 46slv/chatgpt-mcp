@@ -97,3 +97,20 @@ test("adapter-created junction is recursively inspected and cannot claim success
   }
 });
 test("metric provenance keeps worker observations out of parent_measured", async () => { const f = fixture(); const result = await runLocalWorkerTask(f.task, { adapter: passAdapter(async (task) => fs.writeFileSync(path.join(task.worktree, "allowed.txt"), "ok\n")), runLedgerDir: f.root }); assert.notEqual(result.result.runtime_metrics.wall_time_ms, 999999); const ledger = JSON.parse(fs.readFileSync(path.join(f.root, `${result.run_id}.json`), "utf8")); assert.notEqual(ledger.harness.parent_measured.wall_time_ms, 999999); assert.equal(ledger.harness.parent_measured.first_tool, null); assert.equal(ledger.harness.parent_measured.source, "parent_measured"); assert.equal(ledger.harness.harness_reported.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.source, "harness_reported"); assert.equal(ledger.harness.adapter_reported.first_tool, "https___bad.example__token_x"); assert.equal(ledger.harness.adapter_reported.source, "adapter_reported"); });
+
+test("parent resource measurements survive provider failure and identity paths stay private", async () => {
+  const f = fixture();
+  const sampler = { start() {}, stop() { return { ram_mb: { before: 100, peak: 120, after: 110, availability: "AVAILABLE", available: true }, vram_mb: { before: 10, peak: 20, after: 12, availability: "AVAILABLE", available: true }, gpu_utilization_pct: { before: 1, peak: 40, after: 2, availability: "AVAILABLE", available: true } }; } };
+  const adapter = { identity: { runtime: "local", provider: "fake", model: "C:\\private\\qwen.gguf?token=secret#x", repo_path: "C:\\private\\source" }, async run() { return { status: "FAILED", code: "INFERENCE_REQUEST_TIMEOUT", metrics: { ram_before_mb: 999999 } }; } };
+  const outcome = await runLocalWorkerTask(f.task, { adapter, runLedgerDir: f.root, resourceSampler: sampler });
+  assert.equal(outcome.result.status, "FAILED");
+  assert.equal(outcome.result.runtime_provider_identity.model, "qwen.gguf");
+  assert.deepEqual(outcome.result.resources.ram_mb, { before: 100, peak: 120, after: 110, availability: "AVAILABLE", available: true });
+  assert.match(outcome.result.blocker, /INFERENCE_REQUEST_TIMEOUT/);
+  const encoded = JSON.stringify(outcome);
+  assert.doesNotMatch(encoded, /C:\\private|token=secret/);
+  const ledger = JSON.parse(fs.readFileSync(path.join(f.root, `${outcome.run_id}.json`), "utf8"));
+  assert.deepEqual(ledger.resources.gpu_utilization_pct, { before: 1, peak: 40, after: 2, availability: "AVAILABLE", available: true });
+  assert.equal(ledger.selection.model, "qwen.gguf");
+  assert.doesNotMatch(JSON.stringify(ledger), /C:\\private|token=secret/);
+});

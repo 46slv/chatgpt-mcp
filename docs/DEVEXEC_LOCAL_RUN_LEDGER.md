@@ -28,8 +28,13 @@ The v1 record keeps the explicit `availability` enum and its derived boolean
 `harness.parent_measured`, `harness.harness_reported`,
 `harness.adapter_reported`, and `harness.provider_usage`. Every metric carries
 a `source` enum. Parent measurements contain only values captured by the
-parent (wall time and lifecycle/resource samples); first-tool, tool-call, and
-token values are never labelled `parent_measured`.
+parent (wall time and lifecycle/resource samples). `resources.ram_mb` is the
+parent RSS sample, `resources.vram_mb` is target-device GPU memory, and
+`resources.gpu_utilization_pct` is target-device utilization; each has bounded
+before/peak/after values and `AVAILABLE`/`NOT_COLLECTED` availability. The
+sampler is read-only, cancellable, and never records provider PIDs, process
+names, or paths. First-tool, tool-call, and token values are never labelled
+`parent_measured`.
 When constructing a record, `availability` is accepted only as one of the
 exact enum values (`AVAILABLE`, `UNAVAILABLE`, `NOT_COLLECTED`) and is mapped
 to the matching boolean (or `null`); conflicting or unknown aliases are

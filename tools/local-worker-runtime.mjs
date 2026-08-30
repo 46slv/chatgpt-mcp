@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { createLifecycleRecorder, createLocalRunRecord, contractFingerprint, writeLocalRunRecordAtomic, sha256Digest, attributeGitEvidence } from "./local-run-ledger.mjs";
+import { createParentResourceSampler } from "./local-resource-sampler.mjs";
 
 export const TASK_CONTRACT_VERSION = 1;
 export const RESULT_CONTRACT_VERSION = 1;
@@ -182,6 +183,11 @@ function rejectReparseSegments(root, relative) {
     try { stat = fs.lstatSync(current); } catch { fail(`cannot inspect allowed path: ${relative}`, "PATH_VALIDATION_FAILED"); }
     if (stat.isSymbolicLink()) fail(`symlink/reparse path is not allowed: ${relative}`, "PATH_REPARSE_REJECTED");
   }
+}
+
+function boundedFailureCode(error, fallback = "PROVIDER_FAILURE") {
+  const code = typeof error?.code === "string" ? error.code : "";
+  return /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : fallback;
 }
 
 // Inspect a repository-relative path without ever traversing through an
@@ -412,6 +418,7 @@ export function validateResultContract(result) {
   if (!["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result.status)) fail("invalid result.status", "MALFORMED_RESULT");
   if (!Array.isArray(result.changed_files) || result.changed_files.length > MAX_RESULT_CHANGED_FILES || result.changed_files.some((x) => { try { normalizeRelativePath(x, "result.changed_files entry"); return false; } catch { return true; } })) fail("invalid result.changed_files", "MALFORMED_RESULT");
   if (!isObject(result.tests) || !isObject(result.diff_availability) || !isObject(result.runtime_metrics) || !isObject(result.safety_metrics) || !isObject(result.runtime_provider_identity)) fail("result evidence objects are required", "MALFORMED_RESULT");
+  if (result.runtime_provider_identity.model !== undefined && (typeof result.runtime_provider_identity.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result.runtime_provider_identity.model))) fail("runtime_provider_identity.model must be a logical model id", "MALFORMED_RESULT");
   if (result.diff_availability.files !== undefined && (!Array.isArray(result.diff_availability.files) || result.diff_availability.files.length > MAX_RESULT_CHANGED_FILES || result.diff_availability.files.some((x) => { try { normalizeRelativePath(x, "result.diff_availability.files entry"); return false; } catch { return true; } }))) fail("invalid result.diff_availability.files", "MALFORMED_RESULT");
   for (const field of ["stdout", "stderr", "blocker"]) if (result.tests[field] !== undefined && (typeof result.tests[field] !== "string" || result.tests[field].length > 262144)) fail(`invalid result.tests.${field}`, "MALFORMED_RESULT");
   if (typeof result.blocker !== "string" || result.blocker.length > 4000) fail("invalid result.blocker", "MALFORMED_RESULT");
@@ -428,6 +435,24 @@ export function redactStructuredLog(value, { maxString = 1000 } = {}) {
   if (!isObject(value)) return value;
   const output = {};
   for (const [key, entry] of Object.entries(value)) output[key] = sensitive.test(key) ? "[REDACTED]" : redactStructuredLog(entry, { maxString });
+  return output;
+}
+
+function logicalModelIdentity(value) {
+  if (typeof value !== "string" || !value.trim()) return "unknown";
+  const text = value.trim().split(/[?#]/, 1)[0].replace(/\\/g, "/").replace(/\/+$/, "");
+  const basename = text.split("/").pop() || "unknown";
+  const safe = basename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128);
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(safe) ? safe : "unknown";
+}
+
+export function sanitizeRuntimeProviderIdentity(identity) {
+  const redacted = redactStructuredLog(isObject(identity) ? identity : { runtime: "local", provider: "unknown" }, { maxString: 256 });
+  const output = isObject(redacted) ? { ...redacted } : { runtime: "local", provider: "unknown" };
+  if (Object.prototype.hasOwnProperty.call(output, "model")) output.model = logicalModelIdentity(identity?.model);
+  // Paths, prompts, source bodies and request payloads are never part of
+  // public provider identity, even when an injected adapter supplies them.
+  for (const key of Object.keys(output)) if (/(?:path|cwd|repo|worktree|source|prompt|request|response|body)/i.test(key)) delete output[key];
   return output;
 }
 
@@ -455,26 +480,36 @@ export function createFailureFingerprintGuard({ maxRepeats = 2 } = {}) {
 export function createInferenceAdapter(adapter) {
   if (!adapter || typeof adapter.run !== "function") fail("inference adapter must expose run(task, context)", "ADAPTER_INVALID");
   return Object.freeze({
-    identity: isObject(adapter.identity) ? redactStructuredLog(adapter.identity) : { runtime: "local", provider: "unknown" },
+    identity: sanitizeRuntimeProviderIdentity(adapter.identity),
     health: typeof adapter.health === "function" ? adapter.health.bind(adapter) : async () => ({ status: "UNKNOWN" }),
     run: adapter.run.bind(adapter),
     stop: typeof adapter.stop === "function" ? adapter.stop.bind(adapter) : async () => {},
   });
 }
 
-export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null, runLedgerDir = null, runId = null, selection = null, ledgerWriter = writeLocalRunRecordAtomic } = {}) {
+export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null, runLedgerDir = null, runId = null, selection = null, ledgerWriter = writeLocalRunRecordAtomic, resourceSampler: suppliedResourceSampler = null, resourceSamplerFactory = createParentResourceSampler } = {}) {
   const task = validateTaskContract(inputTask, { verifyGit: false });
   const runtimeAdapter = createInferenceAdapter(adapter);
   const started = now();
   const localRunId = typeof runId === "string" && runId.trim() ? runId.trim() : crypto.randomUUID();
   const lifecycle = createLifecycleRecorder(now);
   let ledgerWrite = null;
+  let resourceSampler = null;
+  let measuredResources = null;
+  const stopResourceSampler = () => {
+    if (!resourceSampler) return measuredResources;
+    try { measuredResources = resourceSampler.stop(); } catch { measuredResources = null; }
+    resourceSampler = null;
+    return measuredResources;
+  };
   const writeLedger = (result, { beforeEvidence = before, afterEvidence = after, baselineClean = beforeEvidence ? beforeEvidence.changed_path_count === 0 : null } = {}) => {
     if (!runLedgerDir) return;
     try {
       const adapterMetrics = adapterResult?.metrics || {};
       const attributedLedger = beforeEvidence && afterEvidence ? attributeGitEvidence(beforeEvidence, afterEvidence) : { paths: [], diff_paths: [] };
-      const parentWall = Number.isFinite(result?.runtime_metrics?.wall_time_ms) ? result.runtime_metrics.wall_time_ms : null;
+      // Parent timing and resources are measured at this boundary, never
+      // copied from adapter/harness values.
+      const parentWall = Math.max(0, now() - started);
       const clean = createLocalRunRecord({
         run_id: localRunId,
         selection: selection || runtimeAdapter.identity,
@@ -495,10 +530,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
           adapter_reported: { first_tool: adapterMetrics.first_tool, first_tool_latency_ms: adapterMetrics.first_tool_latency_ms, tool_calls: adapterMetrics.tool_calls, wall_time_ms: adapterMetrics.wall_time_ms, source: "adapter_reported" },
           provider_usage: { prompt_tokens: adapterMetrics.prompt_tokens, completion_tokens: adapterMetrics.completion_tokens, total_tokens: adapterMetrics.total_tokens, source: "provider_usage" },
         },
-        resources: adapterResult?.resources || {
-          ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) ? true : null },
-          vram_mb: { before: adapterMetrics.vram_before_mb, peak: adapterMetrics.vram_peak_mb, after: adapterMetrics.vram_after_mb, available: [adapterMetrics.vram_before_mb, adapterMetrics.vram_peak_mb, adapterMetrics.vram_after_mb].some((value) => Number.isFinite(value)) ? true : null },
-        },
+        resources: measuredResources || {},
         outcome: {
           status: result?.status,
           changed: { count: attributedLedger.paths.length, paths: attributedLedger.paths, digest: attributedLedger.paths.length ? sha256Digest(attributedLedger.paths) : sha256Digest([]) },
@@ -542,6 +574,11 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     return { run_id: localRunId, result: validateResultContract(result), log: redactStructuredLog({ event: "local_worker_blocked", task_id: task.task_id, status: result.status, blocker }), ledger: ledgerWrite };
   }
   lifecycle.mark("preflight_end");
+  // Observe from the parent before invoking the provider, so a provider crash
+  // still leaves target-device before/after measurements. The sampler is
+  // read-only and never enumerates or terminates provider processes.
+  resourceSampler = suppliedResourceSampler || resourceSamplerFactory({ deviceIndex: Number.isInteger(runtimeAdapter.identity?.device_index) ? runtimeAdapter.identity.device_index : 0, signal, maxDurationMs: task.timeout });
+  resourceSampler.start();
   try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal, runTest, onLifecycle: (event) => lifecycle.mark(event) }); } catch (error) { adapterError = error; }
   // A provider crash must not strand an owned process. Adapters are required
   // to make stop() ownership-aware (external engines remain untouched).
@@ -588,14 +625,15 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   let failureFingerprint = null;
   if (adapterError) {
     status = "FAILED";
-    blocker = redactStructuredLog(String(adapterError?.message || adapterError), { maxString: 4000 });
+    const code = boundedFailureCode(adapterError);
+    blocker = `local worker provider failure: ${code}${code === "PROVIDER_FAILURE" ? " [REDACTED]" : ""}`;
     if (failureGuard?.record) {
       const repeat = failureGuard.record(adapterError);
       failureFingerprint = repeat.fingerprint;
       if (repeat.abort) { status = "BLOCKED"; blocker = "duplicate failure fingerprint threshold reached"; }
     }
   }
-  else if (postflightError) { status = "BLOCKED"; blocker = redactStructuredLog(String(postflightError?.message || postflightError), { maxString: 4000 }); }
+  else if (postflightError) { status = "BLOCKED"; blocker = `postflight validation failed: ${boundedFailureCode(postflightError, "POSTFLIGHT_FAILED")}`; }
   else if (evidenceTruncated) { status = "BLOCKED"; blocker = `changed-file evidence exceeds ${MAX_EVIDENCE_PATHS} paths`; }
   else if (invalidPaths) { status = "BLOCKED"; blocker = "Git evidence contains an unsafe path"; }
   else if (attributionUncertain.length) { status = "BLOCKED"; blocker = `changed-file fingerprint exceeds bounded evidence: ${attributionUncertain.join(", ")}`; }
@@ -605,7 +643,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   else if (!adapterResult || typeof adapterResult !== "object" || typeof adapterResult.status !== "string") { status = "FAILED"; blocker = "malformed local worker provider result"; }
   else if (adapterResult && typeof adapterResult.status === "string" && !["PASS", "DONE", "SUCCESS"].includes(adapterResult.status)) {
     status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
-    blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : "local worker reported runtime failure";
+    blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : `local worker reported runtime failure: ${boundedFailureCode(adapterResult)}`;
   }
   else if (!attributedPaths.length || !attributed.diff_paths.length) { status = "FAILED"; blocker = "no nonempty bounded diff was produced"; }
   else if (tests.status !== "PASS" || tests.evidence_valid !== true) {
@@ -615,10 +653,12 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     else if (tests.invalid_evidence || tests.evidence_valid !== true) blocker = "test evidence is not parent-controlled or does not match requested test command";
     else blocker = "tests did not pass";
   }
+  stopResourceSampler();
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: attributedPaths, tests, blocker,
     diff_availability: { available: attributed.diff_paths.length > 0, files: attributed.diff_paths },
-    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null },
+    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_code: boundedFailureCode(adapterResult, adapterError ? boundedFailureCode(adapterError) : "NONE"), failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null },
+    resources: measuredResources,
     safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, attributed_paths: attributedPaths, preexisting_paths_excluded: before.changed_paths.filter((p) => !attributedPaths.includes(p)), attribution: attributed.details, attribution_uncertain: attributionUncertain, invalid_paths: !!invalidPaths, invalid_path_list: invalidPathList, reparse_paths: reparsePaths, hard_link_paths: hardLinkEvidencePaths, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,
   };

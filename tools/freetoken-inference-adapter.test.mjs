@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFreeTokenInferenceAdapter, createFreeTokenConfig, buildFreeTokenStartPlan, classifyFreeTokenFailure, classifyFreeTokenReadiness, redactFreeTokenLog, FREETOKEN_FAILURES } from "./freetoken-inference-adapter.mjs";
+import { createFreeTokenInferenceAdapter, createFreeTokenConfig, buildFreeTokenStartPlan, classifyFreeTokenFailure, classifyFreeTokenReadiness, redactFreeTokenLog, classifyGpuConflict, logicalModelId, FREETOKEN_FAILURES } from "./freetoken-inference-adapter.mjs";
 
 function fakeRequest(sequence = []) {
   const calls = [];
@@ -133,6 +133,19 @@ test("GPU conflict blocks start before control API and does not stop anything", 
   assert.equal(f.calls.length, 0);
 });
 
+test("GPU gate treats a matching WDDM/Resolve N/A compute row as conflict", () => {
+  const rows = [["0", "GPU-0"], ["1", "GPU-1"]];
+  const resolve = "GPU-0, 456, Resolve.exe, [N/A]";
+  assert.equal(classifyGpuConflict(resolve, rows, 0).status, "CONFLICT");
+  assert.equal(classifyGpuConflict("GPU-1, 789, other.exe, 128", rows, 0).status, "CLEAR");
+});
+
+test("public model identity is basename-only", () => {
+  assert.equal(logicalModelId("C:\\models\\qwen.gguf?secret=x#fragment"), "qwen.gguf");
+  assert.equal(logicalModelId("https://host/private/qwen.gguf"), "qwen.gguf");
+  assert.doesNotMatch(logicalModelId("C:\\models\\qwen.gguf?secret=x#fragment"), /[\\/:?#]/);
+});
+
 test("control start waits for serve readiness, executes, then stops owned engine", async () => {
   const f = fakeRequest([
     { body: { status: "ok", engineRunning: false } },
@@ -172,4 +185,21 @@ test("owned CLI process cleanup uses process tree while external workloads remai
   let killed = 0; const child = { pid: 77, once() {} }; const f = fakeRequest([{ body: { status: "ok", engineRunning: false } }, new Error("ECONNREFUSED"), { body: { status: "ok", model: "m" } }]);
   const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", modelPath: "model", startMode: "cli" }, request: f.request, gpuProbe: () => ({ status: "CLEAR" }), spawnImpl: () => child, taskkill: () => { killed += 1; }, sleep: async () => {} });
   await adapter.start(); await adapter.stop(); assert.equal(killed, 1); assert.equal(f.calls.some((x) => x.url.endsWith("/engine/stop")), false);
+});
+
+test("never-resolving inference is bounded by inference timeout and never passes", async () => {
+  const f = fakeRequest([
+    { body: { status: "ok", engineRunning: false } },
+    new Error("ECONNREFUSED"),
+    { body: { accepted: true } },
+    { body: { status: "ok", model: "m" } },
+    () => new Promise(() => {}),
+    { body: { stopped: true } },
+  ]);
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", requestTimeoutMs: 1000, inferenceRequestTimeoutMs: 1000, readyTimeoutMs: 1000 }, request: f.request, gpuProbe: () => ({ status: "CLEAR" }), sleep: async () => {} });
+  const started = Date.now();
+  const result = await adapter.run({ goal: "bounded", timeout: 4000, max_tool_calls: 1, output_limit: 1000 });
+  assert.ok(Date.now() - started < 2500);
+  assert.notEqual(result.status, "PASS");
+  assert.equal(result.code, FREETOKEN_FAILURES.INFERENCE_TIMEOUT);
 });

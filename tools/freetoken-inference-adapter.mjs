@@ -11,6 +11,8 @@ export const FREETOKEN_FAILURES = Object.freeze({
   SERVER_FAILURE: "SERVER_FAILURE",
   GPU_OOM: "GPU_OOM",
   TIMEOUT: "TIMEOUT",
+  INFERENCE_TIMEOUT: "INFERENCE_REQUEST_TIMEOUT",
+  TASK_DEADLINE: "TASK_DEADLINE_EXCEEDED",
   CANCELLED: "CANCELLED",
   MALFORMED_RESULT: "MALFORMED_RESULT",
   RESULT_TOO_LARGE: "RESULT_TOO_LARGE",
@@ -24,7 +26,7 @@ export function redactFreeTokenLog(value, { maxString = 1000 } = {}) {
   }
   if (Array.isArray(value)) return value.map((entry) => redactFreeTokenLog(entry, { maxString }));
   if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sensitive.test(key) ? "[REDACTED]" : redactFreeTokenLog(entry, { maxString })]));
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, key.toLowerCase() === "model" ? logicalModelId(entry) : sensitive.test(key) ? "[REDACTED]" : redactFreeTokenLog(entry, { maxString })]));
 }
 
 function boundedString(value, name, max = 4096) {
@@ -55,7 +57,9 @@ export function createFreeTokenConfig(input = {}, env = process.env) {
     if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase())) throw new Error(`${name} must use a loopback HTTP URL`);
     return normalized;
   };
-  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), deviceIndex, controlUrl: localUrl(controlUrl, "controlUrl"), serveUrl: localUrl(serveUrl, "serveUrl"), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: boundedNumber(input.requestTimeoutMs ?? 60000, 60000, 1000, 120000), idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
+  const lifecycleRequestTimeoutMs = boundedNumber(input.lifecycleRequestTimeoutMs ?? input.requestTimeoutMs ?? 60000, 60000, 1000, 120000);
+  const inferenceRequestTimeoutMs = boundedNumber(input.inferenceRequestTimeoutMs ?? env.FREETOKEN_INFERENCE_REQUEST_TIMEOUT_MS ?? 180000, 180000, 1000, 600000);
+  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), deviceIndex, controlUrl: localUrl(controlUrl, "controlUrl"), serveUrl: localUrl(serveUrl, "serveUrl"), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: lifecycleRequestTimeoutMs, lifecycleRequestTimeoutMs, inferenceRequestTimeoutMs, idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
 }
 
 export function classifyFreeTokenFailure(error) {
@@ -77,6 +81,15 @@ function logicalModelNames(config) {
     const text = String(value).trim();
     return [text.toLowerCase(), text.replace(/\\/g, "/").split("/").pop().toLowerCase()];
   }))];
+}
+
+/** Public identity is a logical model id only; never expose a filesystem or URL path. */
+export function logicalModelId(value, fallback = "unknown") {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  const text = value.trim().split(/[?#]/, 1)[0].replace(/\\/g, "/").replace(/\/+$/, "");
+  const basename = text.split("/").pop() || fallback;
+  const safe = basename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128);
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(safe) ? safe : fallback;
 }
 
 function modelEntryNames(entry) {
@@ -149,7 +162,7 @@ export function buildFreeTokenStartPlan(input = {}) {
 function failure(code, message, details = {}) { const error = new Error(message); error.code = code; Object.assign(error, details); return error; }
 
 function classifyAbortReason(reason) {
-  if (reason?.code === FREETOKEN_FAILURES.TIMEOUT) return FREETOKEN_FAILURES.TIMEOUT;
+  if ([FREETOKEN_FAILURES.TIMEOUT, FREETOKEN_FAILURES.INFERENCE_TIMEOUT, FREETOKEN_FAILURES.TASK_DEADLINE].includes(reason?.code)) return reason.code;
   const text = String(reason?.message || reason || "").toLowerCase();
   return text.includes("timeout") || text.includes("timed out") ? FREETOKEN_FAILURES.TIMEOUT : FREETOKEN_FAILURES.CANCELLED;
 }
@@ -174,12 +187,12 @@ async function defaultRequest(url, options = {}) {
 // parent boundary regardless of cooperative transport behavior. The late
 // request promise always gets a rejection handler so a post-timeout failure
 // cannot become an unhandled rejection.
-function boundedRequest(request, url, options = {}, { signal = null, timeoutMs = 60000 } = {}) {
+function boundedRequest(request, url, options = {}, { signal = null, timeoutMs = 60000, timeoutCode = FREETOKEN_FAILURES.TIMEOUT } = {}) {
   const boundedTimeout = Math.max(1, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 60000);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       const code = classifyAbortReason(signal.reason);
-      reject(failure(code, code === FREETOKEN_FAILURES.TIMEOUT ? "FreeToken request timeout before dispatch" : "FreeToken request cancelled before dispatch"));
+      reject(failure(code, code === FREETOKEN_FAILURES.TIMEOUT || code === FREETOKEN_FAILURES.INFERENCE_TIMEOUT ? "FreeToken request timeout before dispatch" : "FreeToken request cancelled before dispatch"));
       return;
     }
     const controller = new AbortController();
@@ -201,12 +214,12 @@ function boundedRequest(request, url, options = {}, { signal = null, timeoutMs =
     onAbort = () => {
       try { controller.abort(signal.reason); } catch { /* already aborted */ }
       const code = classifyAbortReason(signal.reason);
-      settle(reject, failure(code, code === FREETOKEN_FAILURES.TIMEOUT ? "FreeToken request timeout" : "FreeToken request cancelled"));
+      settle(reject, failure(code, code === FREETOKEN_FAILURES.TIMEOUT || code === FREETOKEN_FAILURES.INFERENCE_TIMEOUT ? "FreeToken request timeout" : "FreeToken request cancelled"));
     };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => {
       try { controller.abort(new Error("request timeout")); } catch { /* already aborted */ }
-      settle(reject, failure(FREETOKEN_FAILURES.TIMEOUT, "FreeToken request timeout"));
+      settle(reject, failure(timeoutCode, "FreeToken request timeout"));
     }, boundedTimeout);
     let pending;
     try {
@@ -222,9 +235,9 @@ function boundedRequest(request, url, options = {}, { signal = null, timeoutMs =
   });
 }
 
-function abortableSignal(signal, timeoutMs) {
+function abortableSignal(signal, timeoutMs, timeoutCode = FREETOKEN_FAILURES.TASK_DEADLINE) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("request timeout")), timeoutMs);
+  const timer = setTimeout(() => { const error = failure(timeoutCode, timeoutCode === FREETOKEN_FAILURES.TASK_DEADLINE ? "FreeToken task deadline exceeded" : "FreeToken request timeout"); controller.abort(error); }, Math.max(1, timeoutMs));
   let onAbort = null;
   if (signal) {
     onAbort = () => controller.abort(signal.reason);
@@ -233,21 +246,29 @@ function abortableSignal(signal, timeoutMs) {
   return { signal: controller.signal, dispose: () => { clearTimeout(timer); if (signal && onAbort) signal.removeEventListener("abort", onAbort); onAbort = null; } };
 }
 
-export function defaultGpuConflictProbe(deviceIndex = 0) {
+export function classifyGpuConflict(mapping, gpuRows, deviceIndex = 0) {
+  const target = (Array.isArray(gpuRows) ? gpuRows : []).find((row) => Number(String(Array.isArray(row) ? row[0] : row?.index).trim()) === deviceIndex);
+  const targetUuid = String(Array.isArray(target) ? target?.[1] : target?.uuid || "").trim().toLowerCase();
+  if (!targetUuid) return { status: "UNAVAILABLE", reason: "target_gpu_not_found", device_index: deviceIndex };
+  const targetIndex = String(deviceIndex);
+  const busy = String(mapping || "").split(/\r?\n/).some((line) => {
+    const fields = line.split(",").map((value) => value.trim());
+    if (!fields.length) return false;
+    // nvidia-smi compute-app rows can contain UUIDs; WDDM/Resolve variants
+    // may expose an index or [N/A] used-memory. Any matching row is a
+    // conflict: memory text is not a reliable compute-client discriminator.
+    return fields[0].toLowerCase() === targetUuid || fields[0] === targetIndex;
+  });
+  return busy
+    ? { status: "CONFLICT", reason: "existing_gpu_compute_workload_on_target_device", device_index: deviceIndex }
+    : { status: "CLEAR", reason: "no_known_gpu_compute_workload_on_target_device", device_index: deviceIndex };
+}
+
+export function defaultGpuConflictProbe(deviceIndex = 0, { execFileSyncImpl = execFileSync } = {}) {
   try {
-    const mapping = execFileSync("nvidia-smi", ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 }).trim();
-    const uuids = execFileSync("nvidia-smi", ["--query-gpu=index,uuid", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 }).trim().split(/\r?\n/).map((line) => line.split(",").map((x) => x.trim()));
-    const targetUuid = uuids.find(([index]) => Number(index) === deviceIndex)?.[1];
-    if (!targetUuid) return { status: "UNAVAILABLE", reason: "target_gpu_not_found", device_index: deviceIndex };
-    const targetBusy = mapping.split(/\r?\n/).some((line) => {
-      if (!line.toLowerCase().startsWith(targetUuid.toLowerCase())) return false;
-      // nvidia-smi also reports graphics clients with a trailing [N/A]. They
-      // do not reserve CUDA compute memory and are not a model conflict.
-      const used = line.match(/,\s*([0-9]+(?:\.[0-9]+)?)\s*$/);
-      return !!used && Number(used[1]) > 0;
-    });
-    if (targetBusy) return { status: "CONFLICT", reason: "existing_gpu_compute_workload_on_target_device", device_index: deviceIndex };
-    return { status: "CLEAR", reason: "no_known_gpu_compute_workload_on_target_device", device_index: deviceIndex };
+    const mapping = execFileSyncImpl("nvidia-smi", ["--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 }).trim();
+    const uuids = execFileSyncImpl("nvidia-smi", ["--query-gpu=index,uuid", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 }).trim().split(/\r?\n/).filter(Boolean).map((line) => line.split(",").map((x) => x.trim()));
+    return classifyGpuConflict(mapping, uuids, deviceIndex);
   } catch { return { status: "UNAVAILABLE", reason: "gpu_device_mapping_unavailable", device_index: deviceIndex }; }
 }
 
@@ -272,7 +293,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   let startedViaControl = false;
   let stopping = null;
 
-  const identity = Object.freeze({ runtime: "local", provider: "freetoken", model: config.model || "unconfigured", device_index: config.deviceIndex, control_url: config.controlUrl, serve_url: config.serveUrl });
+  const identity = Object.freeze({ runtime: "local", provider: "freetoken", model: logicalModelId(config.model, "unconfigured"), device_index: config.deviceIndex, control_url: config.controlUrl, serve_url: config.serveUrl });
   async function get(path, base = config.controlUrl, signal = null, timeoutMs = config.requestTimeoutMs) {
     return boundedRequest(request, `${base}${path}`, { method: "GET" }, { signal, timeoutMs });
   }
@@ -286,7 +307,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     control = observed[0].body ?? null; controlError = observed[0].error || null;
     serve = observed[1].body ?? null; serveError = observed[1].error || null;
 
-    const boundedFailure = (error) => [FREETOKEN_FAILURES.CANCELLED, FREETOKEN_FAILURES.TIMEOUT].includes(error?.code) ? error.code : null;
+    const boundedFailure = (error) => [FREETOKEN_FAILURES.CANCELLED, FREETOKEN_FAILURES.TIMEOUT, FREETOKEN_FAILURES.INFERENCE_TIMEOUT, FREETOKEN_FAILURES.TASK_DEADLINE].includes(error?.code) ? error.code : null;
     const controlBoundedCode = boundedFailure(controlError);
     const serveBoundedCode = boundedFailure(serveError);
     if (controlBoundedCode || serveBoundedCode) {
@@ -349,7 +370,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     onLifecycle?.("gpu_gate_end");
     if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
     onLifecycle?.("start_start");
-    if (signal?.aborted) return { status: "BLOCKED", code: FREETOKEN_FAILURES.CANCELLED, reason: "start cancelled before health" };
+    if (signal?.aborted) { const code = classifyAbortReason(signal.reason); return { status: "BLOCKED", code, reason: code === FREETOKEN_FAILURES.TASK_DEADLINE ? "task deadline exceeded before health" : "start cancelled before health" }; }
     const current = await health(signal);
     if (current.status === "READY") { onLifecycle?.("start_end"); onLifecycle?.("ready_start"); onLifecycle?.("ready_end"); return { status: "READY", owned: false, health: current }; }
     if (["FAILED", "MALFORMED", "STOPPING", "CANCELLED", "TIMEOUT"].includes(current.status)) {
@@ -377,7 +398,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       onLifecycle?.("ready_end");
       return { status: "READY", owned: startedByAdapter, ready };
     } catch (error) {
-      const code = signal?.aborted ? FREETOKEN_FAILURES.CANCELLED : classifyFreeTokenFailure(error);
+      const code = signal?.aborted ? classifyAbortReason(signal.reason) : classifyFreeTokenFailure(error);
       await stop();
       return { status: "BLOCKED", code, reason: String(error.message || error) };
     }
@@ -396,21 +417,27 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   }
   async function run(task, context = {}) {
     if (!config.enabled) return { status: "BLOCKED", code: FREETOKEN_FAILURES.DISABLED, reason: "provider disabled" };
-    const started = Date.now(); const lifecycle = await start({ signal: context.signal, onLifecycle: context.onLifecycle });
-    if (lifecycle.status !== "READY") return lifecycle;
+    const started = Date.now();
+    const taskIsObject = task && typeof task === "object";
+    const taskTimeoutMs = taskIsObject && Number.isInteger(task.timeout) ? task.timeout : config.inferenceRequestTimeoutMs;
+    const runDeadline = started + Math.max(1000, Math.min(3_600_000, taskTimeoutMs));
+    const runBudget = Math.max(1, runDeadline - Date.now());
+    const runSignal = abortableSignal(context.signal, runBudget, FREETOKEN_FAILURES.TASK_DEADLINE);
+    const lifecycle = await start({ signal: runSignal.signal, onLifecycle: context.onLifecycle });
+    if (lifecycle.status !== "READY") { runSignal.dispose(); return lifecycle; }
     const prompt = typeof task === "string" ? task : task.prompt || task.goal;
-    if (!prompt || typeof prompt !== "string") return { status: "FAILED", code: FREETOKEN_FAILURES.SERVER_FAILURE, reason: "prompt required" };
-    const bounded = prompt.slice(0, 12000); const timer = abortableSignal(context.signal, config.requestTimeoutMs);
+    if (!prompt || typeof prompt !== "string") { runSignal.dispose(); return { status: "FAILED", code: FREETOKEN_FAILURES.SERVER_FAILURE, reason: "prompt required" }; }
+    const bounded = prompt.slice(0, 12000);
     try {
       context.onLifecycle?.("inference_start");
       const harnessTask = typeof task === "string"
         ? { goal: bounded, repo: "(provider)", worktree: "(provider)", allowed_paths: [], max_tool_calls: 8, timeout: config.requestTimeoutMs, output_limit: 12000 }
         : { repo: "(provider)", worktree: "(provider)", allowed_paths: [], max_tool_calls: 8, timeout: config.requestTimeoutMs, output_limit: 12000, ...task, goal: task.goal || task.prompt || bounded, allowed_paths: Array.isArray(task.allowed_paths) ? task.allowed_paths : [] };
       const harness = await runMinimalHarness(harnessTask, {
-        signal: timer.signal,
+        signal: runSignal.signal,
         runTest: context.runTest,
         maxToolCalls: task && typeof task === "object" ? task.max_tool_calls : 8,
-        timeoutMs: task && typeof task === "object" ? task.timeout : config.requestTimeoutMs,
+        timeoutMs: Math.max(1, runDeadline - Date.now()),
         outputLimit: task && typeof task === "object" ? task.output_limit : 12000,
         logger: (event) => log(redactFreeTokenLog({ event: "freetoken_harness", ...event })),
         infer: async ({ messages, tools, tool_choice, max_tokens, signal }) => {
@@ -418,14 +445,14 @@ export function createFreeTokenInferenceAdapter(options = {}) {
           // weights. Retry only that transient 503 window; persistent model
           // load failures still surface after a bounded number of attempts.
           let lastError = null;
-          const retryDeadline = Date.now() + Math.max(1000, Math.min(config.requestTimeoutMs - 1000, 60000));
+          const retryDeadline = Math.min(runDeadline, Date.now() + Math.max(1000, Math.min(config.inferenceRequestTimeoutMs - 1000, 60000)));
           for (let attempt = 0; attempt < 60 && Date.now() < retryDeadline; attempt += 1) {
             try {
               const response = await boundedRequest(request, `${config.serveUrl}/v1/chat/completions`, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ model: config.model, messages, tools, tool_choice, max_tokens: max_tokens ?? task?.max_tokens ?? 1024 }),
-              }, { signal, timeoutMs: config.requestTimeoutMs });
+              }, { signal, timeoutMs: Math.max(1, Math.min(config.inferenceRequestTimeoutMs, runDeadline - Date.now())), timeoutCode: FREETOKEN_FAILURES.INFERENCE_TIMEOUT });
               if (!response || !response.body || typeof response.body !== "object" || Array.isArray(response.body)) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is malformed");
               let encoded; try { encoded = JSON.stringify(response.body); } catch { throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is not serializable"); }
               if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
@@ -441,20 +468,20 @@ export function createFreeTokenInferenceAdapter(options = {}) {
           throw lastError || failure(FREETOKEN_FAILURES.SERVER_FAILURE, "FreeToken inference failed");
         },
       });
-      const mappedCode = harness.code === "CANCELLED" ? FREETOKEN_FAILURES.CANCELLED : harness.code === "HARNESS_TIMEOUT" ? FREETOKEN_FAILURES.TIMEOUT : harness.code === "MALFORMED_RESULT" ? FREETOKEN_FAILURES.MALFORMED_RESULT : harness.status === "BLOCKED" ? FREETOKEN_FAILURES.SERVER_FAILURE : null;
+      const mappedCode = harness.code === "CANCELLED" ? FREETOKEN_FAILURES.CANCELLED : harness.code === "HARNESS_TIMEOUT" ? FREETOKEN_FAILURES.TASK_DEADLINE : harness.code === "MALFORMED_RESULT" ? FREETOKEN_FAILURES.MALFORMED_RESULT : harness.status === "BLOCKED" ? FREETOKEN_FAILURES.SERVER_FAILURE : null;
       const result = { status: harness.status, code: mappedCode || harness.code || undefined, reason: harness.reason, response: harness.response, summary: harness.summary, tool_calls: harness.tool_calls, observations: harness.observations, metrics: { wall_time_ms: Date.now() - started, prompt_chars: bounded.length, ...(harness.metrics || {}) } };
       context.onLifecycle?.("inference_end");
-      log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, model: config.model, wall_time_ms: result.metrics.wall_time_ms, prompt_chars: bounded.length }));
+       log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, model: logicalModelId(config.model, "unconfigured"), wall_time_ms: result.metrics.wall_time_ms, prompt_chars: bounded.length }));
       return result;
     } catch (error) {
-      const code = context.signal?.aborted ? FREETOKEN_FAILURES.CANCELLED : classifyFreeTokenFailure(error);
+      const code = runSignal.signal.aborted ? classifyAbortReason(runSignal.signal.reason) : context.signal?.aborted ? FREETOKEN_FAILURES.CANCELLED : classifyFreeTokenFailure(error);
       const result = { status: code === FREETOKEN_FAILURES.CANCELLED ? "CANCELLED" : "FAILED", code, reason: String(error.message || error), metrics: { wall_time_ms: Date.now() - started } };
-      log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, code, model: config.model, wall_time_ms: result.metrics.wall_time_ms }));
+      log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, code, model: logicalModelId(config.model, "unconfigured"), wall_time_ms: result.metrics.wall_time_ms }));
       return result;
     } finally {
       context.onLifecycle?.("inference_end");
       context.onLifecycle?.("cleanup_start");
-      timer.dispose();
+      runSignal.dispose();
       if (config.idleStopMs === 0) await stop(); else setTimeout(() => { void stop(); }, config.idleStopMs).unref?.();
       context.onLifecycle?.("cleanup_end");
     }

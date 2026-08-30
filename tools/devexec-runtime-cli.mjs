@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
-import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog } from "./local-worker-runtime.mjs";
+import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog, sanitizeRuntimeProviderIdentity } from "./local-worker-runtime.mjs";
 import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
@@ -23,11 +23,11 @@ function safeText(value, max = 1000) {
 }
 
 function identityFor(selection, model = null) {
-  return {
+  return sanitizeRuntimeProviderIdentity({
     runtime: selection?.runtime || "default",
     provider: selection?.provider || "existing",
     ...(model ? { model: safeText(model, 256) } : {}),
-  };
+  });
 }
 
 function blockedResult(taskId, blocker, identity = { runtime: "default", provider: "existing" }) {
@@ -53,11 +53,23 @@ function publicResult(result) {
   const safeIdentity = {};
   for (const key of ["runtime", "provider", "model", "device_index"]) {
     const value = result?.runtime_provider_identity?.[key];
-    if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = typeof value === "string" ? safeText(value, 256) : value;
+    if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = key === "model" ? sanitizeRuntimeProviderIdentity({ model: value }).model : typeof value === "string" ? safeText(value, 256) : value;
   }
   const ledger = result?.ledger && typeof result.ledger === "object" ? result.ledger : { status: "NOT_ATTEMPTED", code: null, path: null };
   const ledgerStatus = ["WRITTEN", "FAILED", "NOT_ATTEMPTED"].includes(ledger.status) ? ledger.status : "FAILED";
   const ledgerPath = typeof ledger.path === "string" && !/[\\/]/.test(ledger.path) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(ledger.path) ? ledger.path : null;
+  const safeResources = {};
+  for (const name of ["ram_mb", "vram_mb", "gpu_utilization_pct"]) {
+    const value = result?.resources?.[name];
+    if (!value || typeof value !== "object") continue;
+    safeResources[name] = {
+      before: Number.isFinite(value.before) ? value.before : null,
+      peak: Number.isFinite(value.peak) ? value.peak : null,
+      after: Number.isFinite(value.after) ? value.after : null,
+      availability: ["AVAILABLE", "NOT_COLLECTED"].includes(value.availability) ? value.availability : "NOT_COLLECTED",
+      available: value.available === true ? true : null,
+    };
+  }
   return redactStructuredLog({
     version: RESULT_CONTRACT_VERSION,
     run_id: String(result?.run_id || "unknown").slice(0, 200),
@@ -68,6 +80,7 @@ function publicResult(result) {
     blocker: safeText(result?.blocker || "none", 4000),
     diff_availability: { available: result?.diff_availability?.available === true, files: Array.isArray(result?.diff_availability?.files) ? result.diff_availability.files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [] },
     runtime_metrics: redactStructuredLog(result?.runtime_metrics || {}, { maxString: 256 }),
+    resources: safeResources,
     safety_metrics: redactStructuredLog(result?.safety_metrics || {}, { maxString: 256 }),
     runtime_provider_identity: safeIdentity,
     ledger: { status: ledgerStatus, code: typeof ledger.code === "string" ? safeText(ledger.code, 128) : null, path: ledgerPath },
