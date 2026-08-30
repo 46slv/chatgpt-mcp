@@ -37,6 +37,46 @@ test("health reports disabled and control/serve readiness", async () => {
   assert.equal(h.status, "READY"); assert.equal(f.calls.length, 2);
 });
 
+test("health request listeners and timers are cleaned up after bounded success", async () => {
+  const listeners = new Set(); let added = 0; let removed = 0;
+  const signal = {
+    aborted: false,
+    addEventListener(type, listener) { if (type === "abort") { listeners.add(listener); added += 1; } },
+    removeEventListener(type, listener) { if (type === "abort") { listeners.delete(listener); removed += 1; } },
+  };
+  const f = fakeRequest([{ body: { status: "ok", engineRunning: true } }, { body: { data: [{ id: "m" }] } }]);
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", requestTimeoutMs: 1000 }, request: f.request });
+  const result = await adapter.health(signal);
+  assert.equal(result.status, "READY");
+  assert.equal(added, 2); assert.equal(removed, 2); assert.equal(listeners.size, 0);
+});
+
+test("aborted never-resolving health settles promptly and never issues engine start", async () => {
+  const calls = [];
+  const request = async (url, options) => { calls.push({ url, options }); return new Promise(() => {}); };
+  const controller = new AbortController();
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", requestTimeoutMs: 1000 }, request, gpuProbe: () => ({ status: "CLEAR" }) });
+  const started = Date.now();
+  const pending = adapter.start({ signal: controller.signal });
+  setTimeout(() => controller.abort(new Error("caller cancelled")), 25);
+  const result = await pending;
+  assert.ok(Date.now() - started < 1000, `abort took ${Date.now() - started}ms`);
+  assert.equal(result.status, "BLOCKED"); assert.equal(result.code, FREETOKEN_FAILURES.CANCELLED);
+  assert.equal(calls.some((call) => call.url.endsWith("/engine/start")), false);
+});
+
+test("timed-out never-resolving health is bounded and never issues engine start", async () => {
+  const calls = [];
+  const request = async (url, options) => { calls.push({ url, options }); return new Promise(() => {}); };
+  const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m", requestTimeoutMs: 1000 }, request, gpuProbe: () => ({ status: "CLEAR" }) });
+  const started = Date.now();
+  const result = await adapter.start();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `timeout took ${elapsed}ms`);
+  assert.equal(result.status, "BLOCKED"); assert.equal(result.code, FREETOKEN_FAILURES.TIMEOUT);
+  assert.equal(calls.some((call) => call.url.endsWith("/engine/start")), false);
+});
+
 test("health truth table keeps control failures authoritative over serve readiness", async () => {
   const config = { enabled: true, model: "m", modelPath: "m" };
   const cases = [

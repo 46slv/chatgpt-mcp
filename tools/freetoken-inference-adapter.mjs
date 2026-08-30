@@ -62,8 +62,8 @@ export function classifyFreeTokenFailure(error) {
   if (!error) return null;
   if (error.code && Object.values(FREETOKEN_FAILURES).includes(error.code)) return error.code;
   const text = String(error.message || error).toLowerCase();
-  if (text.includes("cancel")) return FREETOKEN_FAILURES.CANCELLED;
-  if (text.includes("timeout") || text.includes("timed out") || text.includes("aborted")) return FREETOKEN_FAILURES.TIMEOUT;
+  if (error.name === "AbortError" || text.includes("cancel") || text.includes("aborted")) return FREETOKEN_FAILURES.CANCELLED;
+  if (text.includes("timeout") || text.includes("timed out")) return FREETOKEN_FAILURES.TIMEOUT;
   if (text.includes("malformed") || text.includes("invalid response")) return FREETOKEN_FAILURES.MALFORMED_RESULT;
   if (text.includes("oversized") || text.includes("too large") || text.includes("response limit")) return FREETOKEN_FAILURES.RESULT_TOO_LARGE;
   if (text.includes("out of memory") || text.includes("cuda out of memory") || /\boom\b/.test(text)) return FREETOKEN_FAILURES.GPU_OOM;
@@ -148,6 +148,12 @@ export function buildFreeTokenStartPlan(input = {}) {
 
 function failure(code, message, details = {}) { const error = new Error(message); error.code = code; Object.assign(error, details); return error; }
 
+function classifyAbortReason(reason) {
+  if (reason?.code === FREETOKEN_FAILURES.TIMEOUT) return FREETOKEN_FAILURES.TIMEOUT;
+  const text = String(reason?.message || reason || "").toLowerCase();
+  return text.includes("timeout") || text.includes("timed out") ? FREETOKEN_FAILURES.TIMEOUT : FREETOKEN_FAILURES.CANCELLED;
+}
+
 async function defaultRequest(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -163,11 +169,68 @@ async function defaultRequest(url, options = {}) {
   return { status: response.status, body };
 }
 
+// The provider request is an extension point and may ignore AbortSignal (for
+// example, a native bridge or a test double). Keep cancellation bounded at the
+// parent boundary regardless of cooperative transport behavior. The late
+// request promise always gets a rejection handler so a post-timeout failure
+// cannot become an unhandled rejection.
+function boundedRequest(request, url, options = {}, { signal = null, timeoutMs = 60000 } = {}) {
+  const boundedTimeout = Math.max(1, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 60000);
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const code = classifyAbortReason(signal.reason);
+      reject(failure(code, code === FREETOKEN_FAILURES.TIMEOUT ? "FreeToken request timeout before dispatch" : "FreeToken request cancelled before dispatch"));
+      return;
+    }
+    const controller = new AbortController();
+    let timer = null;
+    let onAbort = null;
+    let settled = false;
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      onAbort = null;
+    };
+    const settle = (settler, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      settler(value);
+    };
+    onAbort = () => {
+      try { controller.abort(signal.reason); } catch { /* already aborted */ }
+      const code = classifyAbortReason(signal.reason);
+      settle(reject, failure(code, code === FREETOKEN_FAILURES.TIMEOUT ? "FreeToken request timeout" : "FreeToken request cancelled"));
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      try { controller.abort(new Error("request timeout")); } catch { /* already aborted */ }
+      settle(reject, failure(FREETOKEN_FAILURES.TIMEOUT, "FreeToken request timeout"));
+    }, boundedTimeout);
+    let pending;
+    try {
+      pending = Promise.resolve(request(url, { ...options, signal: controller.signal }));
+    } catch (error) {
+      settle(reject, error);
+      return;
+    }
+    pending.then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+  });
+}
+
 function abortableSignal(signal, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("request timeout")), timeoutMs);
-  if (signal) { if (signal.aborted) controller.abort(signal.reason); else signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true }); }
-  return { signal: controller.signal, dispose: () => clearTimeout(timer) };
+  let onAbort = null;
+  if (signal) {
+    onAbort = () => controller.abort(signal.reason);
+    if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  return { signal: controller.signal, dispose: () => { clearTimeout(timer); if (signal && onAbort) signal.removeEventListener("abort", onAbort); onAbort = null; } };
 }
 
 export function defaultGpuConflictProbe(deviceIndex = 0) {
@@ -210,12 +273,27 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   let stopping = null;
 
   const identity = Object.freeze({ runtime: "local", provider: "freetoken", model: config.model || "unconfigured", device_index: config.deviceIndex, control_url: config.controlUrl, serve_url: config.serveUrl });
-  async function get(path, base = config.controlUrl) { return request(`${base}${path}`, { method: "GET" }); }
-  async function health() {
+  async function get(path, base = config.controlUrl, signal = null, timeoutMs = config.requestTimeoutMs) {
+    return boundedRequest(request, `${base}${path}`, { method: "GET" }, { signal, timeoutMs });
+  }
+  async function health(signal = null) {
     if (!config.enabled) return { status: "DISABLED", code: FREETOKEN_FAILURES.DISABLED, control: null, serve: null };
     let control = null; let serve = null; let controlError = null; let serveError = null;
-    try { control = (await get("/health")).body; } catch (error) { controlError = error; }
-    try { serve = (await get("/v1/models", config.serveUrl)).body; } catch (error) { serveError = error; }
+    const observed = await Promise.all([
+      get("/health", config.controlUrl, signal).then((result) => ({ body: result.body }), (error) => ({ error })),
+      get("/v1/models", config.serveUrl, signal).then((result) => ({ body: result.body }), (error) => ({ error })),
+    ]);
+    control = observed[0].body ?? null; controlError = observed[0].error || null;
+    serve = observed[1].body ?? null; serveError = observed[1].error || null;
+
+    const boundedFailure = (error) => [FREETOKEN_FAILURES.CANCELLED, FREETOKEN_FAILURES.TIMEOUT].includes(error?.code) ? error.code : null;
+    const controlBoundedCode = boundedFailure(controlError);
+    const serveBoundedCode = boundedFailure(serveError);
+    if (controlBoundedCode || serveBoundedCode) {
+      const code = controlBoundedCode || serveBoundedCode;
+      const status = code === FREETOKEN_FAILURES.CANCELLED ? "CANCELLED" : "TIMEOUT";
+      return { status, ownership: "UNKNOWN", owned: false, code, reason: code === FREETOKEN_FAILURES.CANCELLED ? "control_or_serve_cancelled" : "control_or_serve_timeout", control, serve, control_readiness: { status, reason: "bounded_request" }, serve_readiness: classifyFreeTokenReadiness(serve, config), control_error: controlError ? String(controlError.message || controlError) : null, serve_error: serveError ? String(serveError.message || serveError) : null };
+    }
 
     const serveReadiness = classifyFreeTokenReadiness(serve, config);
     const serveReady = serveReadiness.status === "READY";
@@ -250,11 +328,15 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     while (Date.now() - started <= config.readyTimeoutMs) {
       if (signal?.aborted) throw failure(FREETOKEN_FAILURES.CANCELLED, "FreeToken readiness cancelled");
       try {
-        const result = await get("/v1/models", config.serveUrl);
+        const remaining = Math.max(1, config.readyTimeoutMs - (Date.now() - started));
+        const result = await get("/v1/models", config.serveUrl, signal, Math.min(config.requestTimeoutMs, remaining));
         const readiness = classifyFreeTokenReadiness(result.body, config);
         if (readiness.status === "READY") return result.body;
         if (readiness.status === "MALFORMED") last = failure(FREETOKEN_FAILURES.MALFORMED_RESULT, readiness.reason);
-      } catch (error) { last = error; }
+      } catch (error) {
+        last = error;
+        if (error?.code === FREETOKEN_FAILURES.CANCELLED && signal?.aborted) throw error;
+      }
       await sleep(100);
     }
     if (last?.code === FREETOKEN_FAILURES.MALFORMED_RESULT) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken readiness payload malformed", { cause: last?.message });
@@ -267,9 +349,10 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     onLifecycle?.("gpu_gate_end");
     if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
     onLifecycle?.("start_start");
-    const current = await health();
+    if (signal?.aborted) return { status: "BLOCKED", code: FREETOKEN_FAILURES.CANCELLED, reason: "start cancelled before health" };
+    const current = await health(signal);
     if (current.status === "READY") { onLifecycle?.("start_end"); onLifecycle?.("ready_start"); onLifecycle?.("ready_end"); return { status: "READY", owned: false, health: current }; }
-    if (["FAILED", "MALFORMED", "STOPPING"].includes(current.status)) {
+    if (["FAILED", "MALFORMED", "STOPPING", "CANCELLED", "TIMEOUT"].includes(current.status)) {
       return { status: "BLOCKED", code: current.code || FREETOKEN_FAILURES.SERVER_FAILURE, reason: `control health ${String(current.status).toLowerCase()}`, health: current };
     }
     // Only clean up a process previously spawned by this adapter. A stale
@@ -284,7 +367,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
         const spawnedProcess = ownedProcess;
         ownedProcess.once?.("exit", () => { if (ownedProcess === spawnedProcess) ownedProcess = null; });
       } else {
-        await request(`${config.controlUrl}/engine/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: config.modelPath, port: 1919, args: [] }), signal });
+        await boundedRequest(request, `${config.controlUrl}/engine/start`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: config.modelPath, port: 1919, args: [] }) }, { signal, timeoutMs: config.requestTimeoutMs });
         startedByAdapter = true;
         startedViaControl = true;
       }
@@ -303,7 +386,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     if (stopping) return stopping;
     stopping = (async () => {
       if (ownedProcess) { killOwnedProcessTree(ownedProcess, options); ownedProcess = null; }
-      if (startedViaControl) { try { await request(`${config.controlUrl}/engine/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ force: false }) }); } catch { /* cleanup is best effort */ } }
+      if (startedViaControl) { try { await boundedRequest(request, `${config.controlUrl}/engine/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ force: false }) }, { timeoutMs: config.requestTimeoutMs }); } catch { /* cleanup is best effort */ } }
       startedByAdapter = false;
       startedViaControl = false;
       stopping = null;
@@ -338,12 +421,11 @@ export function createFreeTokenInferenceAdapter(options = {}) {
           const retryDeadline = Date.now() + Math.max(1000, Math.min(config.requestTimeoutMs - 1000, 60000));
           for (let attempt = 0; attempt < 60 && Date.now() < retryDeadline; attempt += 1) {
             try {
-              const response = await request(`${config.serveUrl}/v1/chat/completions`, {
+              const response = await boundedRequest(request, `${config.serveUrl}/v1/chat/completions`, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ model: config.model, messages, tools, tool_choice, max_tokens: max_tokens ?? task?.max_tokens ?? 1024 }),
-                signal,
-              });
+              }, { signal, timeoutMs: config.requestTimeoutMs });
               if (!response || !response.body || typeof response.body !== "object" || Array.isArray(response.body)) throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is malformed");
               let encoded; try { encoded = JSON.stringify(response.body); } catch { throw failure(FREETOKEN_FAILURES.MALFORMED_RESULT, "FreeToken response body is not serializable"); }
               if (encoded.length > 65536) throw failure(FREETOKEN_FAILURES.RESULT_TOO_LARGE, "FreeToken response exceeds evidence limit");
