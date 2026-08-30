@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createLocalRunRecord, validateLocalRunRecord, writeLocalRunRecordAtomic, attributeGitEvidence } from "./local-run-ledger.mjs";
-import { createTaskContract, runLocalWorkerTask } from "./local-worker-runtime.mjs";
+import { createTaskContract, runLocalWorkerTask, captureGitEvidence } from "./local-worker-runtime.mjs";
+import { runMinimalHarness } from "./minimal-harness-inference.mjs";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 function fixture() {
@@ -26,4 +27,54 @@ test("attribution changes only on status or fingerprint mutation", () => { const
 test("ledger validation is recursively exact and fail-closed", () => { const record = createLocalRunRecord({ run_id: "safe-run", contract_fingerprint: SHA, base_commit: SHA }); validateLocalRunRecord(record); for (const mutate of [(r) => { r.harness.provider_usage.extra = 1; }, (r) => { r.selection.provider = "https://bad"; }, (r) => { r.base_commit = SHA.toUpperCase(); }, (r) => { r.outcome.tests = []; }]) { const copy = structuredClone(record); mutate(copy); assert.throws(() => validateLocalRunRecord(copy)); } });
 test("model path is reduced to a safe basename and query is removed", () => { const record = createLocalRunRecord({ run_id: "safe-run", selection: { runtime: "local", provider: "freetoken", harness: "minimal-harness", model: "C:\\models\\qwen.gguf?token=secret#x" }, contract_fingerprint: SHA, base_commit: SHA }); assert.equal(record.selection.model, "qwen.gguf"); assert.doesNotMatch(record.selection.model, /https?:|token=|[\\/]/i); });
 test("atomic writer is no-overwrite under same-run concurrency", async () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-ledger-concurrency-")); const record = createLocalRunRecord({ run_id: "same-run", contract_fingerprint: SHA, base_commit: SHA }); const outcomes = await Promise.all(Array.from({ length: 20 }, () => Promise.resolve().then(() => { try { return writeLocalRunRecordAtomic(dir, record), "ok"; } catch { return "failed"; } }))); assert.equal(outcomes.filter((x) => x === "ok").length, 1); assert.deepEqual(fs.readdirSync(dir), ["same-run.json"]); });
+test("atomic writer removes its owned temp on write/link/unlink failures", () => {
+  const cases = [
+    { name: "write", mutate: (base) => ({ ...base, writeFileSync(file, ...args) { if (String(file).includes(".tmp-")) throw new Error("simulated write"); return fs.writeFileSync(file, ...args); } }) },
+    { name: "link", mutate: (base) => ({ ...base, linkSync() { throw new Error("simulated link"); } }) },
+    { name: "unlink", mutate: (base) => { let first = true; return { ...base, unlinkSync(file) { if (String(file).includes(".tmp-") && first) { first = false; throw new Error("simulated unlink"); } return fs.unlinkSync(file); } }; } },
+  ];
+  for (const item of cases) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `devexec-ledger-${item.name}-`));
+    const record = createLocalRunRecord({ run_id: `failure-${item.name}`, contract_fingerprint: SHA, base_commit: SHA });
+    assert.throws(() => writeLocalRunRecordAtomic(dir, record, { fsImpl: item.mutate(fs) }), /simulated/);
+    assert.equal(fs.readdirSync(dir).some((name) => name.includes(".tmp-")), false, `${item.name} failure left a temp file`);
+  }
+});
+
+test("canonical path and availability aliases fail closed", () => {
+  for (const value of ["a//b.txt", "a\\\\b.txt", "a/./b.txt", "a/%2e/b.txt", "a/\u0001b.txt"]) {
+    assert.throws(() => createTaskContract({ task_id: "bad-path", repo: ".", base_commit: SHA, goal: "x", allowed_paths: [value], test_command: [process.execPath, "-e", "0"], timeout: 1000, max_tool_calls: 1, output_limit: 256 }));
+  }
+  const record = createLocalRunRecord({ run_id: "availability-alias", contract_fingerprint: SHA, base_commit: SHA, resources: { ram_mb: { availability: "AVAILABLE" }, vram_mb: { availability: "NOT_COLLECTED" } } });
+  assert.equal(record.resources.ram_mb.available, true);
+  assert.equal(record.resources.vram_mb.available, null);
+  assert.throws(() => createLocalRunRecord({ run_id: "availability-invalid", contract_fingerprint: SHA, base_commit: SHA, resources: { ram_mb: { availability: "legacy" }, vram_mb: {} } }));
+});
+
+test("hard-linked worktree files are rejected before harness read/write and attribution", async (t) => {
+  const f = fixture();
+  const external = path.join(os.tmpdir(), `devexec-external-${process.pid}-${Date.now()}.txt`);
+  const inside = path.join(f.root, "src", "value.txt");
+  fs.mkdirSync(path.dirname(inside), { recursive: true });
+  fs.writeFileSync(external, "external-secret\n");
+  try { fs.linkSync(external, inside); } catch (error) { t.skip(`hard links unavailable: ${error.code || error.message}`); return; }
+  try {
+    assert.equal(fs.lstatSync(inside).nlink > 1, true);
+    const read = await runMinimalHarness({ ...f.task, allowed_paths: ["src/value.txt"] }, { infer: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "read", arguments: JSON.stringify({ path: "src/value.txt" }) } }] } }] }), maxToolCalls: 1 });
+    assert.notEqual(read.status, "PASS");
+    assert.doesNotMatch(JSON.stringify(read), /external-secret/);
+    const patch = await runMinimalHarness({ ...f.task, allowed_paths: ["src/value.txt"] }, { infer: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "apply_patch", arguments: JSON.stringify({ path: "src/value.txt", content: "worker-must-not-write\\n" }) } }] } }] }), maxToolCalls: 1 });
+    assert.notEqual(patch.status, "PASS");
+    const beforeEvidence = captureGitEvidence(f.root);
+    assert.equal(beforeEvidence.invalid_paths, true);
+    assert.deepEqual(beforeEvidence.hard_link_paths, ["src/value.txt"]);
+    const outcome = await runLocalWorkerTask({ ...f.task, allowed_paths: ["src/value.txt"] }, { adapter: passAdapter(async () => { fs.writeFileSync(inside, "mutated\n"); }) });
+    assert.equal(outcome.result.status, "BLOCKED");
+    assert.match(outcome.result.blocker, /hard-linked|PATH_HARDLINK|preflight/i);
+    assert.equal(fs.readFileSync(external, "utf8"), "external-secret\n");
+  } finally {
+    try { fs.unlinkSync(inside); } catch {}
+    try { fs.unlinkSync(external); } catch {}
+  }
+});
 test("parent wall metric is not overwritten by adapter metrics and first_tool is retained", async () => { const f = fixture(); const result = await runLocalWorkerTask(f.task, { adapter: passAdapter(async (task) => fs.writeFileSync(path.join(task.worktree, "allowed.txt"), "ok\n")), runLedgerDir: f.root }); assert.notEqual(result.result.runtime_metrics.wall_time_ms, 999999); const ledger = JSON.parse(fs.readFileSync(path.join(f.root, `${result.run_id}.json`), "utf8")); assert.notEqual(ledger.harness.parent_measured.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.wall_time_ms, 999999); assert.equal(ledger.harness.harness_reported.first_tool, "https___bad.example__token_x"); });

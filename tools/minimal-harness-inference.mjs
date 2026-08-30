@@ -31,16 +31,23 @@ function bounded(value, max, fallback = "") {
 
 function safeRelative(root, value, { allowOutside = false } = {}) {
   if (typeof value !== "string" || !value.trim()) throw new Error("path is required");
-  const normalized = value.replaceAll("\\", "/");
-  if (path.isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//")) throw new Error("path must be repository-relative");
-  const parts = normalized.split("/").filter(Boolean);
-  if (!parts.length || parts.includes("..") || parts.includes(".")) throw new Error("path escapes repository");
-  const relative = parts.join("/");
+  if (path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("//")) throw new Error("path must be repository-relative");
+  if (value.includes("\\") || value.includes("//") || /[%:?\#\x00-\x1f\x7f]/.test(value)) throw new Error("path must use a canonical repository-relative path");
+  const parts = value.split("/");
+  if (!parts.length || parts.some((part) => !part || part === ".." || part === ".") || parts.join("/") !== value) throw new Error("path escapes repository");
+  const relative = value;
   if (DENIED_FILE.test(relative)) throw new Error("sensitive path is not available");
   const candidate = path.resolve(root, relative);
   const rel = path.relative(root, candidate);
   if (!allowOutside && (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))) throw new Error("path escapes repository");
   return { relative, candidate };
+}
+
+function assertNoHardLink(file) {
+  if (!fs.existsSync(file)) return;
+  const stat = fs.lstatSync(file);
+  // Directories routinely report nlink > 1 and are not aliases of file data.
+  if (stat.isFile() && Number.isInteger(stat.nlink) && stat.nlink > 1) throw new Error("hard-linked file is not allowed");
 }
 
 function assertNoReparse(root, relative) {
@@ -50,6 +57,7 @@ function assertNoReparse(root, relative) {
     if (!fs.existsSync(current)) break;
     const stat = fs.lstatSync(current);
     if (stat.isSymbolicLink()) throw new Error("symlink/reparse path is not allowed");
+    if (stat.isFile() && Number.isInteger(stat.nlink) && stat.nlink > 1) throw new Error("hard-linked file is not allowed");
   }
 }
 
@@ -89,11 +97,16 @@ function applyExactReplacement(original, old, replacement) {
 
 function atomicWrite(file, content, root, relative) {
   assertNoReparse(root, relative);
+  assertNoHardLink(file);
   const temporary = `${file}.devexec-tmp-${process.pid}-${Date.now()}`;
   try {
     fs.writeFileSync(temporary, content, "utf8");
     assertNoReparse(root, relative);
+    // Recheck immediately before replacement; the parent repeats this check
+    // during postflight to cover a concurrent link swap.
+    assertNoHardLink(file);
     fs.renameSync(temporary, file);
+    assertNoHardLink(file);
   } catch (error) {
     try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch { /* best effort */ }
     throw error;
@@ -144,6 +157,7 @@ function listFiles(root, start, out, depth = 0) {
     const full = path.join(start, entry.name);
     if (entry.isDirectory()) listFiles(root, full, out, depth + 1);
     else if (entry.isFile()) {
+      try { assertNoHardLink(full); } catch { continue; }
       const relative = path.relative(root, full).replaceAll("\\", "/");
       if (!DENIED_FILE.test(relative)) out.push({ full, relative });
     }
@@ -166,7 +180,7 @@ async function executeTool(name, rawArgs, task, context) {
     const base = args.path ? safeRelative(root, args.path).candidate : root;
     if (args.path) assertNoReparse(root, safeRelative(root, args.path).relative);
     const files = [];
-    if (fs.existsSync(base) && fs.statSync(base).isFile()) files.push({ full: base, relative: path.relative(root, base).replaceAll("\\", "/") });
+    if (fs.existsSync(base) && fs.statSync(base).isFile()) { assertNoHardLink(base); files.push({ full: base, relative: path.relative(root, base).replaceAll("\\", "/") }); }
     else listFiles(root, base, files);
     const maxResults = Number.isInteger(args.max_results) ? Math.min(40, Math.max(1, args.max_results)) : 20;
     const hits = [];

@@ -49,10 +49,12 @@ function normalizeRelativePath(value, field = "path") {
   if (path.isAbsolute(value) || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\")) {
     fail(`${field} must be repository-relative`);
   }
-  const normalized = value.replaceAll("\\", "/");
-  const parts = normalized.split("/").filter(Boolean);
-  if (!parts.length || parts.includes("..") || parts.includes(".")) fail(`${field} escapes the worktree`);
-  return parts.join("/");
+  // Contract paths are canonical and must round-trip exactly. Reject slash
+  // ambiguity, repeated separators, dot segments, encoded bytes and controls.
+  if (value.includes("\\") || value.includes("//") || /[%:?\#\x00-\x1f\x7f]/.test(value)) fail(`${field} must use a canonical repository-relative path`);
+  const parts = value.split("/");
+  if (!parts.length || parts.some((part) => !part || part === "." || part === "..") || parts.join("/") !== value) fail(`${field} must use a canonical repository-relative path`);
+  return value;
 }
 
 function parseCommandString(value) {
@@ -182,6 +184,16 @@ function rejectReparseSegments(root, relative) {
   }
 }
 
+function rejectHardLinkFile(root, relative, { code = "PATH_HARDLINK_REJECTED" } = {}) {
+  const candidate = path.resolve(root, relative);
+  if (!fs.existsSync(candidate)) return;
+  let stat;
+  try { stat = fs.lstatSync(candidate); } catch { fail(`cannot inspect path: ${relative}`, "PATH_VALIDATION_FAILED"); }
+  // Directory link counts are routinely greater than one; only regular files
+  // are rejected as a hard-link alias to an external inode.
+  if (stat.isFile() && Number.isInteger(stat.nlink) && stat.nlink > 1) fail(`hard-linked file is not allowed: ${relative}`, code);
+}
+
 export function validateTaskBoundary(task) {
   const normalized = validateTaskContract(task, { verifyGit: false });
   if (!fs.existsSync(normalized.repo) || !fs.statSync(normalized.repo).isDirectory()) fail("repo does not exist", "REPO_NOT_FOUND");
@@ -198,6 +210,7 @@ export function validateTaskBoundary(task) {
     const candidate = path.resolve(normalized.worktree, relative);
     if (!inside(normalized.worktree, candidate)) fail(`allowed path escapes worktree: ${relative}`, "PATH_SCOPE_VIOLATION");
     rejectReparseSegments(normalized.worktree, relative);
+    rejectHardLinkFile(normalized.worktree, relative);
   }
   return { repo: normalized.repo, worktree: normalized.worktree, git_root: gitRoot, base_commit: baseCommit, head_commit: headCommit, base_matches_head: headCommit === baseCommit };
 }
@@ -206,22 +219,30 @@ function parseStatusPorcelain(raw) {
   const entries = []; const records = raw.split("\0");
   for (let i = 0; i < records.length; i += 1) {
     const record = records[i]; if (!record) continue;
-    const status = record.slice(0, 2); const payload = record.slice(3).replaceAll("\\", "/");
+    const status = record.slice(0, 2); const payload = record.slice(3);
     entries.push({ path: payload, status });
-    if ((status.includes("R") || status.includes("C")) && records[i + 1]) entries.push({ path: records[++i].replaceAll("\\", "/"), status });
+    if ((status.includes("R") || status.includes("C")) && records[i + 1]) entries.push({ path: records[++i], status });
   }
   return entries;
 }
-function safeGitRelative(value) { return typeof value === "string" && !!value && !value.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(value) && !value.split("/").includes("..") && !/[\x00-\x1f\x7f:?\#]/.test(value); }
+function safeGitRelative(value) {
+  if (typeof value !== "string" || !value || value.length > 1024 || value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) return false;
+  if (value.includes("\\") || value.includes("//") || value.includes("%") || /[\x00-\x1f\x7f:?\#]/.test(value)) return false;
+  const parts = value.split("/");
+  return parts.length > 0 && parts.every((part) => part && part !== "." && part !== "..") && parts.join("/") === value;
+}
 
 function fingerprintPath(root, relative, status) {
+  if (!safeGitRelative(relative)) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, unsafe_path: true };
   const maxBytes = 512 * 1024; const candidate = path.resolve(root, relative);
   try {
+    const linkStat = fs.existsSync(candidate) ? fs.lstatSync(candidate) : null;
+    if (linkStat?.isFile() && Number.isInteger(linkStat.nlink) && linkStat.nlink > 1) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, hard_link: true };
     const diff = execFileSync("git", ["-C", root, "diff", "HEAD", "--no-ext-diff", "--no-color", "--no-renames", "--", relative], { encoding: "utf8", windowsHide: true, timeout: 20000, maxBuffer: maxBytes });
     if (Buffer.byteLength(diff, "utf8") > maxBytes) return { status, diff: !!diff, fingerprint: null, fingerprint_bounded: false };
     if (diff) return { status, diff: true, fingerprint: sha256Digest(`${status}\0${diff}`), fingerprint_bounded: true };
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-      const stat = fs.statSync(candidate); if (stat.size > maxBytes) return { status, diff: false, fingerprint: null, fingerprint_bounded: false };
+      const stat = fs.lstatSync(candidate); if (stat.nlink > 1) return { status, diff: false, fingerprint: null, fingerprint_bounded: false, hard_link: true }; if (stat.size > maxBytes) return { status, diff: false, fingerprint: null, fingerprint_bounded: false };
       return { status, diff: false, fingerprint: sha256Digest(`${status}\0${fs.readFileSync(candidate)}`), fingerprint_bounded: true };
     }
     return { status, diff: false, fingerprint: sha256Digest(`${status}\0missing`), fingerprint_bounded: true };
@@ -235,7 +256,7 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
   const statusEntries = parseStatusPorcelain(statusRaw);
   const statusPaths = statusEntries.map((entry) => entry.path);
   const diffRaw = execFileSync("git", ["-C", root, "diff", "HEAD", "--name-only", "--no-renames"], { encoding: "utf8", windowsHide: true, timeout: 20000 });
-  const diffPaths = diffRaw.split(/\r?\n/).filter(Boolean).map((x) => x.replaceAll("\\", "/"));
+  const diffPaths = diffRaw.split(/\r?\n/).filter(Boolean);
   const allChangedPaths = [...new Set([...statusPaths, ...diffPaths])].sort();
   const bounded = Number.isInteger(maxPaths) && maxPaths > 0 ? maxPaths : MAX_EVIDENCE_PATHS;
   const pathsTruncated = allChangedPaths.length > bounded;
@@ -245,6 +266,7 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
   const invalidPaths = allChangedPaths.filter((relative) => !safeGitRelative(relative));
   const statusMap = new Map(statusEntries.map((entry) => [entry.path, entry.status]));
   const pathDetails = Object.fromEntries(changedPaths.map((relative) => [relative, fingerprintPath(root, relative, statusMap.get(relative) || "DIFF")]));
+  const hardLinkPaths = changedPaths.filter((relative) => pathDetails[relative]?.hard_link === true);
   return {
     head_commit: head,
     status_paths: statusPaths.slice(0, bounded),
@@ -254,7 +276,8 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
     paths_truncated: pathsTruncated,
     diff_available: allChangedPaths.length > 0,
     path_details: pathDetails,
-    invalid_paths: invalidPaths.length > 0,
+    invalid_paths: invalidPaths.length > 0 || hardLinkPaths.length > 0,
+    hard_link_paths: hardLinkPaths,
     status_counts: (() => {
       const counts = { modified: 0, added: 0, deleted: 0, untracked: 0 };
       for (const record of statusRaw.split("\0")) {
@@ -344,9 +367,9 @@ export function validateResultContract(result) {
   if (!isObject(result) || result.version !== RESULT_CONTRACT_VERSION) fail("result.version must be 1", "MALFORMED_RESULT");
   asString(result.task_id, "result.task_id", { max: 200 });
   if (!["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result.status)) fail("invalid result.status", "MALFORMED_RESULT");
-  if (!Array.isArray(result.changed_files) || result.changed_files.length > MAX_RESULT_CHANGED_FILES || result.changed_files.some((x) => typeof x !== "string" || x.length > 1024)) fail("invalid result.changed_files", "MALFORMED_RESULT");
+  if (!Array.isArray(result.changed_files) || result.changed_files.length > MAX_RESULT_CHANGED_FILES || result.changed_files.some((x) => { try { normalizeRelativePath(x, "result.changed_files entry"); return false; } catch { return true; } })) fail("invalid result.changed_files", "MALFORMED_RESULT");
   if (!isObject(result.tests) || !isObject(result.diff_availability) || !isObject(result.runtime_metrics) || !isObject(result.safety_metrics) || !isObject(result.runtime_provider_identity)) fail("result evidence objects are required", "MALFORMED_RESULT");
-  if (result.diff_availability.files !== undefined && (!Array.isArray(result.diff_availability.files) || result.diff_availability.files.length > MAX_RESULT_CHANGED_FILES || result.diff_availability.files.some((x) => typeof x !== "string" || x.length > 1024))) fail("invalid result.diff_availability.files", "MALFORMED_RESULT");
+  if (result.diff_availability.files !== undefined && (!Array.isArray(result.diff_availability.files) || result.diff_availability.files.length > MAX_RESULT_CHANGED_FILES || result.diff_availability.files.some((x) => { try { normalizeRelativePath(x, "result.diff_availability.files entry"); return false; } catch { return true; } }))) fail("invalid result.diff_availability.files", "MALFORMED_RESULT");
   for (const field of ["stdout", "stderr", "blocker"]) if (result.tests[field] !== undefined && (typeof result.tests[field] !== "string" || result.tests[field].length > 262144)) fail(`invalid result.tests.${field}`, "MALFORMED_RESULT");
   if (typeof result.blocker !== "string" || result.blocker.length > 4000) fail("invalid result.blocker", "MALFORMED_RESULT");
   return result;
@@ -426,8 +449,8 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
           provider_usage: { prompt_tokens: adapterMetrics.prompt_tokens, completion_tokens: adapterMetrics.completion_tokens, total_tokens: adapterMetrics.total_tokens },
         },
         resources: adapterResult?.resources || {
-          ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) },
-          vram_mb: { before: adapterMetrics.vram_before_mb, peak: adapterMetrics.vram_peak_mb, after: adapterMetrics.vram_after_mb, available: [adapterMetrics.vram_before_mb, adapterMetrics.vram_peak_mb, adapterMetrics.vram_after_mb].some((value) => Number.isFinite(value)) },
+          ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) ? true : null },
+          vram_mb: { before: adapterMetrics.vram_before_mb, peak: adapterMetrics.vram_peak_mb, after: adapterMetrics.vram_after_mb, available: [adapterMetrics.vram_before_mb, adapterMetrics.vram_peak_mb, adapterMetrics.vram_after_mb].some((value) => Number.isFinite(value)) ? true : null },
         },
         outcome: {
           status: result?.status,
@@ -489,11 +512,17 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     after = { head_commit: before.head_commit, status_paths: [], diff_paths: [], changed_paths: [], changed_path_count: 0, paths_truncated: false, invalid_paths: false, diff_available: false, path_details: {} };
   }
   lifecycle.mark("postflight_end");
-  const attributed = attributeGitEvidence(before, after);
+  const invalidPaths = !!(before.invalid_paths || after.invalid_paths);
+  // Do not let malformed path evidence enter the ledger/result serializer;
+  // captureGitEvidence has already recorded the fail-closed condition.
+  let attributed = { paths: [], diff_paths: [], details: {}, uncertain_paths: [] };
+  if (!invalidPaths) {
+    try { attributed = attributeGitEvidence(before, after); }
+    catch { attributed = { paths: [], diff_paths: [], details: {}, uncertain_paths: [] }; }
+  }
   const attributedPaths = attributed.paths;
   const unexpected = attributedPaths.filter((relative) => !pathAllowed(relative, task.allowed_paths));
   const attributionUncertain = attributed.uncertain_paths || [];
-  const invalidPaths = before.invalid_paths || after.invalid_paths;
   const evidenceTruncated = !!after.paths_truncated;
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;

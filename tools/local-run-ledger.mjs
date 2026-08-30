@@ -29,11 +29,33 @@ function safeLogical(value, fallback = "unknown", max = MAX_SELECTION_ID) { cons
 function safeModel(value) { let text = typeof value === "string" && value.trim() ? value.trim() : "unknown"; text = text.split(/[?#]/, 1)[0].replaceAll("\\", "/"); return safeLogical(path.posix.basename(text) || "unknown"); }
 function strictDigest(value) { return typeof value === "string" && HEX.test(value) ? value : null; }
 function enumValue(value, allowed, fallback = "UNKNOWN") { return typeof value === "string" && allowed.has(value) ? value : fallback; }
-function safePath(value) { if (typeof value !== "string") return null; const normalized = value.replaceAll("\\", "/"); if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").includes("..") || /[:?#\x00-\x1f\x7f]/.test(normalized)) return null; return normalized; }
-function observation(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath).filter(Boolean) : []; const count = finite(clean.count, { min: 0, max: MAX_PATHS, integer: true }); return { count: count ?? paths.length, digest: strictDigest(clean.digest) || (paths.length ? sha256Digest(paths) : sha256Digest([])) }; }
-function attribution(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath).filter(Boolean) : []; const details = {}; if (isObject(clean.details)) for (const name of paths) { const d = clean.details[name]; if (!isObject(d)) continue; const side = (v) => { if (!isObject(v)) return null; const raw = String(v.status || ""); const status = raw === "??" ? "UNTRACKED" : raw.includes("D") ? "DELETED" : raw.includes("A") ? "ADDED" : raw.includes("R") ? "RENAMED" : raw.includes("M") ? "MODIFIED" : "CHANGED"; return { status, fingerprint: strictDigest(v.fingerprint), fingerprint_bounded: v.fingerprint_bounded !== false }; }; details[name] = { before: side(d.before), after: side(d.after) }; } return { paths, details }; }
+// Ledger paths are already canonical repository-relative names.  Silently
+// normalizing separators or dropping empty/dot segments would make an
+// attribution record ambiguous, so malformed representations fail closed.
+function safePath(value) {
+  if (typeof value !== "string" || !value || value.length > 1024) throw new Error("invalid repository-relative path");
+  if (value.includes("\\") || value.includes("//") || /[%:?\#\x00-\x1f\x7f]/.test(value)) throw new Error("invalid repository-relative path");
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) throw new Error("invalid repository-relative path");
+  const parts = value.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("invalid repository-relative path");
+  if (parts.join("/") !== value) throw new Error("invalid repository-relative path");
+  return value;
+}
+function observation(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath) : []; const count = finite(clean.count, { min: 0, max: MAX_PATHS, integer: true }); return { count: count ?? paths.length, digest: strictDigest(clean.digest) || (paths.length ? sha256Digest(paths) : sha256Digest([])) }; }
+function attribution(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath) : []; const details = {}; if (isObject(clean.details)) for (const name of paths) { const d = clean.details[name]; if (!isObject(d)) continue; const side = (v) => { if (!isObject(v)) return null; const raw = String(v.status || ""); const status = raw === "??" ? "UNTRACKED" : raw.includes("D") ? "DELETED" : raw.includes("A") ? "ADDED" : raw.includes("R") ? "RENAMED" : raw.includes("M") ? "MODIFIED" : "CHANGED"; return { status, fingerprint: strictDigest(v.fingerprint), fingerprint_bounded: v.fingerprint_bounded !== false }; }; details[name] = { before: side(d.before), after: side(d.after) }; } return { paths, details }; }
 function lifecycle(input = {}) { const names = ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"]; const output = {}; for (const name of names) output[name] = finite(input?.[name], { min: 0, max: 3_600_000 }); return output; }
-function resource(input = {}) { const available = input?.available === true || input?.available === false ? input.available : null; return { before: finite(input?.before, { min: 0, max: 3_600_000 }), peak: finite(input?.peak, { min: 0, max: 3_600_000 }), after: finite(input?.after, { min: 0, max: 3_600_000 }), availability: available === true ? "AVAILABLE" : available === false ? "UNAVAILABLE" : enumValue(input?.availability, ENUMS.availability, "NOT_COLLECTED"), available }; }
+function resource(input = {}) {
+  const clean = isObject(input) ? input : {};
+  const hasAvailable = Object.prototype.hasOwnProperty.call(clean, "available");
+  const hasLegacyAvailability = Object.prototype.hasOwnProperty.call(clean, "availability");
+  if (hasAvailable && clean.available !== null && typeof clean.available !== "boolean") throw new Error("resource.available must be boolean or null");
+  if (hasLegacyAvailability && (typeof clean.availability !== "string" || !ENUMS.availability.has(clean.availability))) throw new Error("resource.availability must use the exact availability enum");
+  let availability = hasLegacyAvailability ? clean.availability : (clean.available === true ? "AVAILABLE" : clean.available === false ? "UNAVAILABLE" : "NOT_COLLECTED");
+  const implied = availability === "AVAILABLE" ? true : availability === "UNAVAILABLE" ? false : null;
+  if (hasAvailable && clean.available !== null && clean.available !== implied) throw new Error("resource availability fields disagree");
+  const available = hasAvailable ? clean.available : implied;
+  return { before: finite(clean.before, { min: 0, max: 3_600_000 }), peak: finite(clean.peak, { min: 0, max: 3_600_000 }), after: finite(clean.after, { min: 0, max: 3_600_000 }), availability, available };
+}
 const METRIC_NAMES = ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens"];
 function metricSet(input = {}) { const out = {}; for (const key of METRIC_NAMES) out[key] = finite(input?.[key], { min: 0, max: key === "tool_calls" ? 1000 : 3_600_000, integer: key === "tool_calls" || key.endsWith("tokens") }); out.first_tool = input?.first_tool == null ? null : safeLogical(input.first_tool, "unknown"); return out; }
 function normalizeRecord(input = {}) {
@@ -53,13 +75,90 @@ export function validateLocalRunRecord(record) {
   exact(record.selection, EXACT_KEYS.selection, "selection"); for (const key of Object.keys(record.selection)) if (typeof record.selection[key] !== "string" || !LOGICAL.test(record.selection[key])) throw new Error(`selection.${key} invalid`); for (const key of ["contract_fingerprint", "base_commit"]) if (record[key] !== null && !HEX.test(record[key])) throw new Error(`invalid ${key}`);
   exact(record.baseline, EXACT_KEYS.baseline, "baseline"); if (record.baseline.clean !== null && typeof record.baseline.clean !== "boolean") throw new Error("baseline.clean invalid"); for (const key of ["modified", "added", "deleted", "untracked"]) if (record.baseline[key] !== null && (!Number.isInteger(record.baseline[key]) || record.baseline[key] < 0 || record.baseline[key] > MAX_PATHS)) throw new Error(`baseline.${key} invalid`); if (record.baseline.digest !== null && !HEX.test(record.baseline.digest)) throw new Error("baseline.digest invalid");
   exact(record.lifecycle_ms, EXACT_KEYS.lifecycle, "lifecycle_ms"); for (const key of EXACT_KEYS.lifecycle) nullableNum(record.lifecycle_ms[key], `lifecycle_ms.${key}`); exact(record.harness, EXACT_KEYS.harness, "harness"); const flatMetrics = Object.fromEntries([...METRIC_NAMES, "first_tool"].map((key) => [key, record.harness[key]])); validateMetric(flatMetrics, "harness"); validateMetric(record.harness.parent_measured, "harness.parent_measured"); validateMetric(record.harness.harness_reported, "harness.harness_reported"); validateMetric(record.harness.provider_usage, "harness.provider_usage");
-  exact(record.resources, EXACT_KEYS.resources, "resources"); for (const key of EXACT_KEYS.resources) { exact(record.resources[key], EXACT_KEYS.resource, `resources.${key}`); for (const n of ["before", "peak", "after"]) nullableNum(record.resources[key][n], `resources.${key}.${n}`); if (!ENUMS.availability.has(record.resources[key].availability) || (record.resources[key].available !== null && typeof record.resources[key].available !== "boolean")) throw new Error(`resources.${key} invalid`); }
+  exact(record.resources, EXACT_KEYS.resources, "resources"); for (const key of EXACT_KEYS.resources) { exact(record.resources[key], EXACT_KEYS.resource, `resources.${key}`); for (const n of ["before", "peak", "after"]) nullableNum(record.resources[key][n], `resources.${key}.${n}`); if (!ENUMS.availability.has(record.resources[key].availability) || (record.resources[key].available !== null && typeof record.resources[key].available !== "boolean")) throw new Error(`resources.${key} invalid`); const expected = record.resources[key].availability === "AVAILABLE" ? true : record.resources[key].availability === "UNAVAILABLE" ? false : null; if (record.resources[key].available !== expected) throw new Error(`resources.${key} availability mismatch`); }
   exact(record.outcome, EXACT_KEYS.outcome, "outcome"); if (!ENUMS.status.has(record.outcome.status)) throw new Error("outcome.status invalid"); validateObservation(record.outcome.changed, "outcome.changed"); validateObservation(record.outcome.diff, "outcome.diff"); exact(record.outcome.attribution, EXACT_KEYS.attribution, "outcome.attribution"); if (!Array.isArray(record.outcome.attribution.paths) || record.outcome.attribution.paths.length > MAX_PATHS || record.outcome.attribution.paths.some((p) => typeof p !== "string" || !safePath(p))) throw new Error("outcome.attribution.paths invalid"); if (!isObject(record.outcome.attribution.details) || Object.keys(record.outcome.attribution.details).some((p) => !record.outcome.attribution.paths.includes(p))) throw new Error("outcome.attribution.details invalid"); for (const p of Object.keys(record.outcome.attribution.details)) { const d = record.outcome.attribution.details[p]; exact(d, ["before", "after"], `outcome.attribution.details.${p}`); for (const side of ["before", "after"]) { if (d[side] === null) continue; exact(d[side], EXACT_KEYS.attribution_side, `outcome.attribution.details.${p}.${side}`); if (typeof d[side].status !== "string" || !LOGICAL.test(d[side].status) || (d[side].fingerprint !== null && !HEX.test(d[side].fingerprint)) || typeof d[side].fingerprint_bounded !== "boolean") throw new Error("outcome.attribution side invalid"); } } exact(record.outcome.tests, EXACT_KEYS.tests, "outcome.tests"); if (!TEST_STATUS.has(record.outcome.tests.status) || (record.outcome.tests.count !== null && (!Number.isInteger(record.outcome.tests.count) || record.outcome.tests.count < 0 || record.outcome.tests.count > MAX_PATHS)) || (record.outcome.tests.digest !== null && !HEX.test(record.outcome.tests.digest))) throw new Error("outcome.tests invalid"); for (const key of ["base_drift", "commit_detected"]) if (record.outcome[key] !== null && typeof record.outcome[key] !== "boolean") throw new Error(`outcome.${key} invalid`); if (record.outcome.evidence_digest !== null && !HEX.test(record.outcome.evidence_digest)) throw new Error("outcome.evidence_digest invalid"); exact(record.ownership, EXACT_KEYS.ownership, "ownership"); if (!ENUMS.ownership.has(record.ownership.provider) || !ENUMS.cleanup.has(record.ownership.cleanup) || (record.ownership.cleanup_verified !== null && typeof record.ownership.cleanup_verified !== "boolean")) throw new Error("ownership invalid"); return record;
 }
 export function createLifecycleRecorder(now = () => Date.now()) { const starts = new Map(); const elapsed = {}; return Object.freeze({ mark(event) { const m = String(event || "").match(/^(preflight|gpu_gate|start|ready|inference|test|postflight|cleanup)_(start|end)$/); if (!m) return; if (m[2] === "start") starts.set(m[1], now()); else if (starts.has(m[1])) { elapsed[m[1]] = Math.max(0, now() - starts.get(m[1])); starts.delete(m[1]); } }, snapshot() { return { ...elapsed }; } }); }
 /** Compare per-path status+content fingerprints; unchanged pre-dirty paths are excluded. */
 export function attributeGitEvidence(before, after) { const previous = before?.path_details || {}; const current = after?.path_details || {}; const names = [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort(); const paths = []; const uncertain = []; const details = {}; for (const name of names) { const a = previous[name] || null; const b = current[name] || null; if (!b) continue; const changed = !a || a.status !== b.status || a.fingerprint !== b.fingerprint || a.fingerprint_bounded === false || b.fingerprint_bounded === false; if (changed) { paths.push(name); details[name] = { before: a, after: b }; if (a?.fingerprint_bounded === false || b?.fingerprint_bounded === false) uncertain.push(name); } } return { paths, uncertain_paths: uncertain, details, status_paths: paths.filter((p) => current[p]?.status), diff_paths: paths.filter((p) => current[p]?.diff || current[p]?.status), paths_truncated: !!after?.paths_truncated }; }
 export function contractFingerprint(task) { return sha256Digest({ version: task?.version ?? null, task_id: task?.task_id ?? null, base_commit: task?.base_commit ?? null, classification: task?.classification ?? null, constraints: Array.isArray(task?.constraints) ? task.constraints : [], test_command_digest: Array.isArray(task?.test_command) ? sha256Digest(task.test_command) : null, timeout: task?.timeout ?? null, max_tool_calls: task?.max_tool_calls ?? null, output_limit: task?.output_limit ?? null }); }
-export function writeLocalRunRecordAtomic(directory, record, { fsImpl = fs } = {}) { const value = validateLocalRunRecord(record); const dir = path.resolve(String(directory)); fsImpl.mkdirSync(dir, { recursive: true }); const encoded = `${JSON.stringify(value, null, 2)}\n`; if (Buffer.byteLength(encoded, "utf8") > MAX_LEDGER_BYTES) throw new Error("local run record exceeds evidence limit"); const target = path.join(dir, `${value.run_id}.json`); const temporary = `${target}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`; fsImpl.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "wx" }); try { fsImpl.linkSync(temporary, target); fsImpl.unlinkSync(temporary); } catch (error) { try { fsImpl.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; } return target; }
+export function writeLocalRunRecordAtomic(directory, record, { fsImpl = fs } = {}) {
+  const value = validateLocalRunRecord(record);
+  const dir = path.resolve(String(directory));
+  fsImpl.mkdirSync(dir, { recursive: true });
+  const encoded = `${JSON.stringify(value, null, 2)}\n`;
+  if (Buffer.byteLength(encoded, "utf8") > MAX_LEDGER_BYTES) throw new Error("local run record exceeds evidence limit");
+  const target = path.join(dir, `${value.run_id}.json`);
+  // Exclusive creation gives this invocation ownership of exactly one temp
+  // name. Cleanup is consequently bounded to that name; no directory-wide
+  // stale-temp sweep can delete another run's data.
+  let temporary = null;
+  let owned = false;
+  let createFd = null;
+  let lastError = null;
+  const removeOwnedTemp = (file) => {
+    try { if (typeof fsImpl.unlinkSync === "function") { fsImpl.unlinkSync(file); return true; } } catch { /* try next bounded remover */ }
+    try { if (typeof fsImpl.rmSync === "function") { fsImpl.rmSync(file, { force: true }); return true; } } catch { /* try real fs fallback */ }
+    try { fs.rmSync(file, { force: true }); return true; } catch { return false; }
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const candidate = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
+    try {
+      if (typeof fsImpl.openSync === "function") {
+        createFd = fsImpl.openSync(candidate, "wx", 0o600);
+        temporary = candidate;
+        owned = true;
+        break;
+      }
+      // Compatibility fallback for narrowly mocked fs implementations. The
+      // generated name is unique to this invocation and is treated as owned
+      // only after exclusive creation succeeds.
+      try {
+        fsImpl.writeFileSync(candidate, "", { encoding: "utf8", flag: "wx" });
+        temporary = candidate;
+        owned = true;
+        break;
+      } catch (error) {
+        if (error?.code === "EEXIST" && attempt < 2) { lastError = error; continue; }
+        // The exclusive create was the only ownership proof available to a
+        // minimal mock. Remove only this invocation's generated name before
+        // surfacing a write failure.
+        removeOwnedTemp(candidate);
+        throw error;
+      }
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== "EEXIST" || attempt === 2) throw error;
+    } finally {
+      if (createFd !== null) {
+        try { fsImpl.closeSync?.(createFd); } finally { createFd = null; }
+      }
+    }
+  }
+  if (!temporary || !owned) throw lastError || new Error("temporary ledger file creation failed");
+  try {
+    fsImpl.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "w" });
+    if (typeof fsImpl.openSync === "function" && typeof fsImpl.fsyncSync === "function") {
+      let syncFd = null;
+      try {
+        syncFd = fsImpl.openSync(temporary, "r+");
+        fsImpl.fsyncSync(syncFd);
+      } finally {
+        if (syncFd !== null) {
+          try { fsImpl.closeSync?.(syncFd); } catch { /* preserve write/link error */ }
+        }
+      }
+    }
+    fsImpl.linkSync(temporary, target);
+    fsImpl.unlinkSync(temporary);
+    owned = false;
+    return target;
+  } finally {
+    if (owned && temporary) {
+      try { fsImpl.unlinkSync(temporary); }
+      catch { removeOwnedTemp(temporary); }
+    }
+  }
+}
 function percentile(values, p) { if (!values.length) return null; const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * p) - 1)); return values.slice().sort((a, b) => a - b)[index]; }
 export function summarizeLocalRunRecords(directory, { readFile = fs.readFileSync, readdir = fs.readdirSync } = {}) { const dir = path.resolve(String(directory)); let names = []; try { names = readdir(dir).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.json$/.test(name)).sort().slice(0, MAX_SUMMARY_FILES); } catch { names = []; } const records = []; for (const name of names) { try { records.push(validateLocalRunRecord(JSON.parse(readFile(path.join(dir, name), "utf8")))); } catch { /* ignore corrupt/unrelated */ } } const durations = records.map((r) => r.harness.parent_measured.wall_time_ms).filter((v) => Number.isFinite(v)); const done = records.filter((r) => r.outcome.status === "DONE").length; return { schema: LOCAL_RUN_RECORD_SCHEMA, count: records.length, success: done, success_rate: records.length ? done / records.length : null, wall_time_ms: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95) } }; }
