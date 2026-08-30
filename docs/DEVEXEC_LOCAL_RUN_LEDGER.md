@@ -35,6 +35,21 @@ before/peak/after values and `AVAILABLE`/`NOT_COLLECTED` availability. The
 sampler is read-only, cancellable, and never records provider PIDs, process
 names, or paths. First-tool, tool-call, and token values are never labelled
 `parent_measured`.
+
+Provider terminal results are reclassified by the parent through a strict
+status/code matrix. `DONE` is possible only after adapter status `PASS` with
+no code (or code `OK`), a parent-attributed nonempty allowed diff, and a
+parent-controlled test `PASS`, with no drift, commit, or unsafe-path evidence.
+`DONE`/`SUCCESS` reported by an adapter are not accepted as terminal success;
+`PARTIAL` is recorded as an incomplete failure. Timeout, deadline, cancel,
+OOM, unavailable, blocked, crash, malformed, provider, model-load, port, GPU
+conflict, and unknown nonempty codes are never upgraded to `DONE`, even when
+diff or test evidence is positive.
+
+When provider execution raises, cleanup runs under a separate bounded lifecycle
+budget (`cleanup_status`, `cleanup_timed_out`, `cleanup_wall_time_ms`, and
+`cleanup_timeout_ms` in runtime metrics). A cleanup timeout is observability
+metadata only and never reclassifies the task or extends its success criteria.
 When constructing a record, `availability` is accepted only as one of the
 exact enum values (`AVAILABLE`, `UNAVAILABLE`, `NOT_COLLECTED`) and is mapped
 to the matching boolean (or `null`); conflicting or unknown aliases are

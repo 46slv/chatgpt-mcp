@@ -16,6 +16,9 @@ export const FREETOKEN_FAILURES = Object.freeze({
   CANCELLED: "CANCELLED",
   MALFORMED_RESULT: "MALFORMED_RESULT",
   RESULT_TOO_LARGE: "RESULT_TOO_LARGE",
+  GPU_CONFLICT: "GPU_CONFLICT",
+  CRASH: "CRASH",
+  PROVIDER_FAILURE: "PROVIDER_FAILURE",
 });
 
 export function redactFreeTokenLog(value, { maxString = 1000 } = {}) {
@@ -71,6 +74,7 @@ export function classifyFreeTokenFailure(error) {
   if (text.includes("malformed") || text.includes("invalid response")) return FREETOKEN_FAILURES.MALFORMED_RESULT;
   if (text.includes("oversized") || text.includes("too large") || text.includes("response limit")) return FREETOKEN_FAILURES.RESULT_TOO_LARGE;
   if (text.includes("out of memory") || text.includes("cuda out of memory") || /\boom\b/.test(text)) return FREETOKEN_FAILURES.GPU_OOM;
+  if (text.includes("crash") || text.includes("process exited") || text.includes("engine terminated")) return FREETOKEN_FAILURES.CRASH;
   if (text.includes("model") && (text.includes("load") || text.includes("not found") || text.includes("invalid"))) return FREETOKEN_FAILURES.MODEL_LOAD_FAILURE;
   if (text.includes("eaddrinuse") || text.includes("address already in use") || text.includes("port")) return FREETOKEN_FAILURES.PORT_COLLISION;
   return FREETOKEN_FAILURES.SERVER_FAILURE;
@@ -260,7 +264,7 @@ export function classifyGpuConflict(mapping, gpuRows, deviceIndex = 0) {
     return fields[0].toLowerCase() === targetUuid || fields[0] === targetIndex;
   });
   return busy
-    ? { status: "CONFLICT", reason: "existing_gpu_compute_workload_on_target_device", device_index: deviceIndex }
+    ? { status: "CONFLICT", code: FREETOKEN_FAILURES.GPU_CONFLICT, reason: "existing_gpu_compute_workload_on_target_device", device_index: deviceIndex }
     : { status: "CLEAR", reason: "no_known_gpu_compute_workload_on_target_device", device_index: deviceIndex };
 }
 
@@ -368,7 +372,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     onLifecycle?.("gpu_gate_start");
     const gate = await Promise.resolve(gpuProbe());
     onLifecycle?.("gpu_gate_end");
-    if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
+    if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : gate?.status === "CONFLICT" ? FREETOKEN_FAILURES.GPU_CONFLICT : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
     onLifecycle?.("start_start");
     if (signal?.aborted) { const code = classifyAbortReason(signal.reason); return { status: "BLOCKED", code, reason: code === FREETOKEN_FAILURES.TASK_DEADLINE ? "task deadline exceeded before health" : "start cancelled before health" }; }
     const current = await health(signal);

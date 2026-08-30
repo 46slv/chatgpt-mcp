@@ -22,6 +22,82 @@ const SHELL_EXECUTABLE = /^(?:cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?|
 // adapters or inference responses.
 const PARENT_TEST_EVIDENCE = Symbol("parent-test-evidence");
 
+// Provider terminal results are untrusted observations.  Only PASS with an
+// absent code or the explicit success code OK can be a success candidate;
+// the parent still requires its own diff, test, and safety evidence before
+// returning DONE.  Keep the failure vocabulary broad enough to cover both
+// FreeToken's public codes and generic adapter failures.
+export const ADAPTER_SUCCESS_CODES = Object.freeze(["OK"]);
+export const ADAPTER_FAILURE_CODES = Object.freeze([
+  "TIMEOUT", "INFERENCE_REQUEST_TIMEOUT", "TASK_DEADLINE_EXCEEDED", "CANCELLED",
+  "GPU_OOM", "OOM", "UNAVAILABLE", "DISABLED", "BLOCKED", "CRASH", "PROVIDER_CRASH",
+  "MALFORMED_RESULT", "RESULT_TOO_LARGE", "PROVIDER_FAILURE", "SERVER_FAILURE",
+  "MODEL_LOAD_FAILURE", "PORT_COLLISION", "GPU_CONFLICT", "INFERENCE_UNAVAILABLE",
+  "HARNESS_TIMEOUT", "HARNESS_MAX_TOOL_CALLS", "SCOPE_VIOLATION", "DUPLICATE_FAILURE",
+]);
+const ADAPTER_FAILURE_CODE_SET = new Set(ADAPTER_FAILURE_CODES);
+const ADAPTER_BLOCKED_CODES = new Set(["UNAVAILABLE", "DISABLED", "BLOCKED", "GPU_CONFLICT", "PORT_COLLISION", "MODEL_LOAD_FAILURE", "INFERENCE_UNAVAILABLE"]);
+
+function normalizeAdapterTerminalCode(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !/^[A-Z][A-Z0-9_]{1,63}$/.test(value)) return "MALFORMED_RESULT";
+  return value;
+}
+
+/**
+ * Parent-owned adapter terminal matrix.  This deliberately does not inspect
+ * diff or test evidence: a provider failure can never be upgraded to DONE by
+ * unrelated positive evidence.  `accepted` means only "eligible to continue
+ * parent verification", not that the task is complete.
+ */
+export function classifyAdapterTerminalResult(adapterResult) {
+  if (!isObject(adapterResult) || typeof adapterResult.status !== "string") {
+    return { accepted: false, partial: false, adapter_status: null, code: "MALFORMED_RESULT", parent_status: "FAILED", blocker: "malformed local worker provider result" };
+  }
+  const adapterStatus = adapterResult.status;
+  const code = normalizeAdapterTerminalCode(adapterResult.code);
+  const successCode = code === null || ADAPTER_SUCCESS_CODES.includes(code);
+  if (adapterStatus === "PASS" && successCode) {
+    return { accepted: true, partial: false, adapter_status: adapterStatus, code, parent_status: "DONE", blocker: "none" };
+  }
+  if (adapterStatus === "PARTIAL") {
+    return { accepted: false, partial: true, adapter_status: adapterStatus, code: code || "PARTIAL", parent_status: "FAILED", blocker: `local worker reported PARTIAL result${code ? `: ${code}` : ""}` };
+  }
+  if (adapterStatus === "CANCELLED" || code === "CANCELLED") {
+    return { accepted: false, partial: false, adapter_status: adapterStatus, code: code || "CANCELLED", parent_status: "CANCELLED", blocker: `local worker reported runtime cancellation: ${code || "CANCELLED"}` };
+  }
+  if (adapterStatus === "BLOCKED" || ADAPTER_BLOCKED_CODES.has(code)) {
+    return { accepted: false, partial: false, adapter_status: adapterStatus, code: code || "BLOCKED", parent_status: "BLOCKED", blocker: `local worker provider blocked${code ? `: ${code}` : ""}` };
+  }
+  if (adapterStatus === "FAILED" || adapterStatus === "DONE" || adapterStatus === "SUCCESS" || adapterStatus === "PASS") {
+    const reason = adapterStatus === "PASS" && code && !ADAPTER_FAILURE_CODE_SET.has(code) ? "unrecognized adapter code" : "runtime failure";
+    return { accepted: false, partial: false, adapter_status: adapterStatus, code: code || "PROVIDER_FAILURE", parent_status: "FAILED", blocker: `local worker reported ${reason}: ${code || "PROVIDER_FAILURE"}` };
+  }
+  return { accepted: false, partial: false, adapter_status: adapterStatus, code: code || "MALFORMED_RESULT", parent_status: "FAILED", blocker: `invalid local worker provider status: ${adapterStatus}` };
+}
+
+export const DEFAULT_CLEANUP_TIMEOUT_MS = 10000;
+
+/** Run adapter cleanup under its own bounded lifecycle budget. */
+export function runBoundedCleanup(stop, { timeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS, now = () => Date.now() } = {}) {
+  const budget = Math.min(60000, Math.max(1, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : DEFAULT_CLEANUP_TIMEOUT_MS));
+  const started = now();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, wall_time_ms: Math.max(0, now() - started), timeout_ms: budget });
+    };
+    const timer = setTimeout(() => finish({ status: "TIMEOUT", timed_out: true }), budget);
+    Promise.resolve().then(() => {
+      if (typeof stop !== "function") throw new Error("cleanup function is required");
+      return stop();
+    }).then(() => finish({ status: "COMPLETED", timed_out: false }), () => finish({ status: "FAILED", timed_out: false }));
+  });
+}
+
 export class LocalRuntimeContractError extends Error {
   constructor(message, code = "INVALID_LOCAL_RUNTIME_CONTRACT") {
     super(message);
@@ -487,7 +563,7 @@ export function createInferenceAdapter(adapter) {
   });
 }
 
-export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null, runLedgerDir = null, runId = null, selection = null, ledgerWriter = writeLocalRunRecordAtomic, resourceSampler: suppliedResourceSampler = null, resourceSamplerFactory = createParentResourceSampler } = {}) {
+export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null, runLedgerDir = null, runId = null, selection = null, ledgerWriter = writeLocalRunRecordAtomic, resourceSampler: suppliedResourceSampler = null, resourceSamplerFactory = createParentResourceSampler, cleanupTimeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS } = {}) {
   const task = validateTaskContract(inputTask, { verifyGit: false });
   const runtimeAdapter = createInferenceAdapter(adapter);
   const started = now();
@@ -496,6 +572,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   let ledgerWrite = null;
   let resourceSampler = null;
   let measuredResources = null;
+  let cleanup = { status: "NOT_REQUIRED", timed_out: false, wall_time_ms: 0, timeout_ms: Math.min(60000, Math.max(1, Number.isFinite(Number(cleanupTimeoutMs)) ? Number(cleanupTimeoutMs) : DEFAULT_CLEANUP_TIMEOUT_MS)) };
   const stopResourceSampler = () => {
     if (!resourceSampler) return measuredResources;
     try { measuredResources = resourceSampler.stop(); } catch { measuredResources = null; }
@@ -582,7 +659,11 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal, runTest, onLifecycle: (event) => lifecycle.mark(event) }); } catch (error) { adapterError = error; }
   // A provider crash must not strand an owned process. Adapters are required
   // to make stop() ownership-aware (external engines remain untouched).
-  if (adapterError) { lifecycle.mark("cleanup_start"); try { await runtimeAdapter.stop(); } catch { /* cleanup is best effort */ } lifecycle.mark("cleanup_end"); }
+  if (adapterError) {
+    lifecycle.mark("cleanup_start");
+    cleanup = await runBoundedCleanup(() => runtimeAdapter.stop(), { timeoutMs: cleanupTimeoutMs, now });
+    lifecycle.mark("cleanup_end");
+  }
   let after;
   let postflightError = null;
   lifecycle.mark("postflight_start");
@@ -614,7 +695,8 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;
   let tests = { status: "NOT_RUN", evidence_valid: false };
-  if (!adapterError && !postflightError && !evidenceTruncated && !invalidPaths && !attributionUncertain.length && !unexpected.length && !committed && !baseDrift) {
+  const adapterTerminal = adapterError ? null : classifyAdapterTerminalResult(adapterResult);
+  if (!adapterError && adapterTerminal?.accepted === true && !postflightError && !evidenceTruncated && !invalidPaths && !attributionUncertain.length && !unexpected.length && !committed && !baseDrift) {
     lifecycle.mark("test_start");
     try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit, task); } catch (error) {
       tests = { status: "FAIL", evidence_valid: false, timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
@@ -640,10 +722,9 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   else if (unexpected.length) { status = "BLOCKED"; blocker = `unexpected changed paths: ${unexpected.join(", ")}`; }
   else if (committed) { status = "BLOCKED"; blocker = "worker commit detected; local worker must not commit"; }
   else if (baseDrift) { status = "BLOCKED"; blocker = "base commit drift detected"; }
-  else if (!adapterResult || typeof adapterResult !== "object" || typeof adapterResult.status !== "string") { status = "FAILED"; blocker = "malformed local worker provider result"; }
-  else if (adapterResult && typeof adapterResult.status === "string" && !["PASS", "DONE", "SUCCESS"].includes(adapterResult.status)) {
-    status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
-    blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : `local worker reported runtime failure: ${boundedFailureCode(adapterResult)}`;
+  else if (!adapterTerminal || adapterTerminal.accepted !== true) {
+    status = adapterTerminal?.parent_status || "FAILED";
+    blocker = adapterTerminal?.blocker || "malformed local worker provider result";
   }
   else if (!attributedPaths.length || !attributed.diff_paths.length) { status = "FAILED"; blocker = "no nonempty bounded diff was produced"; }
   else if (tests.status !== "PASS" || tests.evidence_valid !== true) {
@@ -657,7 +738,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: attributedPaths, tests, blocker,
     diff_availability: { available: attributed.diff_paths.length > 0, files: attributed.diff_paths },
-    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_code: boundedFailureCode(adapterResult, adapterError ? boundedFailureCode(adapterError) : "NONE"), failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null },
+    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", adapter_code: adapterTerminal?.code || (adapterError ? boundedFailureCode(adapterError) : null), adapter_terminal_accepted: adapterTerminal?.accepted === true, adapter_partial: adapterTerminal?.partial === true, failure_code: boundedFailureCode(adapterResult, adapterError ? boundedFailureCode(adapterError) : "NONE"), failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null, cleanup_status: cleanup.status, cleanup_timed_out: cleanup.timed_out, cleanup_wall_time_ms: cleanup.wall_time_ms, cleanup_timeout_ms: cleanup.timeout_ms },
     resources: measuredResources,
     safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, attributed_paths: attributedPaths, preexisting_paths_excluded: before.changed_paths.filter((p) => !attributedPaths.includes(p)), attribution: attributed.details, attribution_uncertain: attributionUncertain, invalid_paths: !!invalidPaths, invalid_path_list: invalidPathList, reparse_paths: reparsePaths, hard_link_paths: hardLinkEvidencePaths, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,

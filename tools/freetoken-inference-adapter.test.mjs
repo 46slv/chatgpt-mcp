@@ -129,7 +129,7 @@ test("GPU conflict blocks start before control API and does not stop anything", 
   const f = fakeRequest();
   const adapter = createFreeTokenInferenceAdapter({ config: { enabled: true, model: "m" }, request: f.request, gpuProbe: () => ({ status: "CONFLICT", reason: "lm_studio" }) });
   const result = await adapter.start();
-  assert.deepEqual({ status: result.status, code: result.code }, { status: "BLOCKED", code: FREETOKEN_FAILURES.UNAVAILABLE });
+  assert.deepEqual({ status: result.status, code: result.code }, { status: "BLOCKED", code: FREETOKEN_FAILURES.GPU_CONFLICT });
   assert.equal(f.calls.length, 0);
 });
 
@@ -137,6 +137,7 @@ test("GPU gate treats a matching WDDM/Resolve N/A compute row as conflict", () =
   const rows = [["0", "GPU-0"], ["1", "GPU-1"]];
   const resolve = "GPU-0, 456, Resolve.exe, [N/A]";
   assert.equal(classifyGpuConflict(resolve, rows, 0).status, "CONFLICT");
+  assert.equal(classifyGpuConflict(resolve, rows, 0).code, FREETOKEN_FAILURES.GPU_CONFLICT);
   assert.equal(classifyGpuConflict("GPU-1, 789, other.exe, 128", rows, 0).status, "CLEAR");
 });
 

@@ -11,6 +11,8 @@ import {
   normalizeTestCommand,
   redactStructuredLog,
   runLocalWorkerTask,
+  classifyAdapterTerminalResult,
+  runBoundedCleanup,
   validateTaskBoundary,
 } from "./local-worker-runtime.mjs";
 
@@ -114,4 +116,56 @@ test("process-tree cleanup and structured log are bounded", () => {
   const redacted = redactStructuredLog({ env: { API_KEY: "secret" }, source: "x".repeat(2000) });
   assert.equal(redacted.env, "[REDACTED]");
   assert.match(redacted.source, /TRUNCATED/);
+});
+
+test("adapter terminal matrix rejects PASS paired with every failure code", async () => {
+  const failureCodes = [
+    "TIMEOUT", "INFERENCE_REQUEST_TIMEOUT", "TASK_DEADLINE_EXCEEDED", "CANCELLED",
+    "GPU_OOM", "UNAVAILABLE", "BLOCKED", "CRASH", "MALFORMED_RESULT", "PROVIDER_FAILURE",
+    "MODEL_LOAD_FAILURE", "PORT_COLLISION", "GPU_CONFLICT", "SERVER_FAILURE",
+  ];
+  for (const code of failureCodes) {
+    const { root, task } = fixture();
+    const outcome = await runLocalWorkerTask(task, {
+      adapter: { identity: { runtime: "local", provider: "fake" }, async run() { fs.mkdirSync(path.join(root, "src")); fs.writeFileSync(path.join(root, "src/value.txt"), "ok\n"); return { status: "PASS", code }; } },
+    });
+    assert.notEqual(outcome.result.status, "DONE", code);
+    assert.match(outcome.result.blocker, new RegExp(code));
+    assert.equal(outcome.result.runtime_metrics.adapter_status, "PASS");
+    assert.equal(outcome.result.runtime_metrics.adapter_code, code);
+  }
+});
+
+test("adapter terminal matrix accepts only absent/OK success codes and rejects unknown codes", async () => {
+  assert.equal(classifyAdapterTerminalResult({ status: "PASS" }).accepted, true);
+  assert.equal(classifyAdapterTerminalResult({ status: "PASS", code: null }).accepted, true);
+  assert.equal(classifyAdapterTerminalResult({ status: "PASS", code: "OK" }).accepted, true);
+  assert.equal(classifyAdapterTerminalResult({ status: "PASS", code: "UNKNOWN_SUCCESS" }).accepted, false);
+  assert.equal(classifyAdapterTerminalResult({ status: "PARTIAL", code: "HARNESS_TIMEOUT" }).partial, true);
+  assert.equal(classifyAdapterTerminalResult({ status: "DONE" }).accepted, false);
+  const { root, task } = fixture();
+  const outcome = await runLocalWorkerTask(task, {
+    adapter: { identity: { runtime: "local", provider: "fake" }, async run() { fs.mkdirSync(path.join(root, "src")); fs.writeFileSync(path.join(root, "src/value.txt"), "ok\n"); return { status: "PASS", code: "UNKNOWN_SUCCESS" }; } },
+  });
+  assert.equal(outcome.result.status, "FAILED");
+  assert.match(outcome.result.blocker, /UNKNOWN_SUCCESS/);
+});
+
+test("provider PARTIAL is explicit and cleanup timeout is bounded metadata", async () => {
+  const { root, task } = fixture();
+  const partial = await runLocalWorkerTask(task, {
+    adapter: { identity: { runtime: "local", provider: "fake" }, async run() { fs.mkdirSync(path.join(root, "src")); fs.writeFileSync(path.join(root, "src/value.txt"), "ok\n"); return { status: "PARTIAL", code: "HARNESS_TIMEOUT" }; } },
+  });
+  assert.equal(partial.result.status, "FAILED");
+  assert.equal(partial.result.runtime_metrics.adapter_partial, true);
+  const cleanup = await runBoundedCleanup(() => new Promise(() => {}), { timeoutMs: 10 });
+  assert.equal(cleanup.status, "TIMEOUT");
+  assert.equal(cleanup.timed_out, true);
+  const throwing = await runLocalWorkerTask(task, {
+    cleanupTimeoutMs: 10,
+    adapter: { identity: { runtime: "local", provider: "fake" }, async run() { throw new Error("provider crash"); }, async stop() { return new Promise(() => {}); } },
+  });
+  assert.equal(throwing.result.status, "FAILED");
+  assert.equal(throwing.result.runtime_metrics.cleanup_status, "TIMEOUT");
+  assert.equal(throwing.result.runtime_metrics.cleanup_timed_out, true);
 });
