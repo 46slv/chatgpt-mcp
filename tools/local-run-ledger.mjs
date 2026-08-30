@@ -2,238 +2,64 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-/**
- * Parent-owned, privacy-bounded observability for a single local worker run.
- * This deliberately has no dependency on the Task/Result contracts and never
- * serializes arbitrary provider or worker payloads.
- */
+/** Parent-owned, privacy-bounded observability for a single local run. */
 export const LOCAL_RUN_RECORD_SCHEMA = "devexec.local-run-record/v1";
 export const LOCAL_RUN_RECORD_VERSION = 1;
 const MAX_ID = 200;
-const MAX_DIGEST = 64;
 const MAX_SELECTION_ID = 128;
 const MAX_PATHS = 256;
 const MAX_SUMMARY_FILES = 10000;
-
+const MAX_LEDGER_BYTES = 64 * 1024;
+const HEX = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const LOGICAL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+const TEST_STATUS = new Set(["PASS", "FAIL", "CANCELLED", "NOT_RUN"]);
 const ENUMS = Object.freeze({
   status: new Set(["DONE", "BLOCKED", "FAILED", "CANCELLED", "UNKNOWN"]),
   availability: new Set(["AVAILABLE", "UNAVAILABLE", "NOT_COLLECTED"]),
   cleanup: new Set(["NOT_REQUIRED", "COMPLETED", "PARTIAL", "FAILED", "UNKNOWN"]),
   ownership: new Set(["NONE", "ADAPTER", "PARENT", "UNKNOWN"]),
 });
-
-function boundedId(value, fallback = "unknown", max = MAX_ID) {
-  const text = typeof value === "string" && value.trim() ? value.trim() : fallback;
-  return text.slice(0, max);
-}
-
-function enumValue(value, allowed, fallback = "UNKNOWN") {
-  return typeof value === "string" && allowed.has(value) ? value : fallback;
-}
-
-function finiteNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER, integer = false } = {}) {
-  if (!Number.isFinite(value) || value < min || value > max) return null;
-  return integer ? Math.trunc(value) : value;
-}
-
-function digest(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
-}
-
-function canonical(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
-}
-
-export function sha256Digest(value) {
-  return digest(typeof value === "string" ? value : canonical(value));
-}
-
-/** A stable contract identity that omits goal, paths, cwd, repo and worktree. */
-export function contractFingerprint(task) {
-  const safe = {
-    version: task?.version ?? null,
-    task_id: task?.task_id ?? null,
-    base_commit: task?.base_commit ?? null,
-    classification: task?.classification ?? null,
-    constraints: Array.isArray(task?.constraints) ? task.constraints : [],
-    test_command_digest: Array.isArray(task?.test_command) ? sha256Digest(task.test_command) : null,
-    timeout: task?.timeout ?? null,
-    max_tool_calls: task?.max_tool_calls ?? null,
-    output_limit: task?.output_limit ?? null,
-  };
-  return sha256Digest(safe);
-}
-
-function boundedDigest(value) {
-  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value) ? value.toLowerCase() : null;
-}
-
-function boundedLogical(value) {
-  return boundedId(value, "unknown", MAX_SELECTION_ID).replace(/[^A-Za-z0-9._:/-]/g, "_");
-}
-
-function modelLogical(value) {
-  const text = typeof value === "string" && value.trim() ? value.trim() : "unknown";
-  return boundedLogical(path.basename(text.replaceAll("\\", "/")) || "unknown");
-}
-
-function metric(value) { return finiteNumber(value, { max: 3_600_000 }); }
-
-function metricOrNull(value) { return value == null ? null : metric(Number(value)); }
-
-function availability(value, known) {
-  if (known === false) return "UNAVAILABLE";
-  if (known === true) return "AVAILABLE";
-  return enumValue(value, ENUMS.availability, "NOT_COLLECTED");
-}
-
-function observation(value = {}) {
-  const clean = value && typeof value === "object" ? value : {};
-  const count = finiteNumber(clean.count, { min: 0, max: MAX_PATHS, integer: true });
-  const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map((p) => String(p).replaceAll("\\", "/")).filter((p) => p && !path.isAbsolute(p) && !/^[A-Za-z]:\//.test(p)) : [];
-  const pathDigest = boundedDigest(clean.digest) || (paths.length ? sha256Digest(paths) : null);
-  return { count: count ?? paths.length, digest: pathDigest };
-}
-
-function lifecycle(input = {}) {
-  const names = ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"];
-  const output = {};
-  for (const name of names) output[name] = metricOrNull(input[name]);
-  return output;
-}
-
-function resource(input = {}) {
-  const known = input?.availability;
-  const available = input?.available === true || input?.available === false ? input.available : (known === "AVAILABLE" ? true : known === "UNAVAILABLE" ? false : null);
-  return {
-    before: metricOrNull(input.before),
-    peak: metricOrNull(input.peak),
-    after: metricOrNull(input.after),
-    availability: availability(known, input.available),
-    available,
-  };
-}
-
-function harnessMetrics(input = {}) {
-  const result = {};
-  for (const key of ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens"]) {
-    const value = finiteNumber(input[key], { min: 0, max: key === "tool_calls" ? 1000 : 3_600_000, integer: key === "tool_calls" || key.endsWith("tokens") });
-    result[key] = value;
-  }
-  return result;
-}
-
+function isObject(value) { return !!value && typeof value === "object" && !Array.isArray(value); }
+function finite(value, { min = 0, max = Number.MAX_SAFE_INTEGER, integer = false } = {}) { if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) return null; return integer ? Math.trunc(value) : value; }
+function digest(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
+function canonical(value) { if (value === null || typeof value !== "object") return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`; return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`; }
+export function sha256Digest(value) { return digest(typeof value === "string" ? value : canonical(value)); }
+function safeLogical(value, fallback = "unknown", max = MAX_SELECTION_ID) { const text = typeof value === "string" && value.trim() ? value.trim() : fallback; const sanitized = text.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, max); return LOGICAL.test(sanitized) ? sanitized : fallback; }
+function safeModel(value) { let text = typeof value === "string" && value.trim() ? value.trim() : "unknown"; text = text.split(/[?#]/, 1)[0].replaceAll("\\", "/"); return safeLogical(path.posix.basename(text) || "unknown"); }
+function strictDigest(value) { return typeof value === "string" && HEX.test(value) ? value : null; }
+function enumValue(value, allowed, fallback = "UNKNOWN") { return typeof value === "string" && allowed.has(value) ? value : fallback; }
+function safePath(value) { if (typeof value !== "string") return null; const normalized = value.replaceAll("\\", "/"); if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.split("/").includes("..") || /[:?#\x00-\x1f\x7f]/.test(normalized)) return null; return normalized; }
+function observation(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath).filter(Boolean) : []; const count = finite(clean.count, { min: 0, max: MAX_PATHS, integer: true }); return { count: count ?? paths.length, digest: strictDigest(clean.digest) || (paths.length ? sha256Digest(paths) : sha256Digest([])) }; }
+function attribution(input = {}) { const clean = isObject(input) ? input : {}; const paths = Array.isArray(clean.paths) ? clean.paths.slice(0, MAX_PATHS).map(safePath).filter(Boolean) : []; const details = {}; if (isObject(clean.details)) for (const name of paths) { const d = clean.details[name]; if (!isObject(d)) continue; const side = (v) => { if (!isObject(v)) return null; const raw = String(v.status || ""); const status = raw === "??" ? "UNTRACKED" : raw.includes("D") ? "DELETED" : raw.includes("A") ? "ADDED" : raw.includes("R") ? "RENAMED" : raw.includes("M") ? "MODIFIED" : "CHANGED"; return { status, fingerprint: strictDigest(v.fingerprint), fingerprint_bounded: v.fingerprint_bounded !== false }; }; details[name] = { before: side(d.before), after: side(d.after) }; } return { paths, details }; }
+function lifecycle(input = {}) { const names = ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"]; const output = {}; for (const name of names) output[name] = finite(input?.[name], { min: 0, max: 3_600_000 }); return output; }
+function resource(input = {}) { const available = input?.available === true || input?.available === false ? input.available : null; return { before: finite(input?.before, { min: 0, max: 3_600_000 }), peak: finite(input?.peak, { min: 0, max: 3_600_000 }), after: finite(input?.after, { min: 0, max: 3_600_000 }), availability: available === true ? "AVAILABLE" : available === false ? "UNAVAILABLE" : enumValue(input?.availability, ENUMS.availability, "NOT_COLLECTED"), available }; }
+const METRIC_NAMES = ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens"];
+function metricSet(input = {}) { const out = {}; for (const key of METRIC_NAMES) out[key] = finite(input?.[key], { min: 0, max: key === "tool_calls" ? 1000 : 3_600_000, integer: key === "tool_calls" || key.endsWith("tokens") }); out.first_tool = input?.first_tool == null ? null : safeLogical(input.first_tool, "unknown"); return out; }
 function normalizeRecord(input = {}) {
-  const baseline = input.baseline || {};
-  const outcome = input.outcome || {};
-  const evidence = input.evidence || {};
-  const record = {
-    schema: LOCAL_RUN_RECORD_SCHEMA,
-    version: LOCAL_RUN_RECORD_VERSION,
-    run_id: boundedId(input.run_id),
-    selection: {
-      runtime: boundedLogical(input.selection?.runtime || "local"),
-      provider: boundedLogical(input.selection?.provider || "unknown"),
-      harness: boundedLogical(input.selection?.harness || "minimal-harness"),
-      model: modelLogical(input.selection?.model || "unknown"),
-    },
-    contract_fingerprint: boundedDigest(input.contract_fingerprint),
-    base_commit: boundedDigest(input.base_commit),
-    baseline: {
-      clean: input.baseline?.clean === true ? true : input.baseline?.clean === false ? false : null,
-      modified: finiteNumber(baseline.modified, { min: 0, max: MAX_PATHS, integer: true }),
-      added: finiteNumber(baseline.added, { min: 0, max: MAX_PATHS, integer: true }),
-      deleted: finiteNumber(baseline.deleted, { min: 0, max: MAX_PATHS, integer: true }),
-      untracked: finiteNumber(baseline.untracked, { min: 0, max: MAX_PATHS, integer: true }),
-      digest: boundedDigest(baseline.digest),
-    },
-    lifecycle_ms: lifecycle(input.lifecycle_ms),
-    harness: harnessMetrics(input.harness),
-    resources: { ram_mb: resource(input.resources?.ram_mb), vram_mb: resource(input.resources?.vram_mb) },
-    outcome: {
-      status: enumValue(outcome.status, ENUMS.status),
-      changed: observation(outcome.changed),
-      diff: observation(outcome.diff),
-      tests: { status: boundedLogical(outcome.tests?.status || "NOT_RUN"), count: finiteNumber(outcome.tests?.count, { min: 0, max: MAX_PATHS, integer: true }), digest: boundedDigest(outcome.tests?.digest) },
-      base_drift: outcome.base_drift === true ? true : outcome.base_drift === false ? false : null,
-      commit_detected: outcome.commit_detected === true ? true : outcome.commit_detected === false ? false : null,
-      evidence_digest: boundedDigest(evidence.digest),
-    },
-    ownership: {
-      provider: enumValue(input.ownership?.provider, ENUMS.ownership),
-      cleanup: enumValue(input.ownership?.cleanup, ENUMS.cleanup),
-      cleanup_verified: input.ownership?.cleanup_verified === true ? true : input.ownership?.cleanup_verified === false ? false : null,
-    },
-  };
-  return record;
+  const baseline = isObject(input.baseline) ? input.baseline : {}; const outcome = isObject(input.outcome) ? input.outcome : {}; const evidence = isObject(input.evidence) ? input.evidence : {}; const flat = isObject(input.harness) ? input.harness : {};
+  const parent = isObject(flat.parent_measured) ? flat.parent_measured : { wall_time_ms: flat.wall_time_ms, first_tool_latency_ms: flat.first_tool_latency_ms, first_tool: flat.first_tool, tool_calls: flat.tool_calls };
+  const reported = isObject(flat.harness_reported) ? flat.harness_reported : flat; const usage = isObject(flat.provider_usage) ? flat.provider_usage : flat;
+  return { schema: LOCAL_RUN_RECORD_SCHEMA, version: LOCAL_RUN_RECORD_VERSION, run_id: safeLogical(input.run_id, "unknown", MAX_ID), selection: { runtime: safeLogical(input.selection?.runtime, "local"), provider: safeLogical(input.selection?.provider, "unknown"), harness: safeLogical(input.selection?.harness, "minimal-harness"), model: safeModel(input.selection?.model) }, contract_fingerprint: strictDigest(input.contract_fingerprint), base_commit: strictDigest(input.base_commit), baseline: { clean: baseline.clean === true ? true : baseline.clean === false ? false : null, modified: finite(baseline.modified, { min: 0, max: MAX_PATHS, integer: true }), added: finite(baseline.added, { min: 0, max: MAX_PATHS, integer: true }), deleted: finite(baseline.deleted, { min: 0, max: MAX_PATHS, integer: true }), untracked: finite(baseline.untracked, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(baseline.digest) }, lifecycle_ms: lifecycle(input.lifecycle_ms), harness: { ...metricSet(flat), parent_measured: metricSet(parent), harness_reported: metricSet(reported), provider_usage: metricSet(usage) }, resources: { ram_mb: resource(input.resources?.ram_mb), vram_mb: resource(input.resources?.vram_mb) }, outcome: { status: enumValue(outcome.status, ENUMS.status), changed: observation(outcome.changed), diff: observation(outcome.diff), attribution: attribution(outcome.attribution), tests: { status: TEST_STATUS.has(outcome.tests?.status) ? outcome.tests.status : "NOT_RUN", count: finite(outcome.tests?.count, { min: 0, max: MAX_PATHS, integer: true }), digest: strictDigest(outcome.tests?.digest) }, base_drift: outcome.base_drift === true ? true : outcome.base_drift === false ? false : null, commit_detected: outcome.commit_detected === true ? true : outcome.commit_detected === false ? false : null, evidence_digest: strictDigest(evidence.digest) }, ownership: { provider: enumValue(input.ownership?.provider, ENUMS.ownership), cleanup: enumValue(input.ownership?.cleanup, ENUMS.cleanup), cleanup_verified: input.ownership?.cleanup_verified === true ? true : input.ownership?.cleanup_verified === false ? false : null } };
 }
-
-export function createLocalRunRecord(input = {}) {
-  const runId = boundedId(input.run_id || crypto.randomUUID());
-  return normalizeRecord({ ...input, run_id: runId });
-}
-
+export function createLocalRunRecord(input = {}) { if (input.run_id !== undefined && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id) || input.run_id.includes(".."))) throw new Error("invalid local run id"); return normalizeRecord({ ...input, run_id: input.run_id || crypto.randomUUID() }); }
+const EXACT_KEYS = Object.freeze({ root: ["schema", "version", "run_id", "selection", "contract_fingerprint", "base_commit", "baseline", "lifecycle_ms", "harness", "resources", "outcome", "ownership"], selection: ["runtime", "provider", "harness", "model"], baseline: ["clean", "modified", "added", "deleted", "untracked", "digest"], lifecycle: ["preflight", "gpu_gate", "start", "ready", "inference", "test", "postflight", "cleanup"], metric: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool"], resources: ["ram_mb", "vram_mb"], resource: ["before", "peak", "after", "availability", "available"], outcome: ["status", "changed", "diff", "attribution", "tests", "base_drift", "commit_detected", "evidence_digest"], attribution: ["paths", "details"], attribution_side: ["status", "fingerprint", "fingerprint_bounded"], observation: ["count", "digest"], tests: ["status", "count", "digest"], ownership: ["provider", "cleanup", "cleanup_verified"], harness: ["wall_time_ms", "first_tool_latency_ms", "tool_calls", "prompt_tokens", "completion_tokens", "total_tokens", "first_tool", "parent_measured", "harness_reported", "provider_usage"] });
+function exact(value, keys, name) { if (!isObject(value)) throw new Error(`${name} must be an object`); const got = Object.keys(value).sort(); const expected = [...keys].sort(); if (got.length !== expected.length || got.some((x, i) => x !== expected[i])) throw new Error(`${name} has unknown or missing keys`); }
+function nullableNum(v, name, max = 3_600_000) { if (v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max)) throw new Error(`${name} must be finite or null`); }
+function validateObservation(v, name) { exact(v, EXACT_KEYS.observation, name); if (!Number.isInteger(v.count) || v.count < 0 || v.count > MAX_PATHS) throw new Error(`${name}.count invalid`); if (v.digest !== null && !HEX.test(v.digest)) throw new Error(`${name}.digest invalid`); }
+function validateMetric(v, name) { exact(v, EXACT_KEYS.metric, name); for (const key of METRIC_NAMES) nullableNum(v[key], `${name}.${key}`, key === "tool_calls" ? 1000 : 3_600_000); if (v.tool_calls !== null && !Number.isInteger(v.tool_calls)) throw new Error(`${name}.tool_calls invalid`); for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"]) if (v[key] !== null && !Number.isInteger(v[key])) throw new Error(`${name}.${key} invalid`); if (v.first_tool !== null && (typeof v.first_tool !== "string" || !LOGICAL.test(v.first_tool))) throw new Error(`${name}.first_tool invalid`); }
 export function validateLocalRunRecord(record) {
-  if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("local run record must be an object");
-  if (record.schema !== LOCAL_RUN_RECORD_SCHEMA || record.version !== LOCAL_RUN_RECORD_VERSION) throw new Error("unsupported local run record schema");
-  if (!record.run_id || typeof record.run_id !== "string" || record.run_id.length > MAX_ID) throw new Error("invalid local run id");
-  if (!record.selection || typeof record.selection !== "object") throw new Error("selection is required");
-  if (record.contract_fingerprint !== null && !boundedDigest(record.contract_fingerprint)) throw new Error("invalid contract fingerprint");
-  if (record.base_commit !== null && !boundedDigest(record.base_commit)) throw new Error("invalid base commit");
-  return record;
+  exact(record, EXACT_KEYS.root, "local run record"); if (record.schema !== LOCAL_RUN_RECORD_SCHEMA || record.version !== LOCAL_RUN_RECORD_VERSION) throw new Error("unsupported local run record schema"); if (typeof record.run_id !== "string" || !RUN_ID.test(record.run_id) || record.run_id.includes("..")) throw new Error("invalid local run id");
+  exact(record.selection, EXACT_KEYS.selection, "selection"); for (const key of Object.keys(record.selection)) if (typeof record.selection[key] !== "string" || !LOGICAL.test(record.selection[key])) throw new Error(`selection.${key} invalid`); for (const key of ["contract_fingerprint", "base_commit"]) if (record[key] !== null && !HEX.test(record[key])) throw new Error(`invalid ${key}`);
+  exact(record.baseline, EXACT_KEYS.baseline, "baseline"); if (record.baseline.clean !== null && typeof record.baseline.clean !== "boolean") throw new Error("baseline.clean invalid"); for (const key of ["modified", "added", "deleted", "untracked"]) if (record.baseline[key] !== null && (!Number.isInteger(record.baseline[key]) || record.baseline[key] < 0 || record.baseline[key] > MAX_PATHS)) throw new Error(`baseline.${key} invalid`); if (record.baseline.digest !== null && !HEX.test(record.baseline.digest)) throw new Error("baseline.digest invalid");
+  exact(record.lifecycle_ms, EXACT_KEYS.lifecycle, "lifecycle_ms"); for (const key of EXACT_KEYS.lifecycle) nullableNum(record.lifecycle_ms[key], `lifecycle_ms.${key}`); exact(record.harness, EXACT_KEYS.harness, "harness"); const flatMetrics = Object.fromEntries([...METRIC_NAMES, "first_tool"].map((key) => [key, record.harness[key]])); validateMetric(flatMetrics, "harness"); validateMetric(record.harness.parent_measured, "harness.parent_measured"); validateMetric(record.harness.harness_reported, "harness.harness_reported"); validateMetric(record.harness.provider_usage, "harness.provider_usage");
+  exact(record.resources, EXACT_KEYS.resources, "resources"); for (const key of EXACT_KEYS.resources) { exact(record.resources[key], EXACT_KEYS.resource, `resources.${key}`); for (const n of ["before", "peak", "after"]) nullableNum(record.resources[key][n], `resources.${key}.${n}`); if (!ENUMS.availability.has(record.resources[key].availability) || (record.resources[key].available !== null && typeof record.resources[key].available !== "boolean")) throw new Error(`resources.${key} invalid`); }
+  exact(record.outcome, EXACT_KEYS.outcome, "outcome"); if (!ENUMS.status.has(record.outcome.status)) throw new Error("outcome.status invalid"); validateObservation(record.outcome.changed, "outcome.changed"); validateObservation(record.outcome.diff, "outcome.diff"); exact(record.outcome.attribution, EXACT_KEYS.attribution, "outcome.attribution"); if (!Array.isArray(record.outcome.attribution.paths) || record.outcome.attribution.paths.length > MAX_PATHS || record.outcome.attribution.paths.some((p) => typeof p !== "string" || !safePath(p))) throw new Error("outcome.attribution.paths invalid"); if (!isObject(record.outcome.attribution.details) || Object.keys(record.outcome.attribution.details).some((p) => !record.outcome.attribution.paths.includes(p))) throw new Error("outcome.attribution.details invalid"); for (const p of Object.keys(record.outcome.attribution.details)) { const d = record.outcome.attribution.details[p]; exact(d, ["before", "after"], `outcome.attribution.details.${p}`); for (const side of ["before", "after"]) { if (d[side] === null) continue; exact(d[side], EXACT_KEYS.attribution_side, `outcome.attribution.details.${p}.${side}`); if (typeof d[side].status !== "string" || !LOGICAL.test(d[side].status) || (d[side].fingerprint !== null && !HEX.test(d[side].fingerprint)) || typeof d[side].fingerprint_bounded !== "boolean") throw new Error("outcome.attribution side invalid"); } } exact(record.outcome.tests, EXACT_KEYS.tests, "outcome.tests"); if (!TEST_STATUS.has(record.outcome.tests.status) || (record.outcome.tests.count !== null && (!Number.isInteger(record.outcome.tests.count) || record.outcome.tests.count < 0 || record.outcome.tests.count > MAX_PATHS)) || (record.outcome.tests.digest !== null && !HEX.test(record.outcome.tests.digest))) throw new Error("outcome.tests invalid"); for (const key of ["base_drift", "commit_detected"]) if (record.outcome[key] !== null && typeof record.outcome[key] !== "boolean") throw new Error(`outcome.${key} invalid`); if (record.outcome.evidence_digest !== null && !HEX.test(record.outcome.evidence_digest)) throw new Error("outcome.evidence_digest invalid"); exact(record.ownership, EXACT_KEYS.ownership, "ownership"); if (!ENUMS.ownership.has(record.ownership.provider) || !ENUMS.cleanup.has(record.ownership.cleanup) || (record.ownership.cleanup_verified !== null && typeof record.ownership.cleanup_verified !== "boolean")) throw new Error("ownership invalid"); return record;
 }
-
-export function createLifecycleRecorder(now = () => Date.now()) {
-  const starts = new Map();
-  const elapsed = {};
-  return Object.freeze({
-    mark(event) {
-      const match = String(event || "").match(/^(preflight|gpu_gate|start|ready|inference|test|postflight|cleanup)_(start|end)$/);
-      if (!match) return;
-      const [, name, edge] = match;
-      if (edge === "start") starts.set(name, now());
-      else if (starts.has(name)) { elapsed[name] = Math.max(0, now() - starts.get(name)); starts.delete(name); }
-    },
-    snapshot() { return { ...elapsed }; },
-  });
-}
-
-export function writeLocalRunRecordAtomic(directory, record, { fsImpl = fs } = {}) {
-  const value = validateLocalRunRecord(record);
-  const dir = path.resolve(String(directory));
-  fsImpl.mkdirSync(dir, { recursive: true });
-  const encoded = `${JSON.stringify(value, null, 2)}\n`;
-  if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) throw new Error("local run record exceeds evidence limit");
-  const target = path.join(dir, `${value.run_id}.json`);
-  const temporary = `${target}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fsImpl.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "wx" });
-  try {
-    if (fsImpl.existsSync(target)) throw new Error("local run record already exists");
-    fsImpl.renameSync(temporary, target);
-  } catch (error) { try { fsImpl.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; }
-  return target;
-}
-
-function percentile(values, p) {
-  if (!values.length) return null;
-  const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * p) - 1));
-  return values.slice().sort((a, b) => a - b)[index];
-}
-
-export function summarizeLocalRunRecords(directory, { readFile = fs.readFileSync, readdir = fs.readdirSync } = {}) {
-  const dir = path.resolve(String(directory));
-  let names = [];
-  try { names = readdir(dir).filter((name) => name.endsWith(".json")).sort().slice(0, MAX_SUMMARY_FILES); } catch { names = []; }
-  const records = [];
-  for (const name of names) {
-    try {
-      const record = validateLocalRunRecord(JSON.parse(readFile(path.join(dir, name), "utf8")));
-      records.push(record);
-    } catch { /* ignore unrelated/corrupt files; summary is read-only */ }
-  }
-  const durations = records.map((r) => r.harness?.wall_time_ms).filter((v) => Number.isFinite(v));
-  const done = records.filter((r) => r.outcome?.status === "DONE").length;
-  return { schema: LOCAL_RUN_RECORD_SCHEMA, count: records.length, success: done, success_rate: records.length ? done / records.length : null, wall_time_ms: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95) } };
-}
+export function createLifecycleRecorder(now = () => Date.now()) { const starts = new Map(); const elapsed = {}; return Object.freeze({ mark(event) { const m = String(event || "").match(/^(preflight|gpu_gate|start|ready|inference|test|postflight|cleanup)_(start|end)$/); if (!m) return; if (m[2] === "start") starts.set(m[1], now()); else if (starts.has(m[1])) { elapsed[m[1]] = Math.max(0, now() - starts.get(m[1])); starts.delete(m[1]); } }, snapshot() { return { ...elapsed }; } }); }
+/** Compare per-path status+content fingerprints; unchanged pre-dirty paths are excluded. */
+export function attributeGitEvidence(before, after) { const previous = before?.path_details || {}; const current = after?.path_details || {}; const names = [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort(); const paths = []; const uncertain = []; const details = {}; for (const name of names) { const a = previous[name] || null; const b = current[name] || null; if (!b) continue; const changed = !a || a.status !== b.status || a.fingerprint !== b.fingerprint || a.fingerprint_bounded === false || b.fingerprint_bounded === false; if (changed) { paths.push(name); details[name] = { before: a, after: b }; if (a?.fingerprint_bounded === false || b?.fingerprint_bounded === false) uncertain.push(name); } } return { paths, uncertain_paths: uncertain, details, status_paths: paths.filter((p) => current[p]?.status), diff_paths: paths.filter((p) => current[p]?.diff || current[p]?.status), paths_truncated: !!after?.paths_truncated }; }
+export function contractFingerprint(task) { return sha256Digest({ version: task?.version ?? null, task_id: task?.task_id ?? null, base_commit: task?.base_commit ?? null, classification: task?.classification ?? null, constraints: Array.isArray(task?.constraints) ? task.constraints : [], test_command_digest: Array.isArray(task?.test_command) ? sha256Digest(task.test_command) : null, timeout: task?.timeout ?? null, max_tool_calls: task?.max_tool_calls ?? null, output_limit: task?.output_limit ?? null }); }
+export function writeLocalRunRecordAtomic(directory, record, { fsImpl = fs } = {}) { const value = validateLocalRunRecord(record); const dir = path.resolve(String(directory)); fsImpl.mkdirSync(dir, { recursive: true }); const encoded = `${JSON.stringify(value, null, 2)}\n`; if (Buffer.byteLength(encoded, "utf8") > MAX_LEDGER_BYTES) throw new Error("local run record exceeds evidence limit"); const target = path.join(dir, `${value.run_id}.json`); const temporary = `${target}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`; fsImpl.writeFileSync(temporary, encoded, { encoding: "utf8", flag: "wx" }); try { fsImpl.linkSync(temporary, target); fsImpl.unlinkSync(temporary); } catch (error) { try { fsImpl.rmSync(temporary, { force: true }); } catch { /* best effort */ } throw error; } return target; }
+function percentile(values, p) { if (!values.length) return null; const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * p) - 1)); return values.slice().sort((a, b) => a - b)[index]; }
+export function summarizeLocalRunRecords(directory, { readFile = fs.readFileSync, readdir = fs.readdirSync } = {}) { const dir = path.resolve(String(directory)); let names = []; try { names = readdir(dir).filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.json$/.test(name)).sort().slice(0, MAX_SUMMARY_FILES); } catch { names = []; } const records = []; for (const name of names) { try { records.push(validateLocalRunRecord(JSON.parse(readFile(path.join(dir, name), "utf8")))); } catch { /* ignore corrupt/unrelated */ } } const durations = records.map((r) => r.harness.parent_measured.wall_time_ms).filter((v) => Number.isFinite(v)); const done = records.filter((r) => r.outcome.status === "DONE").length; return { schema: LOCAL_RUN_RECORD_SCHEMA, count: records.length, success: done, success_rate: records.length ? done / records.length : null, wall_time_ms: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95) } }; }

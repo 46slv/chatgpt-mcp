@@ -54,6 +54,9 @@ function publicResult(result) {
     const value = result?.runtime_provider_identity?.[key];
     if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = typeof value === "string" ? safeText(value, 256) : value;
   }
+  const ledger = result?.ledger && typeof result.ledger === "object" ? result.ledger : { status: "NOT_ATTEMPTED", code: null, path: null };
+  const ledgerStatus = ["WRITTEN", "FAILED", "NOT_ATTEMPTED"].includes(ledger.status) ? ledger.status : "FAILED";
+  const ledgerPath = typeof ledger.path === "string" && !/[\\/]/.test(ledger.path) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(ledger.path) ? ledger.path : null;
   return redactStructuredLog({
     version: RESULT_CONTRACT_VERSION,
     run_id: String(result?.run_id || "unknown").slice(0, 200),
@@ -66,6 +69,7 @@ function publicResult(result) {
     runtime_metrics: redactStructuredLog(result?.runtime_metrics || {}, { maxString: 256 }),
     safety_metrics: redactStructuredLog(result?.safety_metrics || {}, { maxString: 256 }),
     runtime_provider_identity: safeIdentity,
+    ledger: { status: ledgerStatus, code: typeof ledger.code === "string" ? safeText(ledger.code, 128) : null, path: ledgerPath },
   }, { maxString: 4000 });
 }
 
@@ -203,7 +207,7 @@ async function runTask(args) {
   let outcome;
   try { outcome = await entrypoint.run(task, { signal: abort.signal, runLedgerDir: ledgerDir || defaultLedgerDir(), selection: selected }); }
   finally { process.removeListener("SIGINT", onSignal); }
-  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, freetoken.model || null));
+  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}), ...(outcome.ledger ? { ledger: outcome.ledger } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, freetoken.model || null));
   const publicValue = publicResult(rawResult);
   const log = redactStructuredLog({ event: "runtime_result", task_id: publicValue.task_id, status: publicValue.status, blocker: publicValue.blocker, changed_files: publicValue.changed_files, tests: { status: publicValue.tests.status, exit_code: publicValue.tests.exit_code ?? null }, runtime_provider_identity: publicValue.runtime_provider_identity, runtime_metrics: publicValue.runtime_metrics }, { maxString: 1000 });
   atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log });

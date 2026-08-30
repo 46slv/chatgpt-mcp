@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { createLifecycleRecorder, createLocalRunRecord, contractFingerprint, writeLocalRunRecordAtomic, sha256Digest } from "./local-run-ledger.mjs";
+import { createLifecycleRecorder, createLocalRunRecord, contractFingerprint, writeLocalRunRecordAtomic, sha256Digest, attributeGitEvidence } from "./local-run-ledger.mjs";
 
 export const TASK_CONTRACT_VERSION = 1;
 export const RESULT_CONTRACT_VERSION = 1;
@@ -203,24 +203,37 @@ export function validateTaskBoundary(task) {
 }
 
 function parseStatusPorcelain(raw) {
-  const entries = [];
-  for (const record of raw.split("\0")) {
-    if (!record) continue;
-    const status = record.slice(0, 2);
-    const payload = record.slice(3);
-    if (status.includes("R") || status.includes("C")) {
-      const [oldPath, newPath] = payload.split("\0");
-      entries.push(oldPath, newPath);
-    } else entries.push(payload);
+  const entries = []; const records = raw.split("\0");
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i]; if (!record) continue;
+    const status = record.slice(0, 2); const payload = record.slice(3).replaceAll("\\", "/");
+    entries.push({ path: payload, status });
+    if ((status.includes("R") || status.includes("C")) && records[i + 1]) entries.push({ path: records[++i].replaceAll("\\", "/"), status });
   }
-  return entries.filter(Boolean).map((entry) => entry.replaceAll("\\", "/"));
+  return entries;
+}
+function safeGitRelative(value) { return typeof value === "string" && !!value && !value.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(value) && !value.split("/").includes("..") && !/[\x00-\x1f\x7f:?\#]/.test(value); }
+
+function fingerprintPath(root, relative, status) {
+  const maxBytes = 512 * 1024; const candidate = path.resolve(root, relative);
+  try {
+    const diff = execFileSync("git", ["-C", root, "diff", "HEAD", "--no-ext-diff", "--no-color", "--no-renames", "--", relative], { encoding: "utf8", windowsHide: true, timeout: 20000, maxBuffer: maxBytes });
+    if (Buffer.byteLength(diff, "utf8") > maxBytes) return { status, diff: !!diff, fingerprint: null, fingerprint_bounded: false };
+    if (diff) return { status, diff: true, fingerprint: sha256Digest(`${status}\0${diff}`), fingerprint_bounded: true };
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      const stat = fs.statSync(candidate); if (stat.size > maxBytes) return { status, diff: false, fingerprint: null, fingerprint_bounded: false };
+      return { status, diff: false, fingerprint: sha256Digest(`${status}\0${fs.readFileSync(candidate)}`), fingerprint_bounded: true };
+    }
+    return { status, diff: false, fingerprint: sha256Digest(`${status}\0missing`), fingerprint_bounded: true };
+  } catch { return { status, diff: false, fingerprint: null, fingerprint_bounded: false }; }
 }
 
 export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } = {}) {
   const root = path.resolve(worktree);
   const head = runGit(root, ["rev-parse", "HEAD"]).toLowerCase();
   const statusRaw = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { encoding: "utf8", windowsHide: true, timeout: 20000 });
-  const statusPaths = parseStatusPorcelain(statusRaw);
+  const statusEntries = parseStatusPorcelain(statusRaw);
+  const statusPaths = statusEntries.map((entry) => entry.path);
   const diffRaw = execFileSync("git", ["-C", root, "diff", "HEAD", "--name-only", "--no-renames"], { encoding: "utf8", windowsHide: true, timeout: 20000 });
   const diffPaths = diffRaw.split(/\r?\n/).filter(Boolean).map((x) => x.replaceAll("\\", "/"));
   const allChangedPaths = [...new Set([...statusPaths, ...diffPaths])].sort();
@@ -229,6 +242,9 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
   // Keep evidence bounded, but retain a count so the parent can fail closed
   // instead of accepting an incomplete changed-file claim.
   const changedPaths = allChangedPaths.slice(0, bounded);
+  const invalidPaths = allChangedPaths.filter((relative) => !safeGitRelative(relative));
+  const statusMap = new Map(statusEntries.map((entry) => [entry.path, entry.status]));
+  const pathDetails = Object.fromEntries(changedPaths.map((relative) => [relative, fingerprintPath(root, relative, statusMap.get(relative) || "DIFF")]));
   return {
     head_commit: head,
     status_paths: statusPaths.slice(0, bounded),
@@ -237,6 +253,8 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
     changed_path_count: allChangedPaths.length,
     paths_truncated: pathsTruncated,
     diff_available: allChangedPaths.length > 0,
+    path_details: pathDetails,
+    invalid_paths: invalidPaths.length > 0,
     status_counts: (() => {
       const counts = { modified: 0, added: 0, deleted: 0, untracked: 0 };
       for (const record of statusRaw.split("\0")) {
@@ -389,6 +407,8 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     if (!runLedgerDir) return;
     try {
       const adapterMetrics = adapterResult?.metrics || {};
+      const attributedLedger = beforeEvidence && afterEvidence ? attributeGitEvidence(beforeEvidence, afterEvidence) : { paths: [], diff_paths: [] };
+      const parentWall = Number.isFinite(result?.runtime_metrics?.wall_time_ms) ? result.runtime_metrics.wall_time_ms : null;
       const clean = createLocalRunRecord({
         run_id: localRunId,
         selection: selection || runtimeAdapter.identity,
@@ -400,28 +420,33 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
           digest: beforeEvidence.changed_paths?.length ? sha256Digest(beforeEvidence.changed_paths) : sha256Digest([]),
         } : {},
         lifecycle_ms: lifecycle.snapshot(),
-        harness: { ...adapterMetrics, wall_time_ms: adapterMetrics.wall_time_ms ?? result?.runtime_metrics?.wall_time_ms, tool_calls: adapterMetrics.tool_calls ?? result?.runtime_metrics?.tool_calls },
+        harness: {
+          parent_measured: { wall_time_ms: parentWall, first_tool: result?.runtime_metrics?.first_tool || null },
+          harness_reported: { first_tool: adapterMetrics.first_tool, first_tool_latency_ms: adapterMetrics.first_tool_latency_ms, tool_calls: adapterMetrics.tool_calls, wall_time_ms: adapterMetrics.wall_time_ms },
+          provider_usage: { prompt_tokens: adapterMetrics.prompt_tokens, completion_tokens: adapterMetrics.completion_tokens, total_tokens: adapterMetrics.total_tokens },
+        },
         resources: adapterResult?.resources || {
           ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) },
           vram_mb: { before: adapterMetrics.vram_before_mb, peak: adapterMetrics.vram_peak_mb, after: adapterMetrics.vram_after_mb, available: [adapterMetrics.vram_before_mb, adapterMetrics.vram_peak_mb, adapterMetrics.vram_after_mb].some((value) => Number.isFinite(value)) },
         },
         outcome: {
           status: result?.status,
-          changed: { count: afterEvidence?.changed_path_count ?? 0, digest: afterEvidence?.changed_paths?.length ? sha256Digest(afterEvidence.changed_paths) : sha256Digest([]) },
-          diff: { count: afterEvidence?.diff_paths?.length ?? 0, digest: afterEvidence?.diff_paths?.length ? sha256Digest(afterEvidence.diff_paths) : sha256Digest([]) },
+          changed: { count: attributedLedger.paths.length, paths: attributedLedger.paths, digest: attributedLedger.paths.length ? sha256Digest(attributedLedger.paths) : sha256Digest([]) },
+          diff: { count: attributedLedger.diff_paths.length, paths: attributedLedger.diff_paths, digest: attributedLedger.diff_paths.length ? sha256Digest(attributedLedger.diff_paths) : sha256Digest([]) },
+          attribution: { paths: attributedLedger.paths, details: attributedLedger.details },
           tests: { status: result?.tests?.status || "NOT_RUN", count: result?.tests?.status === "PASS" ? 1 : 0, digest: result?.tests?.status ? sha256Digest({ status: result.tests.status, evidence_valid: result.tests.evidence_valid === true }) : null },
           base_drift: result?.safety_metrics?.base_drift === true,
           commit_detected: result?.safety_metrics?.commit_detected === true,
         },
-        evidence: { digest: afterEvidence?.changed_paths?.length ? sha256Digest(afterEvidence.changed_paths) : sha256Digest([]) },
+        evidence: { digest: attributedLedger.paths.length ? sha256Digest(attributedLedger.paths) : sha256Digest([]) },
         ownership: { provider: adapterResult ? "ADAPTER" : "UNKNOWN", cleanup: "UNKNOWN", cleanup_verified: false },
       });
       const target = ledgerWriter(runLedgerDir, clean);
-      ledgerWrite = { status: "WRITTEN", path: typeof target === "string" ? target : null };
+      ledgerWrite = { status: "WRITTEN", code: "LEDGER_WRITTEN", path: typeof target === "string" ? path.basename(target) : null };
     } catch {
       // Observability is intentionally non-authoritative. A ledger failure
       // must never alter Task/Result status or trigger a retry.
-      ledgerWrite = { status: "FAILED" };
+      ledgerWrite = { status: "FAILED", code: "LEDGER_WRITE_FAILED", path: null };
     }
   };
   let boundary;
@@ -461,15 +486,19 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     after = captureGitEvidence(task.worktree);
   } catch (error) {
     postflightError = error;
-    after = { head_commit: before.head_commit, status_paths: [], diff_paths: [], changed_paths: [], changed_path_count: 0, paths_truncated: false, diff_available: false };
+    after = { head_commit: before.head_commit, status_paths: [], diff_paths: [], changed_paths: [], changed_path_count: 0, paths_truncated: false, invalid_paths: false, diff_available: false, path_details: {} };
   }
   lifecycle.mark("postflight_end");
-  const unexpected = after.changed_paths.filter((relative) => !pathAllowed(relative, task.allowed_paths));
+  const attributed = attributeGitEvidence(before, after);
+  const attributedPaths = attributed.paths;
+  const unexpected = attributedPaths.filter((relative) => !pathAllowed(relative, task.allowed_paths));
+  const attributionUncertain = attributed.uncertain_paths || [];
+  const invalidPaths = before.invalid_paths || after.invalid_paths;
   const evidenceTruncated = !!after.paths_truncated;
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;
   let tests = { status: "NOT_RUN", evidence_valid: false };
-  if (!adapterError && !postflightError && !evidenceTruncated && !unexpected.length && !committed && !baseDrift) {
+  if (!adapterError && !postflightError && !evidenceTruncated && !invalidPaths && !attributionUncertain.length && !unexpected.length && !committed && !baseDrift) {
     lifecycle.mark("test_start");
     try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit, task); } catch (error) {
       tests = { status: "FAIL", evidence_valid: false, timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
@@ -489,6 +518,8 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   }
   else if (postflightError) { status = "BLOCKED"; blocker = redactStructuredLog(String(postflightError?.message || postflightError), { maxString: 4000 }); }
   else if (evidenceTruncated) { status = "BLOCKED"; blocker = `changed-file evidence exceeds ${MAX_EVIDENCE_PATHS} paths`; }
+  else if (invalidPaths) { status = "BLOCKED"; blocker = "Git evidence contains an unsafe path"; }
+  else if (attributionUncertain.length) { status = "BLOCKED"; blocker = `changed-file fingerprint exceeds bounded evidence: ${attributionUncertain.join(", ")}`; }
   else if (unexpected.length) { status = "BLOCKED"; blocker = `unexpected changed paths: ${unexpected.join(", ")}`; }
   else if (committed) { status = "BLOCKED"; blocker = "worker commit detected; local worker must not commit"; }
   else if (baseDrift) { status = "BLOCKED"; blocker = "base commit drift detected"; }
@@ -497,7 +528,7 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     status = adapterResult.status === "BLOCKED" ? "BLOCKED" : adapterResult.status === "CANCELLED" ? "CANCELLED" : "FAILED";
     blocker = adapterResult.status === "BLOCKED" ? "local worker provider blocked" : "local worker reported runtime failure";
   }
-  else if (!after.diff_available || !after.changed_paths.length) { status = "FAILED"; blocker = "no nonempty bounded diff was produced"; }
+  else if (!attributedPaths.length || !attributed.diff_paths.length) { status = "FAILED"; blocker = "no nonempty bounded diff was produced"; }
   else if (tests.status !== "PASS" || tests.evidence_valid !== true) {
     status = tests.status === "CANCELLED" || tests.cancelled ? "CANCELLED" : "FAILED";
     if (tests.timed_out) blocker = "test timeout (requested test command exceeded deadline)";
@@ -506,13 +537,13 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     else blocker = "tests did not pass";
   }
   const result = {
-    version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: after.changed_paths, tests, blocker,
-    diff_availability: { available: after.diff_available, files: after.diff_paths },
-    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint, ...(adapterResult?.metrics || {}) },
-    safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
+    version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: attributedPaths, tests, blocker,
+    diff_availability: { available: attributed.diff_paths.length > 0, files: attributed.diff_paths },
+    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint, first_tool: adapterResult?.metrics?.first_tool || null },
+    safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, attributed_paths: attributedPaths, preexisting_paths_excluded: before.changed_paths.filter((p) => !attributedPaths.includes(p)), attribution: attributed.details, attribution_uncertain: attributionUncertain, invalid_paths: !!invalidPaths, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,
   };
-  const log = redactStructuredLog({ event: "local_worker_result", task_id: task.task_id, status, changed_files: after.changed_paths, tests: { status: tests.status, exit_code: tests.exit_code ?? null }, blocker, runtime_provider_identity: runtimeAdapter.identity, wall_time_ms: result.runtime_metrics.wall_time_ms });
+  const log = redactStructuredLog({ event: "local_worker_result", task_id: task.task_id, status, changed_files: attributedPaths, tests: { status: tests.status, exit_code: tests.exit_code ?? null }, blocker, runtime_provider_identity: runtimeAdapter.identity, wall_time_ms: result.runtime_metrics.wall_time_ms });
   writeLedger(result, { beforeEvidence: before, afterEvidence: after, baselineClean: before.changed_path_count === 0 });
   return { run_id: localRunId, result: validateResultContract(result), log, ledger: ledgerWrite };
 }

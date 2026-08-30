@@ -8,9 +8,16 @@ absolute paths, URLs, process identifiers, or provider response bodies.
 
 The default directory is `%LOCALAPPDATA%\ChatGPTMCPProbe\devexec-local-run-ledger`.
 Use `--ledger-dir <dir>` to select an explicit directory. A record is written
-through a temporary file and atomic rename; a duplicate `run_id` fails without
+through a same-filesystem temporary file and atomic no-replace hard-link; a duplicate `run_id` fails without
 replacing the existing record. Ledger failures are reported as observability
 metadata and never change the Task/Result outcome.
+
+The v1 record keeps compatibility aliases while separating
+`harness.parent_measured`, `harness.harness_reported`, and
+`harness.provider_usage`. Parent wall/lifecycle measurements are authoritative.
+Git attribution stores bounded before/after status and SHA fingerprints;
+pre-existing dirty paths are excluded unless their status or fingerprint changes
+during the run.
 
 Read-only summary:
 
