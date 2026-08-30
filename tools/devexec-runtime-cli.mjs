@@ -6,6 +6,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
 import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog } from "./local-worker-runtime.mjs";
+import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -55,6 +56,7 @@ function publicResult(result) {
   }
   return redactStructuredLog({
     version: RESULT_CONTRACT_VERSION,
+    run_id: String(result?.run_id || "unknown").slice(0, 200),
     task_id: String(result?.task_id || "unknown").slice(0, 200),
     status: ["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result?.status) ? result.status : "FAILED",
     changed_files: Array.isArray(result?.changed_files) ? result.changed_files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [],
@@ -113,6 +115,11 @@ function defaultEvidencePath(taskId) {
   return path.join(base, "ChatGPTMCPProbe", "devexec-runtime-evidence", `${id}-${Date.now()}.json`);
 }
 
+function defaultLedgerDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-run-ledger");
+}
+
 function flagValue(args, names) {
   const wanted = new Set(names);
   for (let i = 0; i < args.length - 1; i += 1) if (wanted.has(args[i])) return args[i + 1];
@@ -132,10 +139,11 @@ async function runTask(args) {
   let evidencePath = null;
   let outputPath = null;
   let adapterModule = null;
+  let ledgerDir = null;
   const freetoken = {};
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url"].includes(arg)) {
+    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir"].includes(arg)) {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === "--runtime" || arg === "--provider") selection[arg.slice(2)] = value;
@@ -143,6 +151,7 @@ async function runTask(args) {
       else if (arg === "--evidence" || arg === "--log") evidencePath = value;
       else if (arg === "--output") outputPath = value;
       else if (arg === "--adapter-module") adapterModule = value;
+      else if (arg === "--ledger-dir") ledgerDir = value;
       else if (arg === "--model") freetoken.model = value;
       else if (arg === "--model-path") freetoken.modelPath = value;
       else if (arg === "--control-url") freetoken.controlUrl = value;
@@ -192,9 +201,10 @@ async function runTask(args) {
   const onSignal = () => abort.abort(new Error("cancelled by caller"));
   process.once("SIGINT", onSignal);
   let outcome;
-  try { outcome = await entrypoint.run(task, { signal: abort.signal }); }
+  try { outcome = await entrypoint.run(task, { signal: abort.signal, runLedgerDir: ledgerDir || defaultLedgerDir(), selection: selected }); }
   finally { process.removeListener("SIGINT", onSignal); }
-  const publicValue = publicResult(outcome?.result || blockedResult(task.task_id, "runtime returned no result", identityFor(selected, freetoken.model || null)));
+  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, freetoken.model || null));
+  const publicValue = publicResult(rawResult);
   const log = redactStructuredLog({ event: "runtime_result", task_id: publicValue.task_id, status: publicValue.status, blocker: publicValue.blocker, changed_files: publicValue.changed_files, tests: { status: publicValue.tests.status, exit_code: publicValue.tests.exit_code ?? null }, runtime_provider_identity: publicValue.runtime_provider_identity, runtime_metrics: publicValue.runtime_metrics }, { maxString: 1000 });
   atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log });
   if (outputPath) atomicWrite(outputPath, publicValue);
@@ -205,6 +215,7 @@ async function runTask(args) {
 function usage() {
  process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
  process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]\n");
+ process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
 }
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -233,6 +244,14 @@ else if (command === "run") {
     try { if (outputPath) atomicWrite(outputPath, result); } catch { /* output is optional */ }
     try { process.stdout.write(`${JSON.stringify(result, null, 2)}\n`); } catch { process.stderr.write("runtime run failed\n"); }
     process.exitCode = exitCodeForResult(result);
+  }
+}
+else if (command === "metrics") {
+  const subcommand = args.shift();
+  if (subcommand !== "summarize" || args.length !== 1) { usage(); process.exitCode = 2; }
+  else {
+    try { process.stdout.write(`${JSON.stringify(summarizeLocalRunRecords(args[0]), null, 2)}\n`); process.exitCode = 0; }
+    catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; }
   }
 }
 else { usage(); process.exitCode = 2; }

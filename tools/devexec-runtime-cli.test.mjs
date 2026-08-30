@@ -103,3 +103,12 @@ test("provider unavailable is reported as BLOCKED without a fake success", () =>
   assert.equal(result.parsed.status, "BLOCKED");
   assert.match(result.parsed.blocker, /provider blocked/i);
 });
+
+test("read-only metrics summary is exposed through the public dispatcher", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-metrics-summary-"));
+  const result = spawnSync(process.execPath, [CLI, "runtime", "metrics", "summarize", dir], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.schema, "devexec.local-run-record/v1");
+  assert.equal(parsed.count, 0);
+});

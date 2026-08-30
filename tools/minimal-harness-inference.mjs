@@ -256,16 +256,44 @@ export async function runMinimalHarness(task, { infer, signal, runTest, maxToolC
   ].join("\n");
   const messages = [{ role: "system", content: bounded(system, 12000) }, { role: "user", content: bounded(goal, 12000) }];
   let toolCalls = 0;
+  let firstToolLatencyMs = null;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let promptUsageSeen = false;
+  let completionUsageSeen = false;
+  let totalUsageSeen = false;
+  const metricsSnapshot = () => ({
+    wall_time_ms: Date.now() - started,
+    tool_calls: toolCalls,
+    first_tool: observations[0]?.name || null,
+    first_tool_latency_ms: firstToolLatencyMs,
+    prompt_tokens: promptUsageSeen ? promptTokens : null,
+    completion_tokens: completionUsageSeen ? completionTokens : null,
+    total_tokens: totalUsageSeen ? totalTokens : null,
+  });
+  const collectUsage = (body) => {
+    const usage = body?.usage;
+    if (!usage || typeof usage !== "object") return;
+    const prompt = Number(usage.prompt_tokens ?? usage.input_tokens);
+    const completion = Number(usage.completion_tokens ?? usage.output_tokens);
+    const total = Number(usage.total_tokens);
+    if (Number.isFinite(prompt) && prompt >= 0) { promptTokens += Math.trunc(prompt); promptUsageSeen = true; }
+    if (Number.isFinite(completion) && completion >= 0) { completionTokens += Math.trunc(completion); completionUsageSeen = true; }
+    if (Number.isFinite(total) && total >= 0) { totalTokens += Math.trunc(total); totalUsageSeen = true; }
+  };
   const failures = new Map();
   const observations = [];
   while (Date.now() < deadline && toolCalls < cap) {
     if (signal?.aborted) return { status: "CANCELLED", code: "CANCELLED", reason: "harness cancelled", tool_calls: toolCalls, observations };
     const body = await infer({ messages: messages.slice(-historyCap), tools: MINIMAL_HARNESS_TOOLS, tool_choice: "auto", max_tokens: 1024, signal });
+    collectUsage(body);
     const { message, calls } = extractChoice(body);
     if (!message || typeof message !== "object") return { status: "FAILED", code: "MALFORMED_RESULT", reason: "inference response has no message", tool_calls: toolCalls, observations };
     if (!calls.length) {
-      return { status: "PASS", summary: bounded(message.content || "completed", outputLimit), response: body, tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+      return { status: "PASS", summary: bounded(message.content || "completed", outputLimit), response: body, tool_calls: toolCalls, observations, metrics: metricsSnapshot() };
     }
+    if (firstToolLatencyMs === null) firstToolLatencyMs = Date.now() - started;
     messages.push({ role: "assistant", content: message.content || null, tool_calls: calls.map((call) => ({ id: String(call.id || `call-${toolCalls + 1}`), type: "function", function: { name: String(call.function?.name || ""), arguments: String(call.function?.arguments || "{}") } })) });
     for (const call of calls) {
       if (toolCalls >= cap) break;
@@ -302,9 +330,9 @@ export async function runMinimalHarness(task, { infer, signal, runTest, maxToolC
     && observations.some((x) => x.name === "git_diff" && x.ok && nonEmptyBoundedDiff(x.diff));
   const cancelled = !!signal?.aborted;
   const timedOut = Date.now() >= deadline;
-  if (completedEvidence && !cancelled && !timedOut) return { status: "PASS", summary: "bounded harness completed after tool-call limit with parent-verified evidence", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  if (completedEvidence && !cancelled && !timedOut) return { status: "PASS", summary: "bounded harness completed after tool-call limit with parent-verified evidence", tool_calls: toolCalls, observations, metrics: metricsSnapshot() };
   const progressed = progressFromObservations(observations);
-  if (cancelled) return { status: "CANCELLED", code: "CANCELLED", reason: "harness cancelled before verified completion", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
-  if (timedOut) return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_TIMEOUT", reason: "harness deadline exceeded before verified completion", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
-  return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_MAX_TOOL_CALLS", reason: progressed ? "maximum tool calls reached before verified completion" : "maximum tool calls reached", tool_calls: toolCalls, observations, metrics: { wall_time_ms: Date.now() - started, tool_calls: toolCalls, first_tool: observations[0]?.name || null } };
+  if (cancelled) return { status: "CANCELLED", code: "CANCELLED", reason: "harness cancelled before verified completion", tool_calls: toolCalls, observations, metrics: metricsSnapshot() };
+  if (timedOut) return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_TIMEOUT", reason: "harness deadline exceeded before verified completion", tool_calls: toolCalls, observations, metrics: metricsSnapshot() };
+  return { status: progressed ? "PARTIAL" : "FAILED", code: "HARNESS_MAX_TOOL_CALLS", reason: progressed ? "maximum tool calls reached before verified completion" : "maximum tool calls reached", tool_calls: toolCalls, observations, metrics: metricsSnapshot() };
 }

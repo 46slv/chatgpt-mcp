@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import { createLifecycleRecorder, createLocalRunRecord, contractFingerprint, writeLocalRunRecordAtomic, sha256Digest } from "./local-run-ledger.mjs";
 
 export const TASK_CONTRACT_VERSION = 1;
 export const RESULT_CONTRACT_VERSION = 1;
@@ -236,6 +237,18 @@ export function captureGitEvidence(worktree, { maxPaths = MAX_EVIDENCE_PATHS } =
     changed_path_count: allChangedPaths.length,
     paths_truncated: pathsTruncated,
     diff_available: allChangedPaths.length > 0,
+    status_counts: (() => {
+      const counts = { modified: 0, added: 0, deleted: 0, untracked: 0 };
+      for (const record of statusRaw.split("\0")) {
+        if (!record) continue;
+        const code = record.slice(0, 2);
+        if (code === "??") counts.untracked += 1;
+        else if (code.includes("D")) counts.deleted += 1;
+        else if (code.includes("A") || code.includes("C")) counts.added += 1;
+        else counts.modified += 1;
+      }
+      return counts;
+    })(),
   };
 }
 
@@ -365,19 +378,63 @@ export function createInferenceAdapter(adapter) {
   });
 }
 
-export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null } = {}) {
+export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTestCommand, now = () => Date.now(), failureGuard = null, signal = null, runLedgerDir = null, runId = null, selection = null, ledgerWriter = writeLocalRunRecordAtomic } = {}) {
   const task = validateTaskContract(inputTask, { verifyGit: false });
   const runtimeAdapter = createInferenceAdapter(adapter);
   const started = now();
+  const localRunId = typeof runId === "string" && runId.trim() ? runId.trim() : crypto.randomUUID();
+  const lifecycle = createLifecycleRecorder(now);
+  let ledgerWrite = null;
+  const writeLedger = (result, { beforeEvidence = before, afterEvidence = after, baselineClean = beforeEvidence ? beforeEvidence.changed_path_count === 0 : null } = {}) => {
+    if (!runLedgerDir) return;
+    try {
+      const adapterMetrics = adapterResult?.metrics || {};
+      const clean = createLocalRunRecord({
+        run_id: localRunId,
+        selection: selection || runtimeAdapter.identity,
+        contract_fingerprint: contractFingerprint(task),
+        base_commit: task.base_commit,
+        baseline: beforeEvidence ? {
+          clean: baselineClean,
+          ...(beforeEvidence.status_counts || {}),
+          digest: beforeEvidence.changed_paths?.length ? sha256Digest(beforeEvidence.changed_paths) : sha256Digest([]),
+        } : {},
+        lifecycle_ms: lifecycle.snapshot(),
+        harness: { ...adapterMetrics, wall_time_ms: adapterMetrics.wall_time_ms ?? result?.runtime_metrics?.wall_time_ms, tool_calls: adapterMetrics.tool_calls ?? result?.runtime_metrics?.tool_calls },
+        resources: adapterResult?.resources || {
+          ram_mb: { before: adapterMetrics.ram_before_mb, peak: adapterMetrics.ram_peak_mb, after: adapterMetrics.ram_after_mb, available: [adapterMetrics.ram_before_mb, adapterMetrics.ram_peak_mb, adapterMetrics.ram_after_mb].some((value) => Number.isFinite(value)) },
+          vram_mb: { before: adapterMetrics.vram_before_mb, peak: adapterMetrics.vram_peak_mb, after: adapterMetrics.vram_after_mb, available: [adapterMetrics.vram_before_mb, adapterMetrics.vram_peak_mb, adapterMetrics.vram_after_mb].some((value) => Number.isFinite(value)) },
+        },
+        outcome: {
+          status: result?.status,
+          changed: { count: afterEvidence?.changed_path_count ?? 0, digest: afterEvidence?.changed_paths?.length ? sha256Digest(afterEvidence.changed_paths) : sha256Digest([]) },
+          diff: { count: afterEvidence?.diff_paths?.length ?? 0, digest: afterEvidence?.diff_paths?.length ? sha256Digest(afterEvidence.diff_paths) : sha256Digest([]) },
+          tests: { status: result?.tests?.status || "NOT_RUN", count: result?.tests?.status === "PASS" ? 1 : 0, digest: result?.tests?.status ? sha256Digest({ status: result.tests.status, evidence_valid: result.tests.evidence_valid === true }) : null },
+          base_drift: result?.safety_metrics?.base_drift === true,
+          commit_detected: result?.safety_metrics?.commit_detected === true,
+        },
+        evidence: { digest: afterEvidence?.changed_paths?.length ? sha256Digest(afterEvidence.changed_paths) : sha256Digest([]) },
+        ownership: { provider: adapterResult ? "ADAPTER" : "UNKNOWN", cleanup: "UNKNOWN", cleanup_verified: false },
+      });
+      const target = ledgerWriter(runLedgerDir, clean);
+      ledgerWrite = { status: "WRITTEN", path: typeof target === "string" ? target : null };
+    } catch {
+      // Observability is intentionally non-authoritative. A ledger failure
+      // must never alter Task/Result status or trigger a retry.
+      ledgerWrite = { status: "FAILED" };
+    }
+  };
   let boundary;
   let before;
   let adapterResult = null;
   let adapterError = null;
+  lifecycle.mark("preflight_start");
   try {
     boundary = validateTaskBoundary(task);
     if (!boundary.base_matches_head) fail("base commit drift before worker start", "BASE_COMMIT_DRIFT");
     before = captureGitEvidence(task.worktree);
   } catch (error) {
+    lifecycle.mark("preflight_end");
     const blocker = redactStructuredLog(String(error?.message || error), { maxString: 4000 });
     const drift = error?.code === "BASE_COMMIT_DRIFT" || error?.code === "BASE_COMMIT_INVALID";
     const result = {
@@ -386,14 +443,17 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
       safety_metrics: { preflight: "BLOCKED", base_commit_verified: false, changed_paths_recomputed: true, commit_detected: false, base_drift: drift },
       runtime_provider_identity: runtimeAdapter.identity,
     };
-    return { result: validateResultContract(result), log: redactStructuredLog({ event: "local_worker_blocked", task_id: task.task_id, status: result.status, blocker }) };
+    writeLedger(result, { beforeEvidence: before || null, afterEvidence: null, baselineClean: false });
+    return { run_id: localRunId, result: validateResultContract(result), log: redactStructuredLog({ event: "local_worker_blocked", task_id: task.task_id, status: result.status, blocker }), ledger: ledgerWrite };
   }
-  try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal, runTest }); } catch (error) { adapterError = error; }
+  lifecycle.mark("preflight_end");
+  try { adapterResult = await runtimeAdapter.run(task, { boundary, before, signal, runTest, onLifecycle: (event) => lifecycle.mark(event) }); } catch (error) { adapterError = error; }
   // A provider crash must not strand an owned process. Adapters are required
   // to make stop() ownership-aware (external engines remain untouched).
-  if (adapterError) { try { await runtimeAdapter.stop(); } catch { /* cleanup is best effort */ } }
+  if (adapterError) { lifecycle.mark("cleanup_start"); try { await runtimeAdapter.stop(); } catch { /* cleanup is best effort */ } lifecycle.mark("cleanup_end"); }
   let after;
   let postflightError = null;
+  lifecycle.mark("postflight_start");
   try {
     // Re-run the reparse/root checks after provider execution: a worker can
     // create a junction after preflight and then write through it.
@@ -403,15 +463,17 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
     postflightError = error;
     after = { head_commit: before.head_commit, status_paths: [], diff_paths: [], changed_paths: [], changed_path_count: 0, paths_truncated: false, diff_available: false };
   }
+  lifecycle.mark("postflight_end");
   const unexpected = after.changed_paths.filter((relative) => !pathAllowed(relative, task.allowed_paths));
   const evidenceTruncated = !!after.paths_truncated;
   const committed = after.head_commit !== before.head_commit;
   const baseDrift = after.head_commit !== task.base_commit;
   let tests = { status: "NOT_RUN", evidence_valid: false };
   if (!adapterError && !postflightError && !evidenceTruncated && !unexpected.length && !committed && !baseDrift) {
+    lifecycle.mark("test_start");
     try { tests = normalizeTestEvidence(await runTest(task, { signal }), task.output_limit, task); } catch (error) {
       tests = { status: "FAIL", evidence_valid: false, timed_out: false, cancelled: false, stdout: "", stderr: redactStructuredLog(String(error?.message || error), { maxString: task.output_limit }), wall_time_ms: 0 };
-    }
+    } finally { lifecycle.mark("test_end"); }
   }
   let status = "DONE";
   let blocker = "none";
@@ -446,12 +508,13 @@ export async function runLocalWorkerTask(inputTask, { adapter, runTest = runTest
   const result = {
     version: RESULT_CONTRACT_VERSION, task_id: task.task_id, status, changed_files: after.changed_paths, tests, blocker,
     diff_availability: { available: after.diff_available, files: after.diff_paths },
-    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint },
+    runtime_metrics: { wall_time_ms: now() - started, adapter_status: typeof adapterResult?.status === "string" ? adapterResult.status : "UNTRUSTED", failure_fingerprint: failureFingerprint, ...(adapterResult?.metrics || {}) },
     safety_metrics: { preflight: "PASS", postflight: postflightError ? "BLOCKED" : "PASS", base_commit_verified: true, changed_paths_recomputed: true, unexpected_changes: unexpected, commit_detected: committed, base_drift: baseDrift, evidence_truncated: evidenceTruncated, result_claim_trusted: false },
     runtime_provider_identity: runtimeAdapter.identity,
   };
   const log = redactStructuredLog({ event: "local_worker_result", task_id: task.task_id, status, changed_files: after.changed_paths, tests: { status: tests.status, exit_code: tests.exit_code ?? null }, blocker, runtime_provider_identity: runtimeAdapter.identity, wall_time_ms: result.runtime_metrics.wall_time_ms });
-  return { result: validateResultContract(result), log };
+  writeLedger(result, { beforeEvidence: before, afterEvidence: after, baselineClean: before.changed_path_count === 0 });
+  return { run_id: localRunId, result: validateResultContract(result), log, ledger: ledgerWrite };
 }
 
 export const LOCAL_RUNTIME_KIND = "minimal-harness-inference-adapter";

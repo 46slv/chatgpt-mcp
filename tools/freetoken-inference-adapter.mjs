@@ -159,12 +159,15 @@ export function createFreeTokenInferenceAdapter(options = {}) {
     }
     throw failure(FREETOKEN_FAILURES.TIMEOUT, "FreeToken readiness timeout", { cause: last?.message });
   }
-  async function start({ signal } = {}) {
+  async function start({ signal, onLifecycle } = {}) {
     if (!config.enabled) return { status: "BLOCKED", code: FREETOKEN_FAILURES.DISABLED, reason: "provider disabled" };
+    onLifecycle?.("gpu_gate_start");
     const gate = await Promise.resolve(gpuProbe());
+    onLifecycle?.("gpu_gate_end");
     if (!gate || gate.status !== "CLEAR") return { status: "BLOCKED", code: (gate?.code && Object.values(FREETOKEN_FAILURES).includes(gate.code)) ? gate.code : FREETOKEN_FAILURES.UNAVAILABLE, reason: gate?.reason || "GPU conflict or probe unavailable", gpu: gate || null };
+    onLifecycle?.("start_start");
     const current = await health();
-    if (current.status === "READY") return { status: "READY", owned: false, health: current };
+    if (current.status === "READY") { onLifecycle?.("start_end"); onLifecycle?.("ready_start"); onLifecycle?.("ready_end"); return { status: "READY", owned: false, health: current }; }
     // Only clean up a process previously spawned by this adapter. A stale
     // owned handle must not cause a second server to be started on the same
     // port; externally running FreeToken/LM Studio remains untouched.
@@ -181,7 +184,10 @@ export function createFreeTokenInferenceAdapter(options = {}) {
         startedByAdapter = true;
         startedViaControl = true;
       }
+      onLifecycle?.("start_end");
+      onLifecycle?.("ready_start");
       const ready = await waitReady(signal);
+      onLifecycle?.("ready_end");
       return { status: "READY", owned: startedByAdapter, ready };
     } catch (error) {
       const code = signal?.aborted ? FREETOKEN_FAILURES.CANCELLED : classifyFreeTokenFailure(error);
@@ -203,12 +209,13 @@ export function createFreeTokenInferenceAdapter(options = {}) {
   }
   async function run(task, context = {}) {
     if (!config.enabled) return { status: "BLOCKED", code: FREETOKEN_FAILURES.DISABLED, reason: "provider disabled" };
-    const started = Date.now(); const lifecycle = await start({ signal: context.signal });
+    const started = Date.now(); const lifecycle = await start({ signal: context.signal, onLifecycle: context.onLifecycle });
     if (lifecycle.status !== "READY") return lifecycle;
     const prompt = typeof task === "string" ? task : task.prompt || task.goal;
     if (!prompt || typeof prompt !== "string") return { status: "FAILED", code: FREETOKEN_FAILURES.SERVER_FAILURE, reason: "prompt required" };
     const bounded = prompt.slice(0, 12000); const timer = abortableSignal(context.signal, config.requestTimeoutMs);
     try {
+      context.onLifecycle?.("inference_start");
       const harnessTask = typeof task === "string"
         ? { goal: bounded, repo: "(provider)", worktree: "(provider)", allowed_paths: [], max_tool_calls: 8, timeout: config.requestTimeoutMs, output_limit: 12000 }
         : { repo: "(provider)", worktree: "(provider)", allowed_paths: [], max_tool_calls: 8, timeout: config.requestTimeoutMs, output_limit: 12000, ...task, goal: task.goal || task.prompt || bounded, allowed_paths: Array.isArray(task.allowed_paths) ? task.allowed_paths : [] };
@@ -250,6 +257,7 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       });
       const mappedCode = harness.code === "CANCELLED" ? FREETOKEN_FAILURES.CANCELLED : harness.code === "HARNESS_TIMEOUT" ? FREETOKEN_FAILURES.TIMEOUT : harness.code === "MALFORMED_RESULT" ? FREETOKEN_FAILURES.MALFORMED_RESULT : harness.status === "BLOCKED" ? FREETOKEN_FAILURES.SERVER_FAILURE : null;
       const result = { status: harness.status, code: mappedCode || harness.code || undefined, reason: harness.reason, response: harness.response, summary: harness.summary, tool_calls: harness.tool_calls, observations: harness.observations, metrics: { wall_time_ms: Date.now() - started, prompt_chars: bounded.length, ...(harness.metrics || {}) } };
+      context.onLifecycle?.("inference_end");
       log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, model: config.model, wall_time_ms: result.metrics.wall_time_ms, prompt_chars: bounded.length }));
       return result;
     } catch (error) {
@@ -257,7 +265,13 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       const result = { status: code === FREETOKEN_FAILURES.CANCELLED ? "CANCELLED" : "FAILED", code, reason: String(error.message || error), metrics: { wall_time_ms: Date.now() - started } };
       log(redactFreeTokenLog({ event: "freetoken_inference", status: result.status, code, model: config.model, wall_time_ms: result.metrics.wall_time_ms }));
       return result;
-    } finally { timer.dispose(); if (config.idleStopMs === 0) await stop(); else setTimeout(() => { void stop(); }, config.idleStopMs).unref?.(); }
+    } finally {
+      context.onLifecycle?.("inference_end");
+      context.onLifecycle?.("cleanup_start");
+      timer.dispose();
+      if (config.idleStopMs === 0) await stop(); else setTimeout(() => { void stop(); }, config.idleStopMs).unref?.();
+      context.onLifecycle?.("cleanup_end");
+    }
   }
   return Object.freeze({ identity, config, health, start, run, stop, waitReady });
 }
