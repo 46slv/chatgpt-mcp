@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRecoveryJournal } from "./local-runtime-recovery-journal.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "tools", "devexec.mjs");
@@ -111,4 +112,15 @@ test("read-only metrics summary is exposed through the public dispatcher", () =>
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.schema, "devexec.local-run-record/v1");
   assert.equal(parsed.count, 0);
+});
+
+test("recovery scan is read-only and exposed through the public dispatcher", () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-recovery-scan-"));
+  const journal = createRecoveryJournal({ stateDir, runId: "cli-scan" }); journal.append("PREFLIGHT");
+  const before = fs.readdirSync(path.join(stateDir, "cli-scan")).sort();
+  const result = spawnSync(process.execPath, [CLI, "runtime", "recovery", "scan", "--state-dir", stateDir], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.runs[0].classification, "NONTERMINAL");
+  assert.deepEqual(fs.readdirSync(path.join(stateDir, "cli-scan")).sort(), before);
 });

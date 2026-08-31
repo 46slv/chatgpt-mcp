@@ -8,6 +8,7 @@ import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.m
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
 import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog, sanitizeRuntimeProviderIdentity } from "./local-worker-runtime.mjs";
 import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
+import { scanRecoveryState } from "./local-runtime-recovery-journal.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -257,6 +258,7 @@ function usage() {
  process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
  process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]\n");
  process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
+ process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir>\n");
 }
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -292,6 +294,19 @@ else if (command === "metrics") {
   if (subcommand !== "summarize" || args.length !== 1) { usage(); process.exitCode = 2; }
   else {
     try { process.stdout.write(`${JSON.stringify(summarizeLocalRunRecords(args[0]), null, 2)}\n`); process.exitCode = 0; }
+    catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; }
+  }
+}
+else if (command === "recovery") {
+  const subcommand = args.shift();
+  if (subcommand !== "scan") { usage(); process.exitCode = 2; }
+  else {
+    let stateDir = null;
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] !== "--state-dir" || !args[i + 1]) throw new Error("recovery scan requires --state-dir <state-dir>");
+      stateDir = args[++i];
+    }
+    try { process.stdout.write(`${JSON.stringify(scanRecoveryState(stateDir), null, 2)}\n`); process.exitCode = 0; }
     catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; }
   }
 }

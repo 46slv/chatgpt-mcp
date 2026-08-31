@@ -77,6 +77,7 @@ function usage() {
  " devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]",
  " devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]",
  " devexec runtime metrics summarize <ledger-dir>",
+ " devexec runtime recovery scan --state-dir <state-dir>",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
  " devexec recover inspect <run-id>",
@@ -107,7 +108,7 @@ if (command === "agent") {
 
 if (command === "runtime") {
  const subcommand = args[0];
- if (!["select", "run", "metrics"].includes(subcommand)) throw new Error("runtime requires select, run, or metrics.");
+ if (!["select", "run", "metrics", "recovery"].includes(subcommand)) throw new Error("runtime requires select, run, metrics, or recovery.");
  const code = await runNode(runtimeCli, args, process.env);
  process.exit(code);
 }
