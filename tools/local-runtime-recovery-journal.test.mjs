@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -18,6 +19,15 @@ const digest = "a".repeat(64);
 function tempRoot() { return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-recovery-journal-")); }
 function advance(journal) {
   for (const state of ["LEASE_ACQUIRED", "PROVIDER_STARTED", "INFERENCE", "POSTFLIGHT", "TEST", "CLEANUP", "TERMINAL"]) journal.append(state);
+}
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+}
+function rehash(event) {
+  const unsigned = { ...event }; delete unsigned.event_hash;
+  return crypto.createHash("sha256").update(canonical(unsigned)).digest("hex");
 }
 
 test("creates an immutable hash-chained lifecycle journal and rejects invalid transitions", () => {
@@ -88,4 +98,60 @@ test("bounded startup scan stops before unbounded run/event traversal", () => {
   for (let index = 0; index < 3; index += 1) createRecoveryJournal({ stateDir: root, runId: `run-${index}` });
   assert.equal(scanRecoveryState(root, { maxRuns: 2 }).status, "BOUNDED_SCAN");
   assert.equal(scanRecoveryState(root, { maxEvents: 0 }).runs[0].classification, "BOUNDED_SCAN");
+});
+
+test("verifier rejects a valid-hash chain with an invalid transition and forbids terminal append", () => {
+  const root = tempRoot(); const journal = createRecoveryJournal({ stateDir: root, runId: "run-transition-integrity" });
+  journal.append("PREFLIGHT");
+  const dir = path.join(root, "run-transition-integrity");
+  const event = JSON.parse(fs.readFileSync(path.join(dir, "00000002.json"), "utf8"));
+  event.state = "INFERENCE"; event.event_hash = rehash(event);
+  fs.writeFileSync(path.join(dir, "00000002.json"), `${canonical(event)}\n`);
+  const result = verifyRecoveryRun(dir, "run-transition-integrity");
+  assert.equal(result.valid, false); assert.equal(result.classification, "INVALID_TRANSITION");
+  const terminal = createRecoveryJournal({ stateDir: root, runId: "run-terminal-append" });
+  terminal.append("TERMINAL");
+  assert.throws(() => terminal.append("PREFLIGHT"), /invalid recovery transition/);
+});
+
+test("timestamps are strict UTC and nondecreasing across append and verification", () => {
+  const root = tempRoot(); const times = [new Date("2026-01-01T00:00:00.000Z"), new Date("2025-12-31T23:59:59.999Z")];
+  const journal = createRecoveryJournal({ stateDir: root, runId: "run-clock-order", now: () => times.shift() || new Date("2026-01-01T00:00:00.000Z") });
+  assert.throws(() => journal.append("PREFLIGHT"), /timestamp moved backwards/);
+  const event = journal.readEvents()[0];
+  assert.throws(() => validateRecoveryEvent({ ...event, timestamp: "2026-02-31T00:00:00.000Z" }), /invalid recovery timestamp/);
+  assert.throws(() => validateRecoveryEvent({ ...event, timestamp: "2026-01-01T00:00:00+00:00" }), /invalid recovery timestamp/);
+  const ordered = createRecoveryJournal({ stateDir: root, runId: "run-clock-tamper", now: () => new Date("2026-01-01T00:00:00.000Z") });
+  ordered.append("PREFLIGHT");
+  const secondPath = path.join(root, "run-clock-tamper", "00000002.json");
+  const second = JSON.parse(fs.readFileSync(secondPath, "utf8"));
+  second.timestamp = "2025-12-31T23:59:59.999Z"; second.event_hash = rehash(second);
+  fs.writeFileSync(secondPath, `${canonical(second)}\n`);
+  assert.equal(verifyRecoveryRun(path.join(root, "run-clock-tamper"), "run-clock-tamper").classification, "TIMESTAMP_ORDER");
+});
+
+test("scanner reports unsafe, linked, empty, temp-only, and malformed entries without echoing names", (t) => {
+  const root = tempRoot();
+  fs.mkdirSync(path.join(root, "empty-run"));
+  fs.mkdirSync(path.join(root, "temp-run")); fs.writeFileSync(path.join(root, "temp-run", "owned.tmp-1"), "partial");
+  fs.mkdirSync(path.join(root, "malformed-run")); fs.writeFileSync(path.join(root, "malformed-run", "notes.txt"), "unexpected");
+  fs.writeFileSync(path.join(root, "unsafe name"), "not a run");
+  const linked = path.join(root, "linked-run");
+  try { fs.symlinkSync(path.join(root, "empty-run"), linked, process.platform === "win32" ? "junction" : "dir"); }
+  catch { t.skip("symlink creation unavailable"); return; }
+  const result = scanRecoveryState(root);
+  assert.equal(result.status, "ATTENTION");
+  assert.ok(result.runs.every((run) => run.classification === "NEEDS_ATTENTION"));
+  assert.ok(result.runs.some((run) => run.reason_code === "UNSAFE_RUN_ID"));
+  assert.ok(result.runs.some((run) => run.reason_code === "EMPTY_RUN_DIRECTORY"));
+  assert.ok(result.runs.some((run) => run.reason_code === "ONLY_TEMP_ENTRIES"));
+  assert.ok(result.runs.some((run) => run.reason_code === "NEEDS_ATTENTION" || run.reason_code === "UNEXPECTED_ENTRY"));
+  assert.equal(JSON.stringify(result).includes("unsafe name"), false);
+});
+
+test("invalid scan bounds fall back safely and finite bounds are clamped", () => {
+  const root = tempRoot(); createRecoveryJournal({ stateDir: root, runId: "run-bounds" });
+  assert.notEqual(scanRecoveryState(root, { maxRuns: Infinity }).status, "BOUNDED_SCAN");
+  assert.notEqual(scanRecoveryState(root, { maxRuns: NaN, maxEvents: "unbounded", maxBytes: -1 }).status, "BOUNDED_SCAN");
+  assert.equal(scanRecoveryState(root, { maxRuns: 0 }).status, "BOUNDED_SCAN");
 });
