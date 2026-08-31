@@ -146,7 +146,7 @@ export function validateStateRoot(stateDir, { create = false } = {}) {
       if (create) break;
       throw new Error("state directory path is unavailable");
     }
-    if (component.isSymbolicLink() || (Number.isInteger(component.nlink) && component.nlink > 1)) throw new Error("state directory path contains a link");
+    if (component.isSymbolicLink() || component.isReparsePoint?.() || (Number.isInteger(component.nlink) && component.nlink > 1)) throw new Error("state directory path contains a link");
   }
   if (create && !fs.existsSync(target)) {
     fs.mkdirSync(target, { recursive: true, mode: 0o700 });
@@ -154,15 +154,104 @@ export function validateStateRoot(stateDir, { create = false } = {}) {
   }
   let stat;
   try { stat = fs.lstatSync(target); } catch { throw new Error("state directory does not exist"); }
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) throw new Error("state directory must be a private regular directory");
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.isReparsePoint?.() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) throw new Error("state directory must be a private regular directory");
   return target;
 }
 
 function validateRunDirectory(runDir) {
   let stat;
   try { stat = fs.lstatSync(runDir); } catch { throw new Error("recovery run does not exist"); }
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) throw new Error("recovery run directory is unsafe");
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.isReparsePoint?.() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) throw new Error("recovery run directory is unsafe");
   return stat;
+}
+
+function pathComponentsArePrivate(target) {
+  let current = path.parse(target).root;
+  for (const part of target.slice(current.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    let component;
+    try { component = fs.lstatSync(current); } catch { throw new Error("recovery path is unavailable"); }
+    if (component.isSymbolicLink?.() || component.isReparsePoint?.()) throw new Error("recovery path contains a link");
+  }
+}
+
+function directoryIdentity(stat) {
+  if (!stat) return null;
+  const identity = {};
+  // Directory mtime/ctime/size change when an event is appended, so they are
+  // deliberately not identity evidence.  dev/ino are stable where Node can
+  // expose a file index. birthtime is a weaker Windows fallback, but still
+  // detects ordinary same-path directory replacement without rejecting a
+  // legitimate child creation.
+  if (Number.isFinite(stat.dev) && Number.isFinite(stat.ino) && stat.ino !== 0) {
+    identity.dev = stat.dev;
+    identity.ino = stat.ino;
+  } else if (Number.isFinite(stat.birthtimeMs)) {
+    identity.birthtimeMs = stat.birthtimeMs;
+  }
+  return identity;
+}
+
+function identityEqual(a, b) {
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a).sort(); const bKeys = Object.keys(b).sort();
+  return aKeys.length === bKeys.length && aKeys.every((key, index) => key === bKeys[index] && a[key] === b[key]);
+}
+
+function captureDirectoryAnchor(directory) {
+  const lexical = path.resolve(directory);
+  pathComponentsArePrivate(lexical);
+  const canonicalPath = fs.realpathSync.native(lexical);
+  if (canonicalPath !== lexical) throw new Error("recovery path canonicalization changed");
+  let stat = fs.lstatSync(lexical);
+  if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) throw new Error("recovery path must be a private directory");
+  let descriptorIdentity = null;
+  let fd;
+  try {
+    fd = fs.openSync(lexical, fs.constants.O_RDONLY);
+    descriptorIdentity = directoryIdentity(fs.fstatSync(fd));
+  } catch {
+    // Windows may reject opening a directory.  The lstat/realpath identity
+    // remains useful and is rechecked before and after every operation.
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore close failure */ } }
+  }
+  return { lexical, canonicalPath, identity: directoryIdentity(stat), descriptorIdentity };
+}
+
+function revalidateDirectoryAnchor(anchor, label = "recovery directory") {
+  if (!anchor) return;
+  try {
+    pathComponentsArePrivate(anchor.lexical);
+    const canonicalPath = fs.realpathSync.native(anchor.lexical);
+    if (canonicalPath !== anchor.canonicalPath) throw new Error(`${label} canonical path changed`);
+    const stat = fs.lstatSync(anchor.lexical);
+    if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) throw new Error(`${label} is redirected`);
+    if (!identityEqual(anchor.identity, directoryIdentity(stat))) throw new Error(`${label} identity changed`);
+    if (anchor.descriptorIdentity && !identityEqual(anchor.descriptorIdentity, directoryIdentity(stat))) throw new Error(`${label} descriptor identity changed`);
+  } catch (error) {
+    throw new Error(`${label} changed or is unavailable`);
+  }
+}
+
+function readDirectoryBounded(directory, limit, anchor, label) {
+  revalidateDirectoryAnchor(anchor, label);
+  let handle;
+  const entries = [];
+  let truncated = false;
+  try {
+    handle = fs.opendirSync(directory);
+    for (;;) {
+      const entry = handle.readSync();
+      if (entry === null) break;
+      if (entries.length >= limit) { truncated = true; break; }
+      entries.push(entry);
+    }
+  } finally {
+    if (handle !== undefined) { try { handle.closeSync(); } catch { /* preserve read failure */ } }
+  }
+  revalidateDirectoryAnchor(anchor, label);
+  return { entries, truncated };
 }
 
 function sameIdentity(a, b) {
@@ -197,10 +286,22 @@ function encodedEvent(event) {
   return Buffer.from(text, "utf8");
 }
 
-function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES, expectedRunId = null } = {}) {
-  const runBefore = validateRunDirectory(runDir);
-  let names;
-  try { names = fs.readdirSync(runDir, { withFileTypes: true }); } catch { return { events: [], classification: "MALFORMED", error: "run directory unreadable" }; }
+function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES, expectedRunId = null, rootAnchor = null, runAnchor = null } = {}) {
+  const lexicalRunDir = path.resolve(runDir);
+  let root = rootAnchor;
+  let run = runAnchor;
+  try {
+    root ||= captureDirectoryAnchor(path.dirname(lexicalRunDir));
+    run ||= captureDirectoryAnchor(lexicalRunDir);
+    revalidateDirectoryAnchor(root, "recovery state directory");
+    revalidateDirectoryAnchor(run, "recovery run directory");
+    validateRunDirectory(lexicalRunDir);
+  } catch { return { events: [], classification: "REPARSE_POINT", error: "recovery run directory is unsafe" }; }
+  let listing;
+  try { listing = readDirectoryBounded(lexicalRunDir, maxEvents + 1, run, "recovery run directory"); }
+  catch { return { events: [], classification: "MALFORMED", error: "run directory unreadable" }; }
+  if (listing.truncated || listing.entries.length > maxEvents) return { events: [], classification: "BOUNDED_SCAN", error: "event count exceeds bound" };
+  const names = listing.entries;
   const files = [];
   for (const entry of names) {
     // Every entry is inspected.  The scanner turns non-event names into a
@@ -209,24 +310,24 @@ function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BY
     const match = EVENT_FILE.exec(entry.name);
     if (!match) return { events: [], classification: "UNEXPECTED_ENTRY", error: "run directory contains a non-event entry" };
     if (!entry.isFile() || entry.isSymbolicLink()) return { events: [], classification: "REPARSE_POINT", error: "event entry is not a regular file" };
-    const eventPath = path.join(runDir, entry.name);
+    const eventPath = path.join(lexicalRunDir, entry.name);
     let stat;
     try { stat = fs.lstatSync(eventPath); } catch { return { events: [], classification: "TOCTOU", error: "event entry unavailable" }; }
     if (stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) return { events: [], classification: "REPARSE_POINT", error: "event file is linked" };
     files.push({ name: entry.name, seq: Number(match[1]), size: stat.size });
   }
-  let runAfter;
-  try { runAfter = fs.lstatSync(runDir); } catch { return { events: [], classification: "TOCTOU", error: "run directory changed while reading" }; }
-  if (!sameIdentity(runBefore, runAfter) || runAfter.isSymbolicLink() || (Number.isInteger(runAfter.nlink) && runAfter.nlink > 1)) return { events: [], classification: "TOCTOU", error: "run directory changed while reading" };
+  try {
+    revalidateDirectoryAnchor(root, "recovery state directory");
+    revalidateDirectoryAnchor(run, "recovery run directory");
+  } catch { return { events: [], classification: "TOCTOU", error: "run directory changed while reading" }; }
   files.sort((a, b) => a.seq - b.seq);
-  if (files.length > maxEvents) return { events: [], classification: "BOUNDED_SCAN", error: "event count exceeds bound" };
   let bytes = 0; const events = [];
   for (const file of files) {
     bytes += file.size;
     if (file.size > MAX_EVENT_BYTES || bytes > maxBytes) return { events: [], classification: "BOUNDED_SCAN", error: "event bytes exceed bound" };
     let parsed;
     try {
-      const eventPath = path.join(runDir, file.name);
+      const eventPath = path.join(lexicalRunDir, file.name);
       const before = fs.lstatSync(eventPath);
       if (!before.isFile() || before.isSymbolicLink() || (Number.isInteger(before.nlink) && before.nlink > 1)) throw new Error("event entry is not a regular file");
       parsed = JSON.parse(readFileNoFollow(eventPath, before));
@@ -248,6 +349,10 @@ function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BY
     }
     events.push(parsed);
   }
+  try {
+    revalidateDirectoryAnchor(root, "recovery state directory");
+    revalidateDirectoryAnchor(run, "recovery run directory");
+  } catch { return { events, classification: "TOCTOU", error: "run directory changed while reading", bytes }; }
   return { events, classification: "OK", bytes };
 }
 
@@ -257,28 +362,36 @@ export class RecoveryJournal {
     this.runId = validateRunId(runId);
     this.runDir = path.join(this.stateDir, this.runId);
     this.now = now;
+    this.rootAnchor = captureDirectoryAnchor(this.stateDir);
+    this.runAnchor = captureDirectoryAnchor(this.runDir);
     validateRunDirectory(this.runDir);
   }
 
   static create({ stateDir, runId = crypto.randomUUID(), now } = {}) {
     const root = validateStateRoot(stateDir, { create: true });
+    const rootAnchor = captureDirectoryAnchor(root);
     const id = validateRunId(runId);
     const runDir = path.join(root, id);
     try { fs.mkdirSync(runDir, { mode: 0o700 }); } catch (error) { if (error?.code !== "EEXIST") throw error; validateRunDirectory(runDir); }
+    revalidateDirectoryAnchor(rootAnchor, "recovery state directory");
     const journal = new RecoveryJournal(root, id, { now });
     if (journal.readEvents().length === 0) journal.append("RUN_CREATED");
     return journal;
   }
 
   readEvents() {
-    const result = readEventFiles(this.runDir, { expectedRunId: this.runId });
+    const result = readEventFiles(this.runDir, {
+      expectedRunId: this.runId, rootAnchor: this.rootAnchor, runAnchor: this.runAnchor,
+    });
     if (result.classification !== "OK") throw new Error(result.error || result.classification);
     return result.events;
   }
 
   append(state, data = {}) {
     validateState(state); validateData(data);
-    const scanned = readEventFiles(this.runDir, { expectedRunId: this.runId });
+    const scanned = readEventFiles(this.runDir, {
+      expectedRunId: this.runId, rootAnchor: this.rootAnchor, runAnchor: this.runAnchor,
+    });
     if (scanned.classification !== "OK") throw new Error(scanned.error || scanned.classification);
     const events = scanned.events;
     const previous = events.at(-1) || null;
@@ -294,12 +407,16 @@ export class RecoveryJournal {
     const filename = path.join(this.runDir, eventFilename(seq));
     let fd;
     try {
+      revalidateDirectoryAnchor(this.rootAnchor, "recovery state directory");
+      revalidateDirectoryAnchor(this.runAnchor, "recovery run directory");
       fd = fs.openSync(filename, "wx", 0o600);
       const bytes = encodedEvent(event);
       let offset = 0;
       while (offset < bytes.length) { const written = fs.writeSync(fd, bytes, offset, bytes.length - offset); if (!Number.isInteger(written) || written <= 0) throw new Error("recovery event write made no progress"); offset += written; }
       fs.fsyncSync(fd);
       fs.closeSync(fd); fd = undefined;
+      revalidateDirectoryAnchor(this.rootAnchor, "recovery state directory");
+      revalidateDirectoryAnchor(this.runAnchor, "recovery run directory");
     } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* preserve original failure */ } } }
     return event;
   }
@@ -317,13 +434,17 @@ export function verifyRecoveryRun(runDir, runId = path.basename(path.resolve(run
 export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES } = {}) {
   const root = validateStateRoot(stateDir);
   const bounds = safeScanBounds({ maxRuns, maxEvents, maxBytes });
-  let entries;
-  try { entries = fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); }
+  let rootAnchor; let listing;
+  try {
+    rootAnchor = captureDirectoryAnchor(root);
+    listing = readDirectoryBounded(root, bounds.maxRuns + 1, rootAnchor, "recovery state directory");
+  }
   catch { return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: "NEEDS_ATTENTION", run_count: 0, bytes: 0, runs: [], reason_code: "STATE_DIRECTORY_UNREADABLE" }; }
+  const entries = listing.entries.sort((a, b) => a.name.localeCompare(b.name));
   const runs = []; let bytes = 0;
-  const boundedByRuns = entries.length > bounds.maxRuns;
-  // Directory enumeration itself is bounded in the result.  We still inspect
-  // every returned Dirent and represent unsafe names by a digest only.
+  const boundedByRuns = listing.truncated || entries.length > bounds.maxRuns;
+  // `opendirSync` is consumed only through this bounded window.  We never
+  // materialize an unbounded root or run directory just to report attention.
   for (const entry of entries.slice(0, bounds.maxRuns)) {
     const name = entry.name;
     const safeId = validRunId(name);
@@ -341,16 +462,28 @@ export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MA
     if (!stat.isDirectory() || stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) {
       runs.push(attention(stat.isSymbolicLink() || stat.nlink > 1 ? "RUN_ENTRY_LINKED" : "RUN_ENTRY_NOT_DIRECTORY")); continue;
     }
-    let children;
-    try { children = fs.readdirSync(dir, { withFileTypes: true }); }
+    let runAnchor; let childListing;
+    try {
+      runAnchor = captureDirectoryAnchor(dir);
+      childListing = readDirectoryBounded(dir, bounds.maxEvents + 1, runAnchor, "recovery run directory");
+    }
     catch { runs.push(attention("RUN_DIRECTORY_UNREADABLE")); continue; }
+    const children = childListing.entries;
+    if (childListing.truncated || children.length > bounds.maxEvents) {
+      runs.push({ ...attention("BOUNDED_SCAN"), classification: "BOUNDED_SCAN" }); continue;
+    }
     if (children.length === 0) { runs.push(attention("EMPTY_RUN_DIRECTORY")); continue; }
     const nonEvents = children.filter((child) => !EVENT_FILE.test(child.name));
     if (nonEvents.length && nonEvents.every((child) => /^owned\.tmp(?:[-.]|$)/i.test(child.name) || /\.tmp(?:[-.]|$)/i.test(child.name))) {
       runs.push(attention("ONLY_TEMP_ENTRIES", { entry_count: children.length })); continue;
     }
     let result;
-    try { result = readEventFiles(dir, { maxEvents: bounds.maxEvents, maxBytes: Math.max(0, bounds.maxBytes - bytes), expectedRunId: name }); }
+    try {
+      result = readEventFiles(dir, {
+        maxEvents: bounds.maxEvents, maxBytes: Math.max(0, bounds.maxBytes - bytes), expectedRunId: name,
+        rootAnchor, runAnchor,
+      });
+    }
     catch { result = { events: [], classification: "NEEDS_ATTENTION", error: null }; }
     bytes += result.bytes || 0;
     const terminal = result.events.at(-1)?.state || null;
@@ -359,6 +492,8 @@ export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MA
     runs.push({ run_id: name, entry_digest: entryDigest, classification, reason_code: classification === "OK" || classification === "NONTERMINAL" ? null : rawClassification, event_count: result.events.length, bytes: result.bytes || 0, terminal_state: terminal, error: null });
     if (bytes >= bounds.maxBytes) break;
   }
+  try { revalidateDirectoryAnchor(rootAnchor, "recovery state directory"); }
+  catch { return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: "NEEDS_ATTENTION", run_count: entries.length, scanned_count: runs.length, bytes, runs, reason_code: "STATE_DIRECTORY_CHANGED" }; }
   const status = boundedByRuns || bytes >= bounds.maxBytes || runs.some((run) => run.classification === "BOUNDED_SCAN") ? "BOUNDED_SCAN" : runs.some((run) => run.classification !== "OK") ? "ATTENTION" : "CLEAN";
   return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status, run_count: entries.length, scanned_count: runs.length, bytes, runs };
 }

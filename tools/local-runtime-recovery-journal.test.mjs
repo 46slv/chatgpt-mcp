@@ -100,6 +100,27 @@ test("bounded startup scan stops before unbounded run/event traversal", () => {
   assert.equal(scanRecoveryState(root, { maxEvents: 0 }).runs[0].classification, "BOUNDED_SCAN");
 });
 
+test("journal anchors reject same-path root/run replacement and scans do not depend on readdirSync", () => {
+  const root = tempRoot();
+  const journal = createRecoveryJournal({ stateDir: root, runId: "run-anchor-root" });
+  const originalReaddir = fs.readdirSync;
+  fs.readdirSync = () => { throw new Error("unbounded readdir is forbidden"); };
+  try {
+    assert.equal(journal.readEvents().length, 1);
+    assert.equal(scanRecoveryState(root).status, "ATTENTION");
+  } finally { fs.readdirSync = originalReaddir; }
+
+  const priorRoot = `${root}-prior`;
+  fs.renameSync(root, priorRoot); fs.mkdirSync(root);
+  assert.throws(() => journal.append("PREFLIGHT"), /unsafe|changed|unavailable/i);
+
+  const secondRoot = tempRoot();
+  const second = createRecoveryJournal({ stateDir: secondRoot, runId: "run-anchor-run" });
+  const priorRun = `${second.runDir}-prior`;
+  fs.renameSync(second.runDir, priorRun); fs.mkdirSync(second.runDir);
+  assert.throws(() => second.append("PREFLIGHT"), /unsafe|changed|unavailable/i);
+});
+
 test("verifier rejects a valid-hash chain with an invalid transition and forbids terminal append", () => {
   const root = tempRoot(); const journal = createRecoveryJournal({ stateDir: root, runId: "run-transition-integrity" });
   journal.append("PREFLIGHT");
