@@ -234,7 +234,12 @@ function revalidateDirectoryAnchor(anchor, label = "recovery directory") {
   }
 }
 
-function readDirectoryBounded(directory, limit, anchor, label) {
+// Read at most `maxEntries` usable entries and one additional entry solely as
+// an overflow sentinel.  Keeping the sentinel out of `entries` makes the
+// caller's bound exact while still distinguishing an exact-size directory
+// from one with more data.  Do not pass maxEntries + 1 here: that would turn
+// this function's own sentinel read into an off-by-one traversal.
+function readDirectoryBounded(directory, maxEntries, anchor, label) {
   revalidateDirectoryAnchor(anchor, label);
   let handle;
   const entries = [];
@@ -244,7 +249,7 @@ function readDirectoryBounded(directory, limit, anchor, label) {
     for (;;) {
       const entry = handle.readSync();
       if (entry === null) break;
-      if (entries.length >= limit) { truncated = true; break; }
+      if (entries.length >= maxEntries) { truncated = true; break; }
       entries.push(entry);
     }
   } finally {
@@ -298,7 +303,7 @@ function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BY
     validateRunDirectory(lexicalRunDir);
   } catch { return { events: [], classification: "REPARSE_POINT", error: "recovery run directory is unsafe" }; }
   let listing;
-  try { listing = readDirectoryBounded(lexicalRunDir, maxEvents + 1, run, "recovery run directory"); }
+  try { listing = readDirectoryBounded(lexicalRunDir, maxEvents, run, "recovery run directory"); }
   catch { return { events: [], classification: "MALFORMED", error: "run directory unreadable" }; }
   if (listing.truncated || listing.entries.length > maxEvents) return { events: [], classification: "BOUNDED_SCAN", error: "event count exceeds bound" };
   const names = listing.entries;
@@ -437,7 +442,7 @@ export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MA
   let rootAnchor; let listing;
   try {
     rootAnchor = captureDirectoryAnchor(root);
-    listing = readDirectoryBounded(root, bounds.maxRuns + 1, rootAnchor, "recovery state directory");
+    listing = readDirectoryBounded(root, bounds.maxRuns, rootAnchor, "recovery state directory");
   }
   catch { return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: "NEEDS_ATTENTION", run_count: 0, bytes: 0, runs: [], reason_code: "STATE_DIRECTORY_UNREADABLE" }; }
   const entries = listing.entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -465,7 +470,7 @@ export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MA
     let runAnchor; let childListing;
     try {
       runAnchor = captureDirectoryAnchor(dir);
-      childListing = readDirectoryBounded(dir, bounds.maxEvents + 1, runAnchor, "recovery run directory");
+      childListing = readDirectoryBounded(dir, bounds.maxEvents, runAnchor, "recovery run directory");
     }
     catch { runs.push(attention("RUN_DIRECTORY_UNREADABLE")); continue; }
     const children = childListing.entries;
