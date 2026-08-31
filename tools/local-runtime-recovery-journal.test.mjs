@@ -30,6 +30,31 @@ function rehash(event) {
   return crypto.createHash("sha256").update(canonical(unsigned)).digest("hex");
 }
 
+function recordDirectoryReads(callback, { throwOnRead = () => false } = {}) {
+  const original = fs.opendirSync;
+  const opens = [];
+  fs.opendirSync = function countedOpen(directory, ...args) {
+    const handle = original.call(this, directory, ...args);
+    const record = { directory: path.resolve(directory), reads: 0, closes: 0 };
+    opens.push(record);
+    const readSync = handle.readSync.bind(handle);
+    const closeSync = handle.closeSync.bind(handle);
+    return {
+      readSync() {
+        record.reads += 1;
+        if (throwOnRead(record)) throw new Error("injected directory read failure");
+        return readSync();
+      },
+      closeSync() {
+        record.closes += 1;
+        return closeSync();
+      },
+    };
+  };
+  try { return { value: callback(), opens }; }
+  finally { fs.opendirSync = original; }
+}
+
 test("creates an immutable hash-chained lifecycle journal and rejects invalid transitions", () => {
   const root = tempRoot(); const journal = createRecoveryJournal({ stateDir: root, runId: "run-lifecycle-1" });
   assert.equal(journal.readEvents()[0].state, "RUN_CREATED");
@@ -175,4 +200,57 @@ test("invalid scan bounds fall back safely and finite bounds are clamped", () =>
   assert.notEqual(scanRecoveryState(root, { maxRuns: Infinity }).status, "BOUNDED_SCAN");
   assert.notEqual(scanRecoveryState(root, { maxRuns: NaN, maxEvents: "unbounded", maxBytes: -1 }).status, "BOUNDED_SCAN");
   assert.equal(scanRecoveryState(root, { maxRuns: 0 }).status, "BOUNDED_SCAN");
+});
+
+test("bounded root and run traversal reads only the allowed window plus one overflow sentinel", () => {
+  const root = tempRoot();
+  for (const runId of ["run-a", "run-b", "run-c"]) createRecoveryJournal({ stateDir: root, runId });
+
+  const rootZero = recordDirectoryReads(() => scanRecoveryState(root, { maxRuns: 0 }));
+  assert.equal(rootZero.value.status, "BOUNDED_SCAN");
+  assert.deepEqual(rootZero.opens.filter((open) => open.directory === path.resolve(root)).map((open) => open.reads), [1]);
+  assert.ok(rootZero.opens.every((open) => open.closes === 1));
+
+  const rootOne = recordDirectoryReads(() => scanRecoveryState(root, { maxRuns: 1 }));
+  assert.equal(rootOne.value.status, "BOUNDED_SCAN");
+  assert.deepEqual(rootOne.opens.filter((open) => open.directory === path.resolve(root)).map((open) => open.reads), [2]);
+  assert.ok(rootOne.opens.every((open) => open.closes === 1));
+
+  const eventRoot = tempRoot(); const journal = createRecoveryJournal({ stateDir: eventRoot, runId: "run-events" });
+  journal.append("PREFLIGHT"); journal.append("LEASE_ACQUIRED");
+  const runDir = path.resolve(eventRoot, "run-events");
+
+  const eventZero = recordDirectoryReads(() => scanRecoveryState(eventRoot, { maxRuns: 1, maxEvents: 0 }));
+  assert.equal(eventZero.value.runs[0].classification, "BOUNDED_SCAN");
+  assert.deepEqual(eventZero.opens.filter((open) => open.directory === runDir).map((open) => open.reads), [1]);
+  assert.ok(eventZero.opens.every((open) => open.closes === 1));
+
+  const eventOne = recordDirectoryReads(() => scanRecoveryState(eventRoot, { maxRuns: 1, maxEvents: 1 }));
+  assert.equal(eventOne.value.runs[0].classification, "BOUNDED_SCAN");
+  assert.deepEqual(eventOne.opens.filter((open) => open.directory === runDir).map((open) => open.reads), [2]);
+  assert.ok(eventOne.opens.every((open) => open.closes === 1));
+
+  const eventBoundary = recordDirectoryReads(() => scanRecoveryState(eventRoot, { maxRuns: 1, maxEvents: 3 }));
+  assert.equal(eventBoundary.value.runs[0].classification, "NONTERMINAL");
+  assert.deepEqual(eventBoundary.opens.filter((open) => open.directory === runDir).map((open) => open.reads), [4, 4]);
+  assert.ok(eventBoundary.opens.every((open) => open.closes === 1));
+});
+
+test("bounded directory handles close when root or run reads throw", () => {
+  const root = tempRoot(); const journal = createRecoveryJournal({ stateDir: root, runId: "run-read-error" });
+  const rootFailure = recordDirectoryReads(
+    () => scanRecoveryState(root),
+    { throwOnRead: (open) => open.directory === path.resolve(root) },
+  );
+  assert.equal(rootFailure.value.status, "NEEDS_ATTENTION");
+  assert.deepEqual(rootFailure.opens.filter((open) => open.directory === path.resolve(root)).map((open) => open.closes), [1]);
+
+  const runDir = path.resolve(root, journal.runId);
+  const runFailure = recordDirectoryReads(
+    () => scanRecoveryState(root),
+    { throwOnRead: (open) => open.directory === runDir },
+  );
+  assert.equal(runFailure.value.status, "ATTENTION");
+  assert.deepEqual(runFailure.opens.filter((open) => open.directory === runDir).map((open) => open.closes), [1]);
+  assert.ok(runFailure.opens.every((open) => open.closes === 1));
 });
