@@ -10,8 +10,8 @@ import crypto from "node:crypto";
  * environment values, process ids, or provider nonces.  Event files are
  * created directly through one exclusive descriptor.  A process killed while
  * writing can therefore leave a malformed final event; readers report that
- * run as malformed.  Files with an owned temporary suffix are ignored by
- * scanners so future writers may use a two-phase implementation safely.
+ * run as malformed.  Temporary and non-event entries are evidence too: the
+ * scanner reports them as NEEDS_ATTENTION rather than silently filtering them.
  */
 
 export const RECOVERY_JOURNAL_SCHEMA = "devexec.local-runtime-recovery/v1";
@@ -67,7 +67,29 @@ function validRunId(value) { return typeof value === "string" && RUN_ID.test(val
 function validDigest(value) { return typeof value === "string" && DIGEST.test(value); }
 function validateRunId(value) { if (!validRunId(value)) throw new Error("invalid recovery run id"); return value; }
 function validateState(value) { if (typeof value !== "string" || !STATE_SET.has(value)) throw new Error("invalid recovery state"); return value; }
-function validateTimestamp(value) { if (typeof value !== "string" || !TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) throw new Error("invalid recovery timestamp"); return value; }
+function validateTimestamp(value) {
+  if (typeof value !== "string" || !TIMESTAMP.test(value)) throw new Error("invalid recovery timestamp");
+  const parsed = Date.parse(value);
+  // Date.parse normalises impossible dates (for example February 31).  A
+  // round-trip through toISOString makes the wire format genuinely strict.
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw new Error("invalid recovery timestamp");
+  return value;
+}
+
+function normalizeBound(value, fallback, maximum) {
+  // Invalid caller supplied bounds must never turn a scan into an unbounded
+  // traversal.  Zero remains a useful explicit bound for tests and callers
+  // wishing to inspect only the directory envelope.
+  if (!Number.isSafeInteger(value) || value < 0) return fallback;
+  return Math.min(value, maximum);
+}
+function safeScanBounds({ maxRuns = MAX_RUNS, maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES } = {}) {
+  return {
+    maxRuns: normalizeBound(maxRuns, MAX_RUNS, MAX_RUNS),
+    maxEvents: normalizeBound(maxEvents, MAX_EVENTS, MAX_EVENTS),
+    maxBytes: normalizeBound(maxBytes, MAX_SCAN_BYTES, MAX_SCAN_BYTES),
+  };
+}
 
 function validateData(value, name = "data", depth = 0) {
   if (!isObject(value) || depth > 2) throw new Error(`${name} must be a bounded object`);
@@ -140,6 +162,32 @@ function validateRunDirectory(runDir) {
   let stat;
   try { stat = fs.lstatSync(runDir); } catch { throw new Error("recovery run does not exist"); }
   if (!stat.isDirectory() || stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) throw new Error("recovery run directory is unsafe");
+  return stat;
+}
+
+function sameIdentity(a, b) {
+  if (!a || !b) return false;
+  // dev/ino are stable on POSIX; on Windows the file index fields may be
+  // unavailable, so size/mtime/nlink still provide a fail-closed race check.
+  const identity = (key) => a[key] !== undefined && b[key] !== undefined ? a[key] === b[key] : true;
+  return identity("dev") && identity("ino") && identity("size") && identity("mtimeMs") && identity("nlink");
+}
+
+function readFileNoFollow(filePath, before) {
+  let fd;
+  try {
+    let flags = fs.constants.O_RDONLY;
+    if (fs.constants.O_NOFOLLOW) flags |= fs.constants.O_NOFOLLOW;
+    fd = fs.openSync(filePath, flags);
+    const opened = fs.fstatSync(fd);
+    if (opened.isSymbolicLink?.() || (Number.isInteger(opened.nlink) && opened.nlink > 1) || !sameIdentity(before, opened)) throw new Error("event file changed while reading");
+    const text = fs.readFileSync(fd, "utf8");
+    const after = fs.fstatSync(fd);
+    if (!sameIdentity(opened, after)) throw new Error("event file changed while reading");
+    return text;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* preserve read failure */ } }
+  }
 }
 
 function eventFilename(seq) { return `${String(seq).padStart(8, "0")}.json`; }
@@ -149,21 +197,27 @@ function encodedEvent(event) {
   return Buffer.from(text, "utf8");
 }
 
-function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES } = {}) {
-  validateRunDirectory(runDir);
+function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES, expectedRunId = null } = {}) {
+  const runBefore = validateRunDirectory(runDir);
   let names;
   try { names = fs.readdirSync(runDir, { withFileTypes: true }); } catch { return { events: [], classification: "MALFORMED", error: "run directory unreadable" }; }
   const files = [];
   for (const entry of names) {
-    // Temporary files are intentionally ignored.  Nonconforming persistent
-    // names are ignored too; event sequence gaps are detected among .json.
+    // Every entry is inspected.  The scanner turns non-event names into a
+    // NEEDS_ATTENTION result; this reader uses a stable code for the same
+    // evidence so verification never silently ignores it.
     const match = EVENT_FILE.exec(entry.name);
-    if (!match) continue;
+    if (!match) return { events: [], classification: "UNEXPECTED_ENTRY", error: "run directory contains a non-event entry" };
     if (!entry.isFile() || entry.isSymbolicLink()) return { events: [], classification: "REPARSE_POINT", error: "event entry is not a regular file" };
-    const stat = fs.lstatSync(path.join(runDir, entry.name));
+    const eventPath = path.join(runDir, entry.name);
+    let stat;
+    try { stat = fs.lstatSync(eventPath); } catch { return { events: [], classification: "TOCTOU", error: "event entry unavailable" }; }
     if (stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) return { events: [], classification: "REPARSE_POINT", error: "event file is linked" };
     files.push({ name: entry.name, seq: Number(match[1]), size: stat.size });
   }
+  let runAfter;
+  try { runAfter = fs.lstatSync(runDir); } catch { return { events: [], classification: "TOCTOU", error: "run directory changed while reading" }; }
+  if (!sameIdentity(runBefore, runAfter) || runAfter.isSymbolicLink() || (Number.isInteger(runAfter.nlink) && runAfter.nlink > 1)) return { events: [], classification: "TOCTOU", error: "run directory changed while reading" };
   files.sort((a, b) => a.seq - b.seq);
   if (files.length > maxEvents) return { events: [], classification: "BOUNDED_SCAN", error: "event count exceeds bound" };
   let bytes = 0; const events = [];
@@ -171,12 +225,27 @@ function readEventFiles(runDir, { maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BY
     bytes += file.size;
     if (file.size > MAX_EVENT_BYTES || bytes > maxBytes) return { events: [], classification: "BOUNDED_SCAN", error: "event bytes exceed bound" };
     let parsed;
-    try { parsed = JSON.parse(fs.readFileSync(path.join(runDir, file.name), "utf8")); validateRecoveryEvent(parsed); } catch (error) { return { events, classification: "MALFORMED", error: String(error?.message || error), bytes }; }
+    try {
+      const eventPath = path.join(runDir, file.name);
+      const before = fs.lstatSync(eventPath);
+      if (!before.isFile() || before.isSymbolicLink() || (Number.isInteger(before.nlink) && before.nlink > 1)) throw new Error("event entry is not a regular file");
+      parsed = JSON.parse(readFileNoFollow(eventPath, before));
+      validateRecoveryEvent(parsed);
+      if (expectedRunId !== null && parsed.run_id !== expectedRunId) throw new Error("recovery event run id mismatch");
+      const after = fs.lstatSync(eventPath);
+      if (!sameIdentity(before, after)) throw new Error("event file changed while reading");
+    } catch (error) { return { events, classification: "MALFORMED", error: String(error?.message || error), bytes }; }
     if (parsed.seq !== file.seq) return { events, classification: "HASH_GAP", error: "event filename sequence mismatch", bytes };
     const expected = events.length + 1;
     if (parsed.seq !== expected) return { events, classification: "HASH_GAP", error: `event sequence gap at ${expected}`, bytes };
     if (events.length && parsed.previous_hash !== events.at(-1).event_hash) return { events, classification: "HASH_GAP", error: "previous hash does not match", bytes };
     if (!events.length && parsed.previous_hash !== null) return { events, classification: "HASH_GAP", error: "first event has previous hash", bytes };
+    if (!events.length && parsed.state !== "RUN_CREATED") return { events, classification: "INVALID_TRANSITION", error: "recovery journal must start at RUN_CREATED", bytes };
+    if (events.length) {
+      const previous = events.at(-1);
+      if (!TRANSITIONS[previous.state]?.has(parsed.state)) return { events, classification: "INVALID_TRANSITION", error: "invalid recovery transition", bytes };
+      if (Date.parse(parsed.timestamp) < Date.parse(previous.timestamp)) return { events, classification: "TIMESTAMP_ORDER", error: "recovery event timestamp moved backwards", bytes };
+    }
     events.push(parsed);
   }
   return { events, classification: "OK", bytes };
@@ -202,21 +271,25 @@ export class RecoveryJournal {
   }
 
   readEvents() {
-    const result = readEventFiles(this.runDir);
+    const result = readEventFiles(this.runDir, { expectedRunId: this.runId });
     if (result.classification !== "OK") throw new Error(result.error || result.classification);
     return result.events;
   }
 
   append(state, data = {}) {
     validateState(state); validateData(data);
-    const scanned = readEventFiles(this.runDir);
+    const scanned = readEventFiles(this.runDir, { expectedRunId: this.runId });
     if (scanned.classification !== "OK") throw new Error(scanned.error || scanned.classification);
     const events = scanned.events;
     const previous = events.at(-1) || null;
     if (previous && !TRANSITIONS[previous.state].has(state)) throw new Error(`invalid recovery transition ${previous.state}->${state}`);
     if (!previous && state !== "RUN_CREATED") throw new Error("recovery journal must start at RUN_CREATED");
     const seq = events.length + 1;
-    const event = { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, run_id: this.runId, seq, state, timestamp: this.now().toISOString(), previous_hash: previous?.event_hash || null, data: { ...data } };
+    let timestamp;
+    try { timestamp = this.now().toISOString(); } catch { throw new Error("invalid recovery timestamp"); }
+    validateTimestamp(timestamp);
+    if (previous && Date.parse(timestamp) < Date.parse(previous.timestamp)) throw new Error("recovery event timestamp moved backwards");
+    const event = { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, run_id: this.runId, seq, state, timestamp, previous_hash: previous?.event_hash || null, data: { ...data } };
     event.event_hash = hash(event);
     const filename = path.join(this.runDir, eventFilename(seq));
     let fd;
@@ -237,26 +310,57 @@ export class RecoveryJournal {
 export function createRecoveryJournal(options) { return RecoveryJournal.create(options); }
 
 export function verifyRecoveryRun(runDir, runId = path.basename(path.resolve(runDir))) {
-  try { validateRunId(runId); const result = readEventFiles(path.resolve(runDir)); const events = result.events; const terminal = events.at(-1)?.state || null; const nonterminal = result.classification === "OK" && events.length > 0 && !TERMINAL_STATES.has(terminal); return { valid: result.classification === "OK" && !nonterminal, classification: nonterminal ? "NONTERMINAL" : result.classification, run_id: runId, event_count: events.length, bytes: result.bytes || 0, terminal_state: terminal, events }; }
+  try { validateRunId(runId); const result = readEventFiles(path.resolve(runDir), { expectedRunId: runId }); const events = result.events; const terminal = events.at(-1)?.state || null; const nonterminal = result.classification === "OK" && events.length > 0 && !TERMINAL_STATES.has(terminal); return { valid: result.classification === "OK" && !nonterminal, classification: nonterminal ? "NONTERMINAL" : result.classification, run_id: runId, event_count: events.length, bytes: result.bytes || 0, terminal_state: terminal, events }; }
   catch (error) { return { valid: false, classification: "REPARSE_POINT", run_id: runId, event_count: 0, bytes: 0, terminal_state: null, error: String(error?.message || error), events: [] }; }
 }
 
 export function scanRecoveryState(stateDir, { maxRuns = MAX_RUNS, maxEvents = MAX_EVENTS, maxBytes = MAX_SCAN_BYTES } = {}) {
   const root = validateStateRoot(stateDir);
-  const entries = fs.readdirSync(root, { withFileTypes: true });
-  const candidates = entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && validRunId(entry.name)).sort((a, b) => a.name.localeCompare(b.name));
+  const bounds = safeScanBounds({ maxRuns, maxEvents, maxBytes });
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); }
+  catch { return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: "NEEDS_ATTENTION", run_count: 0, bytes: 0, runs: [], reason_code: "STATE_DIRECTORY_UNREADABLE" }; }
   const runs = []; let bytes = 0;
-  if (candidates.length > maxRuns) return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: "BOUNDED_SCAN", run_count: candidates.length, runs: [] };
-  for (const entry of candidates) {
-    const dir = path.join(root, entry.name); let result;
-    try { result = readEventFiles(dir, { maxEvents, maxBytes: Math.max(0, maxBytes - bytes) }); } catch (error) { result = { events: [], classification: "REPARSE_POINT", error: String(error?.message || error) }; }
+  const boundedByRuns = entries.length > bounds.maxRuns;
+  // Directory enumeration itself is bounded in the result.  We still inspect
+  // every returned Dirent and represent unsafe names by a digest only.
+  for (const entry of entries.slice(0, bounds.maxRuns)) {
+    const name = entry.name;
+    const safeId = validRunId(name);
+    const entryDigest = hash(name);
+    const attention = (reason_code, extra = {}) => ({
+      ...(safeId ? { run_id: name } : {}), entry_digest: entryDigest,
+      classification: "NEEDS_ATTENTION", reason_code, event_count: 0,
+      bytes: 0, terminal_state: null, error: null, ...extra,
+    });
+    if (!safeId) { runs.push(attention("UNSAFE_RUN_ID")); continue; }
+    const dir = path.join(root, name);
+    let stat;
+    try { stat = fs.lstatSync(dir); }
+    catch { runs.push(attention("RUN_ENTRY_UNAVAILABLE")); continue; }
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (Number.isInteger(stat.nlink) && stat.nlink > 1)) {
+      runs.push(attention(stat.isSymbolicLink() || stat.nlink > 1 ? "RUN_ENTRY_LINKED" : "RUN_ENTRY_NOT_DIRECTORY")); continue;
+    }
+    let children;
+    try { children = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { runs.push(attention("RUN_DIRECTORY_UNREADABLE")); continue; }
+    if (children.length === 0) { runs.push(attention("EMPTY_RUN_DIRECTORY")); continue; }
+    const nonEvents = children.filter((child) => !EVENT_FILE.test(child.name));
+    if (nonEvents.length && nonEvents.every((child) => /^owned\.tmp(?:[-.]|$)/i.test(child.name) || /\.tmp(?:[-.]|$)/i.test(child.name))) {
+      runs.push(attention("ONLY_TEMP_ENTRIES", { entry_count: children.length })); continue;
+    }
+    let result;
+    try { result = readEventFiles(dir, { maxEvents: bounds.maxEvents, maxBytes: Math.max(0, bounds.maxBytes - bytes), expectedRunId: name }); }
+    catch { result = { events: [], classification: "NEEDS_ATTENTION", error: null }; }
     bytes += result.bytes || 0;
     const terminal = result.events.at(-1)?.state || null;
-    const classification = result.classification === "OK" && result.events.length > 0 && !TERMINAL_STATES.has(terminal) ? "NONTERMINAL" : result.classification;
-    runs.push({ run_id: entry.name, classification, event_count: result.events.length, bytes: result.bytes || 0, terminal_state: terminal, error: result.error || null });
-    if (bytes > maxBytes) break;
+    const rawClassification = result.classification === "OK" && result.events.length > 0 && !TERMINAL_STATES.has(terminal) ? "NONTERMINAL" : result.classification === "OK" && result.events.length === 0 ? "NEEDS_ATTENTION" : result.classification;
+    const classification = rawClassification === "OK" || rawClassification === "NONTERMINAL" || rawClassification === "BOUNDED_SCAN" ? rawClassification : "NEEDS_ATTENTION";
+    runs.push({ run_id: name, entry_digest: entryDigest, classification, reason_code: classification === "OK" || classification === "NONTERMINAL" ? null : rawClassification, event_count: result.events.length, bytes: result.bytes || 0, terminal_state: terminal, error: null });
+    if (bytes >= bounds.maxBytes) break;
   }
-  return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status: runs.some((run) => run.classification !== "OK") ? "ATTENTION" : "CLEAN", run_count: runs.length, bytes, runs };
+  const status = boundedByRuns || bytes >= bounds.maxBytes || runs.some((run) => run.classification === "BOUNDED_SCAN") ? "BOUNDED_SCAN" : runs.some((run) => run.classification !== "OK") ? "ATTENTION" : "CLEAN";
+  return { schema: RECOVERY_JOURNAL_SCHEMA, version: RECOVERY_JOURNAL_VERSION, status, run_count: entries.length, scanned_count: runs.length, bytes, runs };
 }
 
 export function recoveryStateTransitions() { return Object.fromEntries(Object.entries(TRANSITIONS).map(([state, next]) => [state, [...next]])); }
