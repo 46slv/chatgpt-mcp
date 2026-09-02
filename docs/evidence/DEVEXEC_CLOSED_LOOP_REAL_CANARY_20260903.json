@@ -53,7 +53,7 @@
     "all_queue_thread_ids_equal_bound_thread": true,
     "stop_round_queued": false,
     "automatic_resend": false,
-   "tracked_evidence_contains_raw_prompt_bytes": false,
+    "tracked_evidence_contains_raw_prompt_bytes": false,
     "canary_task_kind": "real repository development maintenance task, not acknowledgement probe"
   },
   "tests": {
