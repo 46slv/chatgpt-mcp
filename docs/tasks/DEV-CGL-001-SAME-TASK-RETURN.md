@@ -5,6 +5,7 @@ This task supersedes the older `docs/tasks/DEV-CGL-001.md` for continuation sema
 Read first:
 
 - `docs/DEVEXEC_TASK_BOUND_CHAT_TARGET.md`
+- `docs/DEVEXEC_CONCURRENT_RELAY_SAFETY.md`
 - `tools/devexec-task-chat-binding.mjs`
 - `tools/devexec-task-chat-binding.test.mjs`
 - current upstream Codex session continuation behavior before coding
@@ -13,7 +14,7 @@ Read first:
 
 Implement the smallest deterministic seam that lets Dev Exec return a ChatGPT-produced prompt to the exact original Codex session/task instead of launching a new Codex task.
 
-This slice does not wire the full ChatGPT relay yet. It proves and guards same-task continuation identity.
+The contract must remain correct when multiple Codex tasks are active concurrently. This slice does not wire the full ChatGPT relay yet; it proves and guards same-task continuation identity, task-scoped dedupe, and non-cross-routing under concurrent callers.
 
 ## Required semantics
 
@@ -74,6 +75,18 @@ Rules:
 - same identity + different payload: hard conflict
 - process/delivery ambiguity after injection begins: fail closed; no blind re-injection
 
+## Concurrent Codex requirement
+
+The seam must not rely on a process-global current task/current thread or one mutable singleton continuation target.
+
+- Task A/thread A and Task B/thread B are independently bound and may be processed concurrently.
+- A return request carries enough immutable identity to select exactly one continuation binding without consulting `--last`, current session, arrival order, or another task's state.
+- Dedupe/reservation state is keyed by task/binding/return identity, not one global `IN_FLIGHT` flag.
+- simultaneous callers for different thread bindings must not block or overwrite each other solely because they are concurrent.
+- simultaneous duplicate callers for the same return identity must result in at most one external injection; the other attempt is idempotent/busy/fail-closed as appropriate.
+- Task A's prompt can never be accepted against Task B's binding, even if both tasks share a repo or ChatGPT conversation.
+- Do not implement the ChatGPT conversation send queue in this slice; that belongs to the later Full Relay slice and is specified in `docs/DEVEXEC_CONCURRENT_RELAY_SAFETY.md`.
+
 ## Tests
 
 Prove at least:
@@ -88,6 +101,9 @@ Prove at least:
 8. A simulated continuation adapter returning a new/different thread ID is rejected.
 9. Exact expected thread ID is accepted.
 10. Binding/return hashes are deterministic.
+11. Concurrent Task A/thread A and Task B/thread B return attempts preserve independent identities and target the correct threads.
+12. Two simultaneous attempts for one return identity cannot both acquire/produce an external injection.
+13. Concurrency tests do not depend on arrival order to associate prompt -> task/thread.
 
 If a real local Codex probe is practical and non-destructive, add only a bounded probe that demonstrates the installed CLI's same-thread behavior. Do not require a real code mutation for the acceptance of this slice.
 
@@ -96,6 +112,7 @@ If a real local Codex probe is practical and non-destructive, add only a bounded
 - do not start a new Codex session as the normal return path
 - do not use `--last` for unattended routing
 - do not use ephemeral sessions if they cannot be proven resumable
+- do not use a process-global current task/current thread as routing authority
 - do not modify the dirty `probe/windows-local` checkout
 - continue in the dedicated clean worktree for this branch
 - do not hardcode or commit the user's raw ChatGPT conversation URL; that remains runtime task-bound state
@@ -106,10 +123,11 @@ If a real local Codex probe is practical and non-destructive, add only a bounded
 ## Done when
 
 - same-task Codex continuation binding/validation seam exists
+- task-scoped concurrent return attempts cannot cross-route or double-inject
 - focused new tests pass
 - `npm run build` passes
 - relevant existing Dev Exec tests pass
 - no duplicate/new-session behavior can be accepted as same-task continuation
-- final report includes exact branch/HEAD, changed files, tests, whether local installed Codex supports queue/resume, and the concrete next blocker
+- final report includes exact branch/HEAD, changed files, tests, whether local installed Codex supports queue/resume, concurrency findings, and the concrete next blocker
 
 Stop after this slice. Do not implement the full ChatGPT transport/Local Relay yet.
