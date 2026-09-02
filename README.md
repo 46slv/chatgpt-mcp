@@ -1,159 +1,214 @@
-# chatgpt-mcp
+# chatgpt-mcp / Dev Exec
 
-MCP server that gives ChatGPT's web UI the same `ask(prompt) → response` interface as CLI-based AI tools (Codex, Gemini CLI, etc.). Built with Playwright for browser automation.
+`chatgpt-mcp` provides a blocking MCP bridge to the ChatGPT web UI and is also the Windows-side home of **Dev Exec**, the control plane used to connect ChatGPT, Codex, and bounded local-model execution.
 
-## Why this exists
+The ChatGPT bridge uses Playwright/Chromium and exposes an `ask/reply -> response` style interface. Dev Exec adds task identity, target/runtime binding, leases, recovery, local execution, and supervised Codex orchestration on top of that transport.
 
-This is part of a multi-model orchestration setup where Claude Code acts as the top-level AI orchestrator, dispatching tasks to the best model for the job:
+## Major Dev Exec capability: Closed Goal Loop
 
-- **Codex** (OpenAI) — available via CLI (`codex mcp-server`)
-- **Gemini** — available via CLI (`gemini-mcp-tool`)
-- **Claude** — the orchestrator itself
-- **GPT-5.2 Pro** — only available through ChatGPT's web UI (not API on subscription plans)
+Dev Exec can now run a bounded multi-round supervision loop on one exact persisted Codex thread:
 
-GPT-5.2 Pro is the most powerful model available for many tasks but lacks a CLI/API interface. This MCP server bridges that gap by automating the ChatGPT web UI via Playwright, giving it the same ergonomic blocking `ask → response` pattern as the other models.
+```text
+Codex turn completes
+  -> parent-owned completion/status report
+  -> Local Model RELAY (hash-only)
+  -> exact task-bound ChatGPT conversation
+  -> ChatGPT: CONTINUE / STOP / NEEDS_HUMAN
+  -> Local Model RELAY (hash-only)
+  -> exact bound native Codex runtime
+  -> queue to the exact same Codex thread
+  -> observe exact resulting turn
+  -> repeat within configured bounds
+```
 
-### Use cases
-- Dispatching complex reasoning tasks to GPT-5.2 Pro from Claude Code
-- AI round-table discussions where Claude Code facilitates debate between all models
-- File analysis by uploading documents to ChatGPT
-- Project-scoped conversations using ChatGPT's Projects feature
+The real CGL-005 verification completed **3 consecutive CONTINUE round-trips on one persisted Codex thread and then a clean STOP**. The loop is bounded and fail-closed; it is not an infinite daemon.
+
+Important properties:
+
+- ChatGPT destination is frozen per task as an exact URL + conversation id. No unattended fallback to `current-chat`, registry default, project config, browser focus, or legacy routing.
+- Codex continuation is frozen to one exact persisted thread UUID.
+- Codex runtime is frozen to an absolute executable path plus version/capability/fingerprint evidence.
+- Normal continuation requires the bound native runtime's `queue` capability. No `--last`, fuzzy session name, PATH/npm/PowerShell fallback, or automatic resume fallback.
+- The Local Model has a separate **RELAY** mode. It authorizes hashes only and cannot rewrite the report/prompt or choose targets, threads, executables, or commands.
+- ChatGPT replies are accepted only with exact mission/task/request/report-hash correlation.
+- Multiple Codex tasks can run concurrently. The same ChatGPT conversation is cross-process single-flight; different conversations may progress concurrently.
+- Ambiguous ChatGPT sends or Codex injections are not blindly retried.
+- `STOP`, `NEEDS_HUMAN`, configured limits, runtime drift, and unprovable causality terminate the loop safely.
+
+See **[`docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md)** for the current architecture, prerequisites, operating procedure, API shape, multi-Codex behavior, and safety rules.
+
+Current implementation modules:
+
+- `tools/devexec-task-chat-binding.mjs`
+- `tools/devexec-codex-runtime-binding.mjs`
+- `tools/devexec-codex-continuation.mjs`
+- `tools/devexec-full-relay.mjs`
+- `tools/devexec-closed-loop.mjs`
+
+The multi-round controller currently exists as an API/harness seam; a first-class `devexec closed-loop ...` CLI is a follow-up operationalization task. Do not route this feature through the older mutable-target fallback path just for convenience.
+
+## ChatGPT MCP tools
+
+| Tool | Description |
+| --- | --- |
+| `chatgpt_ask` | Send a prompt, optionally switch model/project, wait for completion, return response |
+| `chatgpt_reply` | Follow up in a conversation; Dev Exec can target an exact prepared conversation using `target_url` + `expected_conversation_id` |
+| `chatgpt_upload` | Upload files with an optional prompt and wait for response |
+| `chatgpt_select_project` | Navigate to a ChatGPT Project by name |
+| `chatgpt_new_chat` | Start a fresh conversation |
+
+All tools are blocking: the MCP call returns when ChatGPT has completed or the bounded timeout is reached.
 
 ## Architecture
 
+```text
+                         ChatGPT Web
+                             ^
+                             | exact chatgpt_reply target
+                             |
+                    +------------------+
+                    |  Dev Exec Parent |
+                    | state / bindings |
+                    | leases / recovery|
+                    +---------+--------+
+                              |
+                +-------------+-------------+
+                |                           |
+        Closed Goal Loop              Local runtime
+                |                           |
+     persisted Codex thread       LM Studio / FreeToken
+                |                 bounded typed harness
+        native Codex runtime
+
+ChatGPT web transport:
+Dev Exec / MCP client -> chatgpt-mcp -> Playwright -> persistent Chromium -> chatgpt.com
 ```
-Claude Code (orchestrator)
-    ├── Codex CLI    → mcp-server (stdio)
-    ├── Gemini CLI   → mcp-tool (stdio)
-    ├── Claude       → native
-    └── ChatGPT      → chatgpt-mcp (this project)
-                         └── Playwright → Chromium → chatgpt.com
 
-DevExec autonomous consultation (explicit opt-in only)
-    Codex goal → local planner → fixed `chatgpt_reply` target → untrusted evidence → planner/typed LocalExecutor
+Dev Exec remains the routing/control authority. Models produce bounded outputs and evidence; they do not become peer control planes.
+
+## Dev Exec target handling
+
+Manual/interactive target registry operations are still available:
+
+```powershell
+node tools/devexec.mjs target set <alias> <chatgpt-conversation-url>
+node tools/devexec.mjs target use <alias>
+node tools/devexec.mjs target current
 ```
 
-The server launches a persistent Chromium browser on first use, maintains login cookies across sessions, and uses multi-strategy DOM scraping to extract responses reliably despite ChatGPT's frequently-changing UI.
+For an admitted autonomous Closed Goal Loop, however, the registry alias is only an admission input/provenance source. The parent creates an immutable task binding from the exact URL. Changing the alias/default later must not reroute the active task.
 
-## Tools
+The exact user conversation URL should remain runtime state and should not be committed to Git.
 
-| Tool | Description |
-|------|-------------|
-| `chatgpt_ask` | Send prompt, optionally switch model/project, poll until complete, return response |
-| `chatgpt_reply` | Follow-up in current conversation; optionally target an exact prepared conversation with `target_url` + `expected_conversation_id` |
-| `chatgpt_upload` | Upload files + optional prompt, poll for response |
-| `chatgpt_select_project` | Navigate to a ChatGPT Project by name |
-| `chatgpt_new_chat` | Start fresh conversation (stays in project if set) |
+## Existing Dev Exec commands
 
-All tools are **blocking** — they return only when the response is ready (or timeout). This matches the ergonomics of Codex and Gemini MCPs.
+```text
+devexec target ...
+devexec goal <goal> [--target <alias>]
+devexec agent start|resume|status ...
+devexec runtime select ...
+devexec runtime run ...
+devexec runtime metrics ...
+devexec runtime recovery ...
+devexec run [--target <alias>]
+devexec continue <run-id> [--target <alias>]
+devexec recover inspect|reconcile|verify-journal ...
+```
 
-DevExec's local worker can optionally ask one fixed ChatGPT conversation for bounded ordinary-text guidance. Set `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS=<alias>` in the invoking process; the default is disabled. Optional `DEV_EXEC_CHATGPT_CONSULT_MAX_REQUESTS`, `DEV_EXEC_CHATGPT_CONSULT_MAX_CHARS`, `DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS`, and `DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES` controls are clamped to safe bounds (malformed values deny the opt-in). The local model can emit only the strict `{type:"REQUEST_CONSULTATION",prompt:string}` decision. Target, transport (`chatgpt_reply`), request ID, budgets, timeout, and durable state are runner-owned. Sensitive, destructive, account, permission, file, credential, personal-data, or unknown requests are blocked. Responses are untrusted bounded evidence and never become shell authority.
+The legacy/general `devexec run` path and the Closed Goal Loop are related but not interchangeable: the latter has stricter task-bound ChatGPT, Codex-thread, and runtime identities.
 
-### Explicit local runtime selector
+## Local runtime
 
-The existing Cloud/LM Studio path remains the default. A local provider is never
-selected automatically; opt in explicitly and inspect the selection first:
+Cloud/established paths remain available. A local provider is selected explicitly; it is not silently chosen:
 
 ```powershell
 node tools/devexec.mjs runtime select --runtime local --provider freetoken --enabled
 ```
 
-Only bounded task contracts (goal, repository-relative allowed paths, exact
-repo/worktree and base commit, and an argv-style test command) may be dispatched
-through the local selector. Architecture, authority, integration, multi-repo,
-destructive, and final-audit classifications are blocked. FreeToken lifecycle
-start/stop remains owned by its adapter, while the parent runtime recomputes
-Git changes and test evidence before accepting a result. Omit the flags (or use
-`--disabled`) to retain the established path.
-
-The public task entrypoint is explicit and contract-first. `--task` points to a
-version-1 `TaskContract` JSON file; the file is size-bounded and unknown fields
-are rejected before any provider is constructed. Results are a bounded,
-redacted `ResultContract` on stdout. Use `--evidence <path>` (or `--log`) to
-atomically save the same result plus a structured, redacted evidence record;
-when omitted, the record is written under the user AppData directory rather
-than this checkout. A test-only `--adapter-module` seam permits deterministic
-fake providers without changing runtime routing:
+A local coding task is contract-first:
 
 ```powershell
 node tools/devexec.mjs runtime run --task .\task-contract.json `
-  --runtime local --provider freetoken --evidence "$env:TEMP\devexec-evidence.json"
+  --runtime local --provider freetoken `
+  --evidence "$env:TEMP\devexec-evidence.json"
 ```
 
-Local execution is never entered when the runtime/provider flags are omitted or
-disabled. Exit status is `0` for `DONE`, `1` for `FAILED`, `2` for blocked or
-invalid input, and `130` for cancellation.
+Local mutation is restricted by the TaskContract. The parent recomputes Git changes and test evidence before accepting a result. Provider/device/port leases, recovery journals, and bounded evidence prevent local-model execution from becoming an uncontrolled side channel.
 
-The FreeToken adapter uses a provider-neutral minimal harness loop for local
-coding tasks. OpenAI-compatible tool calls are bounded by the task's timeout,
-call, history, search, and output limits. The typed tools are `read`, `search`,
-`apply_patch`, `run_test`, and `git_diff`; writes are restricted to `allowed_paths`,
-and duplicate tool failures stop the run. The parent then revalidates the Git
-root/base commit, recomputes changed paths, and runs the fixed regression
-command. This loop is constructed only for the explicit
-`runtime=local,provider=freetoken` selection; Cloud and existing LM Studio
-adapters are unchanged.
+The local autonomous **AGENT** mode is distinct from Closed Goal Loop **RELAY** mode. Do not merge their authority: RELAY is transport authorization only; AGENT may perform only explicitly granted bounded local actions.
 
-### Reusable handoff for autonomous consultation
+## Bounded ChatGPT consultation
 
-For another Codex task, register the user-prepared ChatGPT URL first, then freeze
-that alias for the run. Both direct conversation URLs
-(`https://chatgpt.com/c/<safe-id>`) and project/custom-GPT-scoped URLs
-(`https://chatgpt.com/g/<safe-slug>/c/<safe-id>`) are accepted; the complete URL
-is preserved for navigation and the final segment is used as the conversation
-identity. Enable standing ordinary-text consultation explicitly;
-the local planner cannot choose a URL, tool, alias, or request ID. The adapter
-passes the frozen `target_url` and derived
-`expected_conversation_id` to `chatgpt_reply`, which navigates only to that
-exact canonical URL and verifies the returned `chat_id`. Ask the user back when
-intent is uncertain. Do not resend an ambiguous request. Secrets, credentials,
-personal data, uploads or paths, permission/account/billing requests, and
-destructive or out-of-scope instructions remain hard stops.
+The local worker can separately request bounded ordinary-text consultation from one frozen ChatGPT target when explicitly enabled:
+
+```text
+DEV_EXEC_CHATGPT_CONSULT_ENABLED=1
+DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS=<alias>
+```
+
+Optional request/character/evidence/timeout limits are bounded. Sensitive, destructive, credential, account, permission, upload/path, personal-data, and unknown consultation requests are blocked. ChatGPT consultation responses are untrusted evidence, not shell authority.
+
+This consultation path is not the same as Closed Goal Loop RELAY.
 
 ## Setup
 
 ```bash
-# Install dependencies
 npm install
-
-# Install Playwright's Chromium
 npx playwright install chromium
-
-# Build
 npm run build
 ```
 
-### Claude Code config
+### MCP client configuration
 
-Add to `~/.claude.json` under `mcpServers`:
+Configure an MCP client to start the built server over stdio, for example:
 
 ```json
-"chatgpt": {
-  "type": "stdio",
-  "command": "node",
-  "args": ["/path/to/chatgpt-mcp/dist/index.js"]
+{
+  "mcpServers": {
+    "chatgpt": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/chatgpt-mcp/dist/index.js"]
+    }
+  }
 }
 ```
 
-### First use
+### First browser use
 
-On first `chatgpt_ask` call, a Chromium window opens at chatgpt.com. Log in manually once — cookies are persisted to `~/.chatgpt-mcp/user-data/state.json` for future sessions.
+On the first ChatGPT call, Chromium opens at `chatgpt.com`. Complete login manually once. Browser state is persisted for subsequent sessions.
 
-## Key design decisions
+## Development / verification
 
-| Decision | Choice | Why |
-|----------|--------|-----|
-| Browser engine | Playwright (Chromium) | Full DOM access, self-healing selectors, file upload support |
-| Tool count | 5 | Orchestrator only needs ask/reply/upload/project/newchat |
-| Session start | Auto on first call | No separate start_session step needed |
-| Blocking by default | Yes | Matches Codex/Gemini ergonomics |
-| Default timeout | 60 minutes | GPT-5.2 Pro can think 20+ minutes |
-| Completion detection | Multi-indicator + content stability | Most robust: checks stop button, streaming flag, regen/copy buttons, send-enabled state, and 3 consecutive stable content checks |
-| Response extraction | 5-strategy cascade | Handles ChatGPT UI changes: markdown containers → assistant role → articles → conversation turns → fallback |
-| Polling | Fibonacci backoff | 2s, 3s, 5s, 8s, 13s, 21s, 30s+ — responsive for quick answers, efficient for long ones |
+General build:
 
-## Lineage
+```bash
+npm run build
+```
 
-Merges the best of two prototypes:
-- **gpt-bridge** — battle-tested response extraction, model selection, project management via Playwright
-- **chatgpt-desktop-mcp** — blocking `ask` tool with Fibonacci backoff (was AppleScript-based, fragile)
+Dev Exec regression suite:
+
+```bash
+npm run test:devexec
+```
+
+For changes touching task binding, continuation, runtime binding, Full Relay, or the multi-round loop, also run the relevant focused tests and:
+
+```bash
+git diff --check
+```
+
+Changes to external send/queue semantics should be considered operationally proven only after a bounded real canary. Never weaken correlation or replay safety simply to make a canary pass.
+
+## Closed-loop design references
+
+- [`docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md) — current operational guide
+- [`docs/DEVEXEC_TASK_BOUND_CHAT_TARGET.md`](docs/DEVEXEC_TASK_BOUND_CHAT_TARGET.md) — immutable ChatGPT target authority
+- [`docs/DEVEXEC_CONCURRENT_RELAY_SAFETY.md`](docs/DEVEXEC_CONCURRENT_RELAY_SAFETY.md) — multi-Codex/conversation concurrency rules
+- [`docs/tasks/DEV-CGL-003-FULL-RELAY.md`](docs/tasks/DEV-CGL-003-FULL-RELAY.md) — one-round Full Relay acceptance contract
+- [`docs/tasks/DEV-CGL-004-REAL-E2E-PROBE.md`](docs/tasks/DEV-CGL-004-REAL-E2E-PROBE.md) — first real E2E proof
+- [`docs/tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md`](docs/tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md) — bounded multi-round acceptance contract
+
+## Background
+
+The original project began as a browser bridge that gave web-only ChatGPT capabilities the same blocking `ask -> response` ergonomics as CLI models. Dev Exec grew around that bridge into a local control plane for supervised coding, bounded local inference, recovery, evidence, and task-safe model orchestration.
