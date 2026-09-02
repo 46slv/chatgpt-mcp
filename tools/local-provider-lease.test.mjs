@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProviderLeaseManager, providerLeaseKeyDigest, validateProviderLease, PROVIDER_LEASE_SCHEMA } from "./local-provider-lease.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const releaseHelper = path.join(here, "devexec-local-provider-lease-release.ps1");
 function root() { return fs.mkdtempSync(path.join(os.tmpdir(), "devexec-provider-lease-")); }
 function probe({ live = "LIVE", pid = 1234, time = "134000000000000000", host = "a".repeat(64) } = {}) {
   const owner = { pid, process_start_time: time, host_instance_digest: host };
@@ -20,7 +21,9 @@ test("exclusive acquire/release uses an opaque in-memory nonce and exact schema"
   const p = probe(); const manager = createProviderLeaseManager({ stateDir: root(), livenessProbe: p }); const acquired = manager.acquire(input());
   assert.equal(acquired.status, "ACQUIRED"); assert.equal(Object.keys(acquired.lease).join(","), "status,key_digest");
   const stored = JSON.parse(fs.readFileSync(fileFor(manager), "utf8")); assert.equal(stored.schema, PROVIDER_LEASE_SCHEMA); assert.equal(validateProviderLease(stored), stored);
-  assert.equal(manager.release(acquired.lease).status, "RELEASED"); assert.equal(fs.existsSync(fileFor(manager)), false);
+  const released = manager.release(acquired.lease);
+  if (process.platform === "win32") { assert.equal(released.status, "RELEASED"); assert.equal(fs.existsSync(fileFor(manager)), false); }
+  else { assert.equal(released.status, "NEEDS_ATTENTION"); assert.equal(fs.existsSync(fileFor(manager)), true); }
 });
 
 test("same key has one winner while device and port isolate keys", async () => {
@@ -56,5 +59,26 @@ test("read-only scan is bounded and does not expose raw owner data", () => {
 test("Windows default process identity can acquire and release without touching a provider", (t) => {
   if (process.platform !== "win32") { t.skip("Windows process identity probe only"); return; }
   const manager = createProviderLeaseManager({ stateDir: root() }); const acquired = manager.acquire(input({ runId: "run-default-probe" }));
-  assert.equal(acquired.status, "ACQUIRED"); assert.equal(manager.release(acquired.lease).status, "RELEASED");
+  assert.equal(acquired.status, "ACQUIRED"); assert.equal(manager.release(acquired.lease).status, "RELEASED"); assert.equal(fs.existsSync(fileFor(manager)), false);
+});
+
+test("Windows handle-bound release never deletes a replacement swapped after open", async (t) => {
+  if (process.platform !== "win32") { t.skip("Windows handle race fixture only"); return; }
+  const p = probe(); const manager = createProviderLeaseManager({ stateDir: root(), livenessProbe: p }); const acquired = manager.acquire(input({ runId: "run-handle-race" }));
+  assert.equal(acquired.status, "ACQUIRED"); const leaseFile = fileFor(manager); const original = `${leaseFile}.original`; const ready = `${leaseFile}.ready`; const proceed = `${leaseFile}.proceed`;
+  const identity = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", releaseHelper, "-Mode", "identity", "-LeasePath", leaseFile], { encoding: "utf8", windowsHide: true, timeout: 8_000, maxBuffer: 128 });
+  assert.equal(identity.status, 0, identity.stderr); const match = /^IDENTITY ([0-9A-F]{8}) ([0-9A-F]{16})$/.exec(identity.stdout.trim()); assert.ok(match, identity.stdout);
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", releaseHelper, "-Mode", "release", "-LeasePath", leaseFile, "-ExpectedVolumeSerial", match[1], "-ExpectedFileIndex", match[2], "-TestReadyPath", ready, "-TestContinuePath", proceed], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const output = []; child.stdout.on("data", (chunk) => output.push(chunk));
+  const deadline = Date.now() + 7_000;
+  while (!fs.existsSync(ready) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(fs.existsSync(ready), true, "release helper did not reach its post-open gate");
+  fs.renameSync(leaseFile, original); fs.writeFileSync(leaseFile, "replacement\n", { mode: 0o600 }); fs.writeFileSync(proceed, "go\n", { mode: 0o600 });
+  const exit = await new Promise((resolve) => child.on("exit", resolve)); const token = Buffer.concat(output).toString("utf8").trim();
+  assert.equal(fs.readFileSync(leaseFile, "utf8"), "replacement\n");
+  assert.equal(token === "RELEASED" && fs.existsSync(leaseFile), true, "a replacement must never be deleted with RELEASED");
+  // If Windows permits the disposition after rename, the exact original is
+  // gone; otherwise the helper fails closed and the original remains parked.
+  assert.equal((token === "RELEASED" && exit === 0) || (token === "NEEDS_ATTENTION" && fs.existsSync(original)), true, `${token}/${exit}`);
+  for (const candidate of [leaseFile, original, ready, proceed]) try { fs.rmSync(candidate, { force: true }); } catch { /* fixture cleanup */ }
 });

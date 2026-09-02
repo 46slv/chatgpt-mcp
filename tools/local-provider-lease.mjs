@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 /**
  * Single-host, parent-owned lease records for a local inference provider.
@@ -22,6 +23,7 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const FILE = /^([0-9a-f]{64})\.lease\.json$/;
 const FILETIME = /^\d{1,20}$/;
 const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const WINDOWS_RELEASE_HELPER = path.join(path.dirname(fileURLToPath(import.meta.url)), "devexec-local-provider-lease-release.ps1");
 const HANDLE = new WeakMap();
 
 function isObject(value) { return !!value && typeof value === "object" && !Array.isArray(value); }
@@ -73,6 +75,20 @@ function identity(stat) {
   return { dev: stat.dev, ino: stat.ino, nlink: stat.nlink, size: stat.size, mtimeMs: stat.mtimeMs };
 }
 function sameIdentity(a, b) { return !!a && !!b && Object.keys(a).every((key) => a[key] === b[key]); }
+function windowsLeaseHelper(mode, filePath, expected = null, helperPath = WINDOWS_RELEASE_HELPER) {
+  if (process.platform !== "win32" || typeof helperPath !== "string" || !fs.existsSync(helperPath)) return null;
+  const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helperPath, "-Mode", mode, "-LeasePath", filePath];
+  if (expected) args.push("-ExpectedVolumeSerial", expected.volume, "-ExpectedFileIndex", expected.index);
+  let result;
+  try { result = spawnSync("powershell.exe", args, { encoding: "utf8", timeout: 8_000, windowsHide: true, maxBuffer: 128 }); } catch { return null; }
+  if (result?.error || result?.signal || result?.status !== 0) return null;
+  const output = String(result.stdout || "").trim();
+  if (mode === "identity") {
+    const match = /^IDENTITY ([0-9A-F]{8}) ([0-9A-F]{16})$/.exec(output);
+    return match ? Object.freeze({ volume: match[1], index: match[2] }) : null;
+  }
+  return output === "RELEASED" ? "RELEASED" : null;
+}
 function anchor(directory) {
   const lexical = privatePath(directory);
   const real = fs.realpathSync.native(lexical);
@@ -190,8 +206,15 @@ export function createProviderLeaseManager({ stateDir, livenessProbe = defaultPr
       fs.writeFileSync(fd, encoded); fs.fsyncSync(fd); const final = fs.fstatSync(fd);
       if (final.size !== encoded.length || final.nlink !== stat.nlink) throw new Error("lease write uncertainty");
       assertAnchors();
+      const fileIdentity = identity(final);
+      // Windows' stat dev/ino pair is not a durable file object identity for a
+      // later pathname operation.  Capture the kernel handle identity now and
+      // refuse to release if this private helper is unavailable or malformed.
+      const windowsIdentity = process.platform === "win32" ? windowsLeaseHelper("identity", filePath) : null;
+      if (process.platform === "win32" && !windowsIdentity) throw new Error("Windows lease identity unavailable");
+      if (!sameIdentity(fileIdentity, identity(fs.lstatSync(filePath)))) throw new Error("lease file changed during identity capture");
       const handle = Object.freeze({ status: "ACQUIRED", key_digest: request.key_digest });
-      HANDLE.set(handle, Object.freeze({ filePath, keyDigest: request.key_digest, nonce, owner: request.owner, fileIdentity: identity(final) }));
+      HANDLE.set(handle, Object.freeze({ filePath, keyDigest: request.key_digest, nonce, owner: request.owner, fileIdentity, windowsIdentity }));
       return Object.freeze({ status: "ACQUIRED", key_digest: request.key_digest, lease: handle });
     } catch (error) {
       if (error?.code !== "EEXIST") return safeResult("LEASE_NEEDS_ATTENTION", request.key_digest);
@@ -205,11 +228,26 @@ export function createProviderLeaseManager({ stateDir, livenessProbe = defaultPr
       assertAnchors(); const existing = parseExisting(privateHandle.filePath);
       if (!sameIdentity(existing.fileIdentity, privateHandle.fileIdentity) || existing.value.key_digest !== privateHandle.keyDigest || existing.value.release_nonce !== privateHandle.nonce || !ownerEqual(existing.value.owner, privateHandle.owner)) return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
       const current = livenessProbe.currentOwner(); if (!ownerEqual(current, privateHandle.owner)) return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
-      // A second identity check immediately before unlink makes any observed
-      // replacement fail closed.  Node lacks unlink-at on Windows, so a race
-      // after this point is treated as an OS-level uncertainty, never retried.
-      const beforeUnlink = fs.lstatSync(privateHandle.filePath); if (!sameIdentity(privateHandle.fileIdentity, identity(beforeUnlink))) return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
-      fs.unlinkSync(privateHandle.filePath); HANDLE.delete(handle); assertAnchors(); return safeResult("RELEASED", privateHandle.keyDigest);
+      if (process.platform === "win32") {
+        // The helper opens with FILE_FLAG_OPEN_REPARSE_POINT, obtains
+        // BY_HANDLE_FILE_INFORMATION, compares the acquisition identity, and
+        // applies FileDispositionInfo to that *same* handle.  A name swap can
+        // therefore either be rejected before open or leave its replacement
+        // intact while the original handle is deleted.
+        if (!privateHandle.windowsIdentity || windowsLeaseHelper("release", privateHandle.filePath, privateHandle.windowsIdentity) !== "RELEASED") return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
+        HANDLE.delete(handle); assertAnchors(); return safeResult("RELEASED", privateHandle.keyDigest);
+      }
+      // POSIX Node exposes open(2)+fstat(2), but not unlinkat(2) on a parent
+      // directory fd.  Pathname unlink after a fstat remains a replacement
+      // race, so this portable implementation deliberately fails closed until
+      // a handle-bound unlink primitive is available for that platform.
+      let fd;
+      try {
+        let flags = fs.constants.O_RDONLY; if (fs.constants.O_NOFOLLOW) flags |= fs.constants.O_NOFOLLOW;
+        fd = fs.openSync(privateHandle.filePath, flags);
+        if (!sameIdentity(privateHandle.fileIdentity, identity(fs.fstatSync(fd)))) return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
+        return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest);
+      } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* no leak */ } }
     } catch { return safeResult("NEEDS_ATTENTION", privateHandle.keyDigest); }
   }
   function scan({ maxEntries = MAX_LEASE_ENTRIES, maxBytes = MAX_LEASE_BYTES * MAX_LEASE_ENTRIES } = {}) {
