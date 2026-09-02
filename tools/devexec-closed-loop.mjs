@@ -53,6 +53,7 @@ export const CLOSED_LOOP_ERRORS = Object.freeze({
   OWNER_REQUIRED: "CLOSED_LOOP_OWNER_REQUIRED",
   OBSERVER_REQUIRED: "CLOSED_LOOP_OBSERVER_REQUIRED",
   OBSERVER_INVALID: "CLOSED_LOOP_OBSERVER_INVALID",
+  OBSERVER_AMBIGUOUS: "CLOSED_LOOP_OBSERVER_AMBIGUOUS",
   OBSERVER_TIMEOUT: "CLOSED_LOOP_OBSERVER_TIMEOUT",
   OBSERVER_DISCONNECTED: "CLOSED_LOOP_OBSERVER_DISCONNECTED",
   WRONG_THREAD: "CLOSED_LOOP_WRONG_THREAD",
@@ -82,6 +83,8 @@ export const CODEX_APP_SERVER_METHODS = Object.freeze({
   INITIALIZED: "initialized",
   THREAD_RESUME: "thread/resume",
   THREAD_READ: "thread/read",
+  THREAD_TURNS_LIST: "thread/turns/list",
+  THREAD_ITEMS_LIST: "thread/items/list",
   THREAD_UNSUBSCRIBE: "thread/unsubscribe",
 });
 
@@ -180,6 +183,11 @@ function boundedText(value, label, maxBytes = MAX_MESSAGE_BYTES, { required = fa
     throw new ClosedLoopError(`${label} exceeds the bounded size.`, CLOSED_LOOP_ERRORS.INVALID);
   }
   return value;
+}
+
+function nullableBoundedText(value, label, maxBytes = MAX_MESSAGE_BYTES) {
+  if (value === null || value === undefined) return null;
+  return boundedText(value, label, maxBytes, { required: true });
 }
 
 function cloneFrozen(value) {
@@ -300,9 +308,9 @@ function turnUserPrompt(turn, extraItems = []) {
   return prompts[prompts.length - 1];
 }
 
-function turnCausalIds(value) {
+function turnCausalIds(value, fallbackTurn = null) {
   const p = eventParams(value) || {};
-  const turn = turnFrom(p) || {};
+  const turn = turnFrom(p) || fallbackTurn || {};
   return {
     submission_id: p.submissionId || p.submission_id || p.queuedSubmissionId || p.queued_submission_id || turn.submissionId || turn.submission_id || null,
     codex_return_id: p.codexReturnId || p.codex_return_id || turn.codexReturnId || turn.codex_return_id || null,
@@ -316,7 +324,7 @@ function normalizeCompletedTurn({ thread_id, turn, event = null, extraItems = []
   if (status !== "completed") throw new ClosedLoopError("Only completed Codex turns may be admitted.", CLOSED_LOOP_ERRORS.TURN_NOT_COMPLETED);
   const message = boundedText(completedTurnMessage(turn, extraItems), "turn final agent message", MAX_MESSAGE_BYTES, { required: true });
   const prompt = boundedText(turnUserPrompt(turn, extraItems), "turn user prompt", MAX_PROMPT_BYTES);
-  const causalIds = turnCausalIds(event || {});
+  const causalIds = turnCausalIds(event || {}, turn);
   const sourceTurn = {
     thread_id: requiredText(thread_id, "thread_id", CLOSED_LOOP_ERRORS.TURN_INVALID),
     turn_id: turnId,
@@ -478,16 +486,16 @@ class NativeAppServerConnection {
 
   #onStdout(chunk) {
     this.buffer += chunk.toString();
-    if (Buffer.byteLength(this.buffer, "utf8") > MAX_MESSAGE_BYTES * 8) {
-      this.#failPending(new ClosedLoopError("Codex app-server emitted an unbounded JSONL frame.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
-      this.buffer = "";
-      return;
-    }
     let index;
     while ((index = this.buffer.indexOf("\n")) >= 0) {
       const line = this.buffer.slice(0, index).replace(/\r$/, "");
       this.buffer = this.buffer.slice(index + 1);
       if (!line.trim()) continue;
+      if (Buffer.byteLength(line, "utf8") > MAX_MESSAGE_BYTES * 8) {
+        this.#failPending(new ClosedLoopError("Codex app-server emitted an unbounded JSONL frame.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
+        this.buffer = "";
+        return;
+      }
       let message;
       try { message = JSON.parse(line); }
       catch (error) {
@@ -505,6 +513,12 @@ class NativeAppServerConnection {
         try { this.onNotification?.(message); }
         catch (error) { this.#failPending(error); }
       }
+    }
+    // A burst of many bounded notifications may arrive in one data chunk;
+    // only an incomplete individual frame is unbounded at this boundary.
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_MESSAGE_BYTES * 8) {
+      this.#failPending(new ClosedLoopError("Codex app-server emitted an unbounded JSONL frame.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
+      this.buffer = "";
     }
   }
 
@@ -563,9 +577,62 @@ function extractTurnsFromResume(result) {
   return [];
 }
 
-function extractItemEntries(result) {
-  const turns = extractTurnsFromResume(result);
-  return turns.flatMap((turn) => Array.isArray(turn.items) ? turn.items : []);
+function extractTurnPage(result) {
+  const data = result?.data || result?.turns || result?.result?.data || result?.result?.turns || result?.result?.result?.data || result?.result?.result?.turns;
+  return Array.isArray(data) ? data : [];
+}
+
+function extractNextCursor(result) {
+  const cursor = result?.nextCursor || result?.next_cursor || result?.result?.nextCursor || result?.result?.next_cursor || result?.result?.result?.nextCursor || result?.result?.result?.next_cursor;
+  return cursor === null || cursor === undefined ? null : requiredText(cursor, "app-server pagination cursor", CLOSED_LOOP_ERRORS.OBSERVER_INVALID);
+}
+
+function turnEntryId(value) {
+  if (!isObject(value)) return null;
+  return value.id || value.turnId || value.turn_id || null;
+}
+
+function extractItemPage(result) {
+  const data = result?.data || result?.items || result?.result?.data || result?.result?.items || result?.result?.result?.data || result?.result?.result?.items;
+  return Array.isArray(data) ? data.map((entry) => {
+    if (!isObject(entry)) return null;
+    return isObject(entry.item) ? entry.item : null;
+  }).filter((item) => item !== null) : [];
+}
+
+function errorText(error) {
+  const values = [
+    error?.message,
+    error?.cause?.message,
+    error?.cause?.error?.message,
+    error?.cause?.data?.message,
+  ];
+  return values.filter((value) => typeof value === "string").join(" | ");
+}
+
+function isActiveWriterConflict(error) {
+  const text = errorText(error);
+  return /thread-store conflict/i.test(text) && /already has an active writer/i.test(text);
+}
+
+function pageThreadId(result) {
+  if (!isObject(result)) return null;
+  return threadIdFrom(result) || threadIdFrom(result.result) || threadIdFrom(result.result?.result);
+}
+
+function mergeTurnItems(...pages) {
+  const merged = [];
+  const seen = new Set();
+  for (const page of pages) {
+    for (const item of page) {
+      if (!isObject(item)) continue;
+      const key = item.id || canonicalJson(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 function trimMap(map, maxEntries) {
@@ -591,6 +658,10 @@ export function createCodexAppServerTurnObserver({
   spawnProcess = spawn,
   requestTimeoutMs = 30000,
   turnTimeoutMs = 10 * 60 * 1000,
+  compactHistory = false,
+  historyPageSize = 128,
+  historyPageLimit = 128,
+  itemPageSize = 128,
   now = () => new Date().toISOString(),
 } = {}) {
   const continuation = validateCodexContinuationBinding(continuationBinding || binding || codexContinuationBinding);
@@ -603,6 +674,109 @@ export function createCodexAppServerTurnObserver({
   let itemByTurn = new Map();
   let completedByTurn = new Map();
   let pendingWaiters = new Set();
+  let readOnly = false;
+  const useCompactHistory = compactHistory === true;
+  const boundedHistoryPageSize = Number.isInteger(historyPageSize) && historyPageSize > 0 && historyPageSize <= MAX_OBSERVER_TURNS ? historyPageSize : 128;
+  const boundedHistoryPageLimit = Number.isInteger(historyPageLimit) && historyPageLimit > 0 && historyPageLimit <= MAX_OBSERVER_TURNS ? historyPageLimit : 128;
+  const boundedItemPageSize = Number.isInteger(itemPageSize) && itemPageSize > 0 && itemPageSize <= MAX_OBSERVER_ITEMS_PER_TURN ? itemPageSize : 128;
+
+  const listTurnEntries = async (current, { stopAtTurnId = null } = {}) => {
+    const entries = [];
+    const seen = new Set();
+    let cursor = null;
+    for (let pageIndex = 0; pageIndex < boundedHistoryPageLimit; pageIndex += 1) {
+      const page = await current.request(CODEX_APP_SERVER_METHODS.THREAD_TURNS_LIST, {
+        threadId: expectedThread,
+        cursor,
+        limit: boundedHistoryPageSize,
+        sortDirection: "asc",
+        itemsView: "notLoaded",
+      });
+      const listedThread = pageThreadId(page);
+      if (listedThread !== null && listedThread !== expectedThread) throw new ClosedLoopError("Codex turn history returned a different thread.", CLOSED_LOOP_ERRORS.WRONG_THREAD);
+      const pageEntries = extractTurnPage(page);
+      for (const entry of pageEntries) {
+        const id = turnEntryId(entry);
+        if (id === null) continue;
+        if (!seen.has(id)) {
+          seen.add(id);
+          entries.push(entry);
+        }
+        if (stopAtTurnId !== null && id === stopAtTurnId) return Object.freeze({ entries: Object.freeze(entries), found: entry });
+      }
+      const next = extractNextCursor(page);
+      if (next === null || next === cursor) break;
+      cursor = next;
+    }
+    return Object.freeze({ entries: Object.freeze(entries), found: null });
+  };
+
+  const hydrateTurnEntry = async (current, entry) => {
+    const turnId = turnEntryId(entry);
+    if (turnId === null) throw new ClosedLoopError("Codex turn history entry has no exact turn id.", CLOSED_LOOP_ERRORS.TURN_INVALID);
+    const pages = [];
+    for (const sortDirection of ["asc", "desc"]) {
+      let cursor = null;
+      const directionPages = [];
+      for (let pageIndex = 0; pageIndex < boundedHistoryPageLimit; pageIndex += 1) {
+        const page = await current.request(CODEX_APP_SERVER_METHODS.THREAD_ITEMS_LIST, {
+          threadId: expectedThread,
+          turnId,
+          cursor,
+          limit: boundedItemPageSize,
+          sortDirection,
+        });
+        const listedThread = pageThreadId(page);
+        if (listedThread !== null && listedThread !== expectedThread) throw new ClosedLoopError("Codex turn items returned a different thread.", CLOSED_LOOP_ERRORS.WRONG_THREAD);
+        directionPages.push(extractItemPage(page));
+        const next = extractNextCursor(page);
+        if (next === null || next === cursor) break;
+        cursor = next;
+      }
+      pages.push(...directionPages);
+    }
+    const turn = {
+      ...entry,
+      id: turnId,
+      status: entry.status,
+      items: mergeTurnItems(...pages),
+    };
+    if (turn.status !== "completed") throw new ClosedLoopError("Exact requested Codex turn is not completed.", CLOSED_LOOP_ERRORS.TURN_NOT_COMPLETED);
+    return turn;
+  };
+
+  const hydrateExactTurn = async (current, turnId) => {
+    const listed = await listTurnEntries(current, { stopAtTurnId: turnId });
+    if (!listed.found) throw new ClosedLoopError("Exact requested Codex turn was not found in bounded paginated history.", CLOSED_LOOP_ERRORS.TURN_INVALID);
+    return hydrateTurnEntry(current, listed.found);
+  };
+
+  const findReadOnlyCompletion = async (current, expected) => {
+    const listed = await listTurnEntries(current);
+    const entries = listed.entries;
+    let startIndex = -1;
+    if (expected.after_turn_id !== null) {
+      startIndex = entries.findIndex((entry) => turnEntryId(entry) === expected.after_turn_id);
+      if (startIndex < 0) throw new ClosedLoopError("Exact prior Codex turn was not found in bounded paginated history.", CLOSED_LOOP_ERRORS.TURN_INVALID);
+    }
+    const candidates = [];
+    for (const entry of entries.slice(startIndex + 1)) {
+      const id = turnEntryId(entry);
+      if (expected.turn_id !== null && id !== expected.turn_id) continue;
+      if (entry.status !== "completed") continue;
+      let turn;
+      try { turn = await hydrateTurnEntry(current, entry); }
+      catch (error) {
+        if (error?.code === CLOSED_LOOP_ERRORS.TURN_NOT_COMPLETED) continue;
+        throw error;
+      }
+      const observation = normalizeCompletedTurn({ thread_id: expectedThread, turn, source: "durable-history", sequence: null });
+      if (assertCompletedTurnExpectation(observation, expected)) candidates.push(observation);
+      if (expected.turn_id !== null && candidates.length > 0) break;
+    }
+    if (candidates.length > 1) throw new ClosedLoopError("Multiple durable Codex turns match the exact continuation expectation.", CLOSED_LOOP_ERRORS.OBSERVER_AMBIGUOUS);
+    return candidates[0] || null;
+  };
 
   const notify = (value) => {
     let parsed;
@@ -691,8 +865,26 @@ export function createCodexAppServerTurnObserver({
       });
       if (typeof current.notify === "function") current.notify(CODEX_APP_SERVER_METHODS.INITIALIZED, null);
       initialized = true;
-      const resumed = await current.request(CODEX_APP_SERVER_METHODS.THREAD_RESUME, { threadId: expectedThread, excludeTurns: false });
-      const turns = extractTurnsFromResume(resumed);
+      let resumed;
+      try {
+        resumed = await current.request(CODEX_APP_SERVER_METHODS.THREAD_RESUME, { threadId: expectedThread, excludeTurns: useCompactHistory });
+      } catch (error) {
+        // A task that is already open in the native Codex app owns its
+        // thread writer.  Do not steal that writer or create another thread;
+        // switch to bounded, exact durable-history polling instead.
+        if (!isActiveWriterConflict(error)) throw error;
+        readOnly = true;
+        if (expected?.turn_id) {
+          const turn = await hydrateExactTurn(current, expected.turn_id);
+          notify({ method: CODEX_APP_SERVER_EVENTS.TURN_COMPLETED, params: { threadId: expectedThread, turn } });
+        }
+        return current;
+      }
+      const resumedThreadId = threadIdFrom(resumed);
+      if (resumedThreadId !== null && resumedThreadId !== expectedThread) throw new ClosedLoopError("thread/resume returned a different thread.", CLOSED_LOOP_ERRORS.WRONG_THREAD);
+      const turns = useCompactHistory && expected?.turn_id
+        ? [await hydrateExactTurn(current, expected.turn_id)]
+        : extractTurnsFromResume(resumed);
       const selectedTurns = turns.length <= MAX_OBSERVER_TURNS
         ? turns
         : turns.slice(-MAX_OBSERVER_TURNS).concat(expected?.turn_id ? turns.filter((turn) => turn?.id === expected.turn_id).slice(0, 1) : []);
@@ -722,6 +914,23 @@ export function createCodexAppServerTurnObserver({
     }
     const timeout = Number(input.timeout_ms ?? input.timeoutMs ?? turnTimeoutMs);
     if (!Number.isFinite(timeout) || timeout <= 0) throw new ClosedLoopError("Observer timeout must be bounded.", CLOSED_LOOP_ERRORS.OBSERVER_TIMEOUT);
+    if (readOnly) {
+      const deadline = Date.now() + timeout;
+      while (true) {
+        const current = makeConnection();
+        const observation = await findReadOnlyCompletion(current, expected);
+        if (observation) {
+          const prior = completedByTurn.get(observation.turn_id);
+          if (prior && prior.source_turn_sha256 !== observation.source_turn_sha256) throw new ClosedLoopError("The same Codex turn was observed with different bytes.", CLOSED_LOOP_ERRORS.TURN_CONFLICT);
+          completedByTurn.set(observation.turn_id, observation);
+          trimMap(completedByTurn, MAX_OBSERVER_TURNS);
+          return observation;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new ClosedLoopError("Exact Codex turn completion was not observed within the bound.", CLOSED_LOOP_ERRORS.OBSERVER_TIMEOUT);
+        await sleep(Math.min(1000, remaining));
+      }
+    }
     return new Promise((resolve, reject) => {
       const waiter = { expected, resolve, reject, timer: null };
       waiter.timer = setTimeout(() => {
@@ -737,6 +946,7 @@ export function createCodexAppServerTurnObserver({
       connection = null;
       initialized = false;
       itemByTurn = new Map();
+      readOnly = false;
     }
     return Object.freeze({ status: "RECONNECT_READY", thread_id: expectedThread });
   };
@@ -750,6 +960,7 @@ export function createCodexAppServerTurnObserver({
     connection?.close?.();
     connection = null;
     initialized = false;
+    readOnly = false;
   };
 
   return Object.freeze({
@@ -762,7 +973,7 @@ export function createCodexAppServerTurnObserver({
     checkpoint,
     reconnect,
     close,
-    inspect: () => Object.freeze({ thread_id: expectedThread, sequence, initialized, completed_turn_ids: Object.freeze([...completedByTurn.keys()]) }),
+    inspect: () => Object.freeze({ thread_id: expectedThread, sequence, initialized, read_only: readOnly, completed_turn_ids: Object.freeze([...completedByTurn.keys()]) }),
   });
 }
 
@@ -850,7 +1061,11 @@ function validateLoopState(value) {
   if (!Object.values(CLOSED_LOOP_PHASES).includes(value.phase)) throw new ClosedLoopError("Closed-loop state phase is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   const limits = normalizeLimits(value.limits);
   if (!Number.isInteger(value.round_index) || value.round_index < 0 || value.round_index > limits.max_rounds) throw new ClosedLoopError("state.round_index is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
-  for (const key of ["last_observed_turn_id", "last_observed_turn_sha256", "last_observed_turn_status", "last_observed_message", "last_observed_causal_proof", "current_relay_request_id", "current_report_sha256", "expected_after_turn_id", "expected_prompt", "expected_prompt_sha256", "expected_submission_id", "terminal_reason", "error_code", "error_message"]) optionalText(value[key] ?? null, `state.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+  for (const key of ["last_observed_turn_id", "last_observed_turn_sha256", "last_observed_turn_status", "last_observed_causal_proof", "current_relay_request_id", "current_report_sha256", "expected_after_turn_id", "expected_prompt_sha256", "expected_submission_id", "error_code"]) optionalText(value[key] ?? null, `state.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+  nullableBoundedText(value.last_observed_message, "state.last_observed_message", MAX_MESSAGE_BYTES);
+  nullableBoundedText(value.expected_prompt, "state.expected_prompt", MAX_PROMPT_BYTES);
+  nullableBoundedText(value.terminal_reason, "state.terminal_reason", MAX_MESSAGE_BYTES);
+  nullableBoundedText(value.error_message, "state.error_message", MAX_MESSAGE_BYTES);
   for (const key of ["last_observed_turn_sha256", "current_relay_request_id", "current_report_sha256", "expected_prompt_sha256"]) if (value[key] !== null && !isDigest(value[key])) throw new ClosedLoopError(`state.${key} must be a sha256 digest.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.last_observed_turn_id === null && value.last_observed_turn_sha256 !== null) throw new ClosedLoopError("state.last_observed_turn_sha256 requires last_observed_turn_id.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.last_observed_turn_id !== null && value.last_observed_turn_sha256 === null) throw new ClosedLoopError("state.last_observed_turn_id requires last_observed_turn_sha256.", CLOSED_LOOP_ERRORS.STATE_INVALID);

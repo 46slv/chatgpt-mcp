@@ -478,6 +478,14 @@ test("bound MCP adapter passes only the exact target URL and matching conversati
   assert.equal(Object.hasOwn(call.request.arguments, "targetAlias"), false);
 });
 
+test("bound MCP adapter unwraps the bundled chatgpt-mcp result without relaxing correlation", async () => {
+  const f = fixture({ label: "mcp-wrapper" });
+  const expected = createCodexPromptResponse({ mission_id: f.chat.mission_id, task_id: f.chat.task_id, relay_request_id: "relay-wrapper", report_sha256: sha256("report"), decision: "STOP" });
+  const transport = createBoundChatGPTTransport({ taskChatBinding: f.chat, callTool: async () => ({ content: [{ type: "text", text: JSON.stringify({ response: JSON.stringify(expected), elapsed_seconds: 1, model: null, chat_id: f.chat.conversation_id, poll_count: 2 }) }] }) });
+  const envelope = await transport.send({ target: { binding_id: f.chat.binding_id, chat_url: f.chat.chat_url, conversation_id: f.chat.conversation_id }, payload: "payload", relay_request_id: "relay-wrapper" });
+  assert.deepEqual(envelope, expected);
+});
+
 test("deterministic hashes and strict envelopes reject unknown fields", () => {
   assert.equal(canonicalJson({ b: 2, a: 1 }), '{"a":1,"b":2}');
   assert.equal(hashJson({ b: 2, a: 1 }), hashJson({ a: 1, b: 2 }));

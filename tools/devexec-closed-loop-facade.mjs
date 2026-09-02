@@ -64,6 +64,18 @@ const DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 const ADMISSION_ID_RE = /^[a-z][a-z0-9_-]{2,127}$/;
 const MAX_ADMISSION_BYTES = 512 * 1024;
 const MAX_RELAY_RESPONSE_BYTES = 64 * 1024;
+const LOCAL_RELAY_RESPONSE_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    protocol: { type: "string" },
+    schema_version: { type: "integer" },
+    request_id: { type: "string" },
+    payload_sha256: { type: "string" },
+    action: { type: "string" },
+  },
+  required: ["protocol", "schema_version", "request_id", "payload_sha256", "action"],
+});
 const ADMISSION_FIELDS = Object.freeze([
   "protocol",
   "schema_version",
@@ -372,6 +384,7 @@ async function probeExistingCodexThread({ continuation, runtime, initialTurnId, 
     runtimeBinding: runtime,
     turnTimeoutMs: timeoutMs,
     requestTimeoutMs: Math.min(timeoutMs, 30000),
+    compactHistory: true,
   });
   try {
     const completion = await observer.wait({ thread_id: continuation.thread_id, turn_id: initialTurnId, timeout_ms: timeoutMs });
@@ -552,7 +565,14 @@ export function createHttpLocalRelayAdapter({ baseUrl = DEFAULT_LOCAL_RELAY_URL,
             model: selectedModel,
             temperature: 0,
             max_tokens: 256,
-            response_format: { type: "json_object" },
+            // LM Studio's OpenAI-compatible server accepts json_schema (not
+            // json_object) and Qwen 3.5 otherwise spends the whole bound on
+            // hidden reasoning without emitting the hash-only decision.
+            reasoning_effort: "none",
+            response_format: {
+              type: "json_schema",
+              json_schema: { name: "devexec_local_relay_decision", schema: LOCAL_RELAY_RESPONSE_SCHEMA, strict: true },
+            },
             messages: [
               { role: "system", content: "You are a strict Local Model RELAY gate. Return exactly one JSON object with keys protocol, schema_version, request_id, payload_sha256, action. Echo request_id, payload_sha256, and action_expected as action. Never add fields, prose, markdown, targets, threads, paths, commands, or prompt bytes." },
               { role: "user", content: JSON.stringify({ protocol: input.protocol, schema_version: input.schema_version, mode: input.mode, request_id: input.request_id, payload_sha256: input.payload_sha256, action_expected: input.action_expected }) },
@@ -647,7 +667,7 @@ export async function runAdmittedClosedLoop({ admission: inputAdmission, admissi
   let chatConnection = null;
   let resolvedObserver = observer;
   let resolvedSender = codexSender;
-  if (!resolvedObserver) resolvedObserver = createCodexAppServerTurnObserver({ continuationBinding: admission.codex_continuation_binding, runtimeBinding: admission.codex_runtime_binding, turnTimeoutMs: selectedLimits.turn_timeout_ms, requestTimeoutMs: Math.min(selectedLimits.turn_timeout_ms, 30000) });
+  if (!resolvedObserver) resolvedObserver = createCodexAppServerTurnObserver({ continuationBinding: admission.codex_continuation_binding, runtimeBinding: admission.codex_runtime_binding, turnTimeoutMs: selectedLimits.turn_timeout_ms, requestTimeoutMs: Math.min(selectedLimits.turn_timeout_ms, 30000), compactHistory: true });
   if (!resolvedSender) resolvedSender = createCodexContinuationSender({ binding: admission.codex_continuation_binding, runtime: admission.codex_runtime_binding, required_mode: "queue", require_queue: true, runtimeProbe: runtimeProbe || probeCodexRuntime, verifyRuntime: verifyCodexRuntimeBinding, invoke: invokeCodex || invokeCodexProcess });
   let resolvedChat = chatgptTransport;
   try {

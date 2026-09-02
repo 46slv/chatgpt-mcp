@@ -299,6 +299,100 @@ test("native observer resumes one exact thread, ignores unrelated events, and is
   observer.close();
 });
 
+test("compact observer hydrates one exact turn through bounded pagination", async () => {
+  const f = fixture({ label: "observer-compact" });
+  const sent = [];
+  const observer = createCodexAppServerTurnObserver({
+    continuationBinding: f.continuation,
+    runtimeBinding: f.runtime,
+    compactHistory: true,
+    historyPageSize: 2,
+    historyPageLimit: 2,
+    itemPageSize: 8,
+    connectionFactory({ onNotification }) {
+      return {
+        request: async (method, params) => {
+          sent.push({ method, params });
+          if (method === "initialize") return {};
+          if (method === "thread/resume") return { thread: { id: THREAD_A, turns: [] } };
+          if (method === "thread/turns/list") return { data: [{ id: "turn-0", status: "completed", items: [] }], nextCursor: null };
+          if (method === "thread/items/list") return { data: [
+            { turnId: "turn-0", item: { type: "userMessage", id: "user-0", content: [{ type: "text", text: "initial" }] } },
+            { turnId: "turn-0", item: { type: "agentMessage", id: "agent-0", phase: "final_answer", text: "initial result" } },
+          ], nextCursor: null };
+          return {};
+        },
+        notify() {},
+        close() {},
+        emit: onNotification,
+      };
+    },
+  });
+  const result = await observer.wait({ thread_id: THREAD_A, turn_id: "turn-0", timeout_ms: 1000 });
+  assert.equal(result.message, "initial result");
+  assert.equal(result.user_prompt, "initial");
+  assert.equal(sent.find((entry) => entry.method === "thread/resume").params.excludeTurns, true);
+  assert.equal(sent.filter((entry) => entry.method === "thread/turns/list").length, 1);
+  assert.equal(sent.filter((entry) => entry.method === "thread/items/list").length, 2);
+  observer.close();
+});
+
+test("active-writer admission falls back to bounded exact durable-history polling", async () => {
+  const f = fixture({ label: "observer-active-writer" });
+  const sent = [];
+  let turnsCall = 0;
+  const observer = createCodexAppServerTurnObserver({
+    continuationBinding: f.continuation,
+    runtimeBinding: f.runtime,
+    compactHistory: true,
+    historyPageSize: 4,
+    historyPageLimit: 2,
+    itemPageSize: 8,
+    connectionFactory() {
+      return {
+        request: async (method, params) => {
+          sent.push({ method, params });
+          if (method === "initialize") return {};
+          if (method === "thread/resume") {
+            const error = new Error("Codex app-server request failed.");
+            error.cause = { message: `thread-store conflict: thread ${THREAD_A} already has an active writer` };
+            throw error;
+          }
+          if (method === "thread/turns/list") {
+            turnsCall += 1;
+            const entries = turnsCall === 1
+              ? [{ id: "turn-0", status: "completed" }]
+              : [{ id: "turn-0", status: "completed" }, { id: "turn-1", status: "completed", submissionId: "submission-1" }];
+            return { threadId: THREAD_A, data: entries, nextCursor: null };
+          }
+          if (method === "thread/items/list") {
+            const turnId = params.turnId;
+            const items = turnId === "turn-0"
+              ? [{ type: "userMessage", id: "user-0", content: [{ type: "text", text: "initial" }] }, { type: "agentMessage", id: "agent-0", phase: "final_answer", text: "initial result" }]
+              : [{ type: "userMessage", id: "user-1", content: [{ type: "text", text: "queued prompt" }] }, { type: "agentMessage", id: "agent-1", phase: "final_answer", text: "queued result" }];
+            return { threadId: THREAD_A, data: items.map((item) => ({ turnId, item })), nextCursor: null };
+          }
+          return {};
+        },
+        notify() {},
+        close() {},
+      };
+    },
+  });
+  const initial = await observer.wait({ thread_id: THREAD_A, turn_id: "turn-0", timeout_ms: 1000 });
+  assert.equal(initial.turn_id, "turn-0");
+  assert.equal(initial.message, "initial result");
+  const next = await observer.wait({ thread_id: THREAD_A, after_turn_id: "turn-0", prompt: "queued prompt", submission_id: "submission-1", timeout_ms: 1000 });
+  assert.equal(next.turn_id, "turn-1");
+  assert.equal(next.submission_id, "submission-1");
+  assert.equal(next.source, "durable-history");
+  assert.equal(observer.inspect().read_only, true);
+  assert.equal(sent.filter((entry) => entry.method === "thread/resume").length, 1);
+  assert.ok(sent.filter((entry) => entry.method === "thread/turns/list").every((entry) => entry.params.threadId === THREAD_A));
+  assert.ok(sent.filter((entry) => entry.method === "thread/items/list").every((entry) => entry.params.threadId === THREAD_A));
+  observer.close();
+});
+
 test("observer rejects notifications without exact thread identity", () => {
   assert.throws(() => parseCodexAppServerNotification({ method: CODEX_APP_SERVER_EVENTS.TURN_COMPLETED, params: { turn: { id: "turn-a", status: "completed", items: [{ type: "agentMessage", text: "missing thread" }] } } }, { thread_id: THREAD_A }), /exact threadId/);
 });
