@@ -110,6 +110,35 @@ intent is uncertain. Do not resend an ambiguous request. Secrets, credentials,
 personal data, uploads or paths, permission/account/billing requests, and
 destructive or out-of-scope instructions remain hard stops.
 
+### DevExec Closed Goal Loop admission facade
+
+The first-class `closed-loop` facade operationalizes the already-proven
+bounded loop for an existing Codex task/thread. It never creates a new thread:
+admission requires the exact persisted thread ID, an exact completed source
+turn, the canonical ChatGPT URL, the absolute native `codex.exe` path, and the
+absolute bound worktree.
+
+```powershell
+node .\tools\devexec.mjs closed-loop admit --mission-id <id> --task-id <id> `
+  --thread-id <persisted-thread-uuid> --initial-turn-id <completed-turn-uuid> `
+  --chat-url https://chatgpt.com/c/<conversation-id> `
+  --runtime-path 'C:\Users\<user>\AppData\Local\OpenAI\Codex\bin\<revision>\codex.exe' `
+  --working-directory 'D:\Documents\<dedicated-worktree>'
+
+node .\tools\devexec.mjs closed-loop run --admission <id-or-manifest>
+node .\tools\devexec.mjs closed-loop inspect --admission <id-or-manifest>
+```
+
+The facade keeps `TaskChatBinding`, persisted thread identity, and native
+runtime identity immutable. The Local Model receives only the hash-only
+`RELAY` envelope. A correlated `CONTINUE` is the sole path that queues the
+exact returned `devexec.codex-prompt` bytes to the bound thread; `STOP` and
+`NEEDS_HUMAN` terminate without queueing. There is no current-chat/default
+target, PATH, `--last`, fuzzy-session, or automatic ambiguous-delivery retry.
+`max_rounds` and all timeouts are explicit and bounded. See
+[`docs/README.md`](docs/README.md) and
+[`docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md).
+
 ## Setup
 
 ```bash

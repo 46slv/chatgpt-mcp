@@ -25,8 +25,11 @@ node .\tools\devexec.mjs closed-loop admit `
 
 `--chat-url`, `--thread-id`, and `--initial-turn-id` are not inferred. The
 admission command probes the supplied runtime by its absolute path, requires
-the native `queue` capability, resumes the supplied thread with native
-`app-server`, and persists the resulting exact turn proof under
+the native `queue` capability, and uses native `app-server` against the
+supplied thread. If that thread already has an active writer, admission falls
+back to bounded read-only polling of exact durable turn/item history; it does
+not create or resume a different thread. Admission persists the exact turn
+proof under
 `%LOCALAPPDATA%\ChatGPTMCPProbe\closed-loop-admissions` unless
 `--admission-root` is supplied.
 

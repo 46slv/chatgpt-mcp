@@ -1,0 +1,75 @@
+{
+  "protocol": "devexec.closed-loop-real-canary-evidence",
+  "schema_version": 1,
+  "canary_code_revision": "8c9601658b7cf08a3df1b2bf259d03e0b18104e6",
+  "mission_id": "devexec-operationalization-20260903",
+  "task_id": "real-facade-canary-cgl000-20260903",
+  "admission_id": "admit-operational-real-canary-cgl000-20260903",
+  "loop_id": "loop-operational-real-canary-cgl000-20260903",
+  "thread_id": "01a06154-39d1-7360-a425-ba32d3c81cd0",
+  "initial_turn_id": "01a06154-42b6-7763-a42d-dce3d2e39a7c",
+  "task_chat_binding_id": "sha256:95e8659333e2e663478c2bfe172e53a0806cfaafd4beaf61c5fd94cdfd049fbe",
+  "codex_continuation_binding_id": "sha256:73ced267e8ed06acc673b902c7323029cfb1602aa7a44986ca647ef0b1a98e20",
+  "codex_runtime_binding_id": "sha256:1bb30f086ae75cd9d9d5587c4315922d3fb7fff9ac50f10af0ec3417460b9b1b",
+  "conversation_id_sha256": "sha256:40e37157071ce94c73bfb2bb17c43d73fb62369d62e90ddddd786e6de87ed984",
+  "new_codex_thread_created": false,
+  "same_thread_identity": true,
+  "rounds": [
+    {
+      "round_index": 0,
+      "source_turn_id": "01a06154-42b6-7763-a42d-dce3d2e39a7c",
+      "source_turn_sha256": "sha256:f30e588cd8d181da7450e978d54ea031278709cc9fd2d19143df961f8341c2c3",
+      "decision": "CONTINUE",
+      "relay_request_id": "sha256:89d69d29ff4e0187436890847b6d7a477aba2f7f3f5569f9a12b7ce94ed51a67",
+      "report_sha256": "sha256:6b62f2a4c91bc1dacf00f61e5fc3240a17a31e761f8cc43ed1fff2f35a56b752",
+      "chatgpt_response_sha256": "sha256:8bf29fce4b182ca0e8111062e4deab7a6cc0adb3b69e44fe8ca59797b2be2a05",
+      "codex_return_id": "sha256:0316840001ad1df1622efb579c359b7e87c50cf5e4f5dc0cee9a59d1eab61205",
+      "codex_prompt_sha256": "sha256:705c5679d343a28e74f14f7b8b93525ae10404c1bbd9b708eac9a33e472e67e3",
+      "submission_id": "01a062ea-2c57-7da1-8b16-12cd2cbf2f86",
+      "queued_thread_id": "01a06154-39d1-7360-a425-ba32d3c81cd0",
+      "resulting_turn_id": "01a062ea-3b0c-7a10-8f53-c759416eef69",
+      "resulting_turn_sha256": "sha256:6690c6a8916853c3d637c27fd80a5a17f035ec7a5f2d8a17cd5ba21fc7b03723",
+      "queue_performed": true,
+      "local_relay_actions": ["FORWARD_REPORT", "RETURN_CODEX_PROMPT"]
+    },
+    {
+      "round_index": 1,
+      "source_turn_id": "01a062ea-3b0c-7a10-8f53-c759416eef69",
+      "source_turn_sha256": "sha256:6690c6a8916853c3d637c27fd80a5a17f035ec7a5f2d8a17cd5ba21fc7b03723",
+      "decision": "STOP",
+      "relay_request_id": "sha256:d828cff2e65681f34f89b15a35881a42ac6def8ee368691619bc562dcf400df9",
+      "report_sha256": "sha256:140cc242c56999848c4cacfccbd90cdbe6e5aff9fcb7fa506bf1a20b36e2edfa",
+      "chatgpt_response_sha256": "sha256:54109ac6b1ffe307a506e1f21a98d7cfea97f2a0d53ba861c9ae729aa849949c",
+      "submission_id": null,
+      "queued_thread_id": null,
+      "resulting_turn_id": null,
+      "resulting_turn_sha256": null,
+      "queue_performed": false,
+      "local_relay_actions": ["FORWARD_REPORT"]
+    }
+  ],
+  "verification": {
+    "initial_admission_exact_completed_turn": true,
+    "all_queue_thread_ids_equal_bound_thread": true,
+    "stop_round_queued": false,
+    "automatic_resend": false,
+    "raw_prompt_bytes_persisted": false,
+    "canary_task_kind": "real repository development maintenance task, not acknowledgement probe"
+  },
+  "tests": {
+    "command": "npm run test:devexec",
+    "result": "PASS",
+    "total": 281,
+    "passed": 281,
+    "failed": 0,
+    "environment": "fresh temporary LOCALAPPDATA recovery/lease roots"
+  },
+  "build": {
+    "command": "npm run build",
+    "result": "PASS"
+  },
+  "diff_check": {
+    "command": "git diff --check",
+    "result": "PASS"
+  }
+}
