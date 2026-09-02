@@ -1,6 +1,13 @@
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
+import {
+  CODEX_RUNTIME_ERRORS,
+  normalizeCodexRuntimePath,
+  validateCodexRuntimeBinding,
+  verifyCodexRuntimeBinding,
+} from "./devexec-codex-runtime-binding.mjs";
+
 export const CODEX_CONTINUATION_BINDING_PROTOCOL = "devexec.codex-continuation-binding";
 export const CODEX_CONTINUATION_BINDING_SCHEMA_VERSION = 1;
 export const CODEX_CONTINUATION_RETURN_PROTOCOL = "devexec.codex-continuation-return";
@@ -21,6 +28,12 @@ export const CODEX_CONTINUATION_ERRORS = Object.freeze({
   CAPABILITY_UNAVAILABLE: "CODEX_CAPABILITY_UNAVAILABLE",
   EPHEMERAL_SESSION: "CONTINUATION_EPHEMERAL_SESSION",
   EXECUTION_FAILED: "CONTINUATION_EXECUTION_FAILED",
+  RUNTIME_REQUIRED: CODEX_RUNTIME_ERRORS.REQUIRED,
+  RUNTIME_INVALID: CODEX_RUNTIME_ERRORS.INVALID,
+  RUNTIME_UNAVAILABLE: CODEX_RUNTIME_ERRORS.UNAVAILABLE,
+  RUNTIME_DRIFT: CODEX_RUNTIME_ERRORS.DRIFT,
+  RUNTIME_CAPABILITY_UNAVAILABLE: CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE,
+  RUNTIME_PROBE_FAILED: CODEX_RUNTIME_ERRORS.PROBE_FAILED,
 });
 
 export const CONTINUATION_BINDING_REQUIRED = CODEX_CONTINUATION_ERRORS.BINDING_REQUIRED;
@@ -32,6 +45,12 @@ export const CONTINUATION_RETURN_REQUIRED = CODEX_CONTINUATION_ERRORS.RETURN_REQ
 export const CONTINUATION_RETURN_INVALID = CODEX_CONTINUATION_ERRORS.RETURN_INVALID;
 export const CONTINUATION_RETURN_CONFLICT = CODEX_CONTINUATION_ERRORS.RETURN_CONFLICT;
 export const CONTINUATION_DELIVERY_UNKNOWN = CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN;
+export const CODEX_RUNTIME_BINDING_REQUIRED = CODEX_RUNTIME_ERRORS.REQUIRED;
+export const CODEX_RUNTIME_BINDING_INVALID = CODEX_RUNTIME_ERRORS.INVALID;
+export const CODEX_RUNTIME_UNAVAILABLE = CODEX_RUNTIME_ERRORS.UNAVAILABLE;
+export const CODEX_RUNTIME_DRIFT = CODEX_RUNTIME_ERRORS.DRIFT;
+export const CODEX_RUNTIME_CAPABILITY_UNAVAILABLE = CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE;
+export const CODEX_RUNTIME_PROBE_FAILED = CODEX_RUNTIME_ERRORS.PROBE_FAILED;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BINDING_FIELDS = Object.freeze([
@@ -319,8 +338,9 @@ export const validateCodexContinuationRequest = validateCodexContinuationReturn;
 export const validateCodexReturnRequest = validateCodexContinuationReturn;
 
 /** Build the only unattended command shapes permitted by this seam. */
-export function buildCodexContinuationInvocation({ binding, request, mode, command = "codex" } = {}) {
+export function buildCodexContinuationInvocation({ binding, request, mode, runtime } = {}) {
   const validatedBinding = validateCodexContinuationBinding(binding);
+  const validatedRuntime = validateCodexRuntimeBinding(runtime);
   const validatedRequest = validateCodexContinuationReturn(request, validatedBinding);
   const selectedMode = mode || CODEX_CONTINUATION_MODE.QUEUE;
   if (!Object.values(CODEX_CONTINUATION_MODE).includes(selectedMode)) {
@@ -329,17 +349,21 @@ export function buildCodexContinuationInvocation({ binding, request, mode, comma
   if (selectedMode === CODEX_CONTINUATION_MODE.RESUME && validatedBinding.session_persisted !== true) {
     fail(CODEX_CONTINUATION_ERRORS.EPHEMERAL_SESSION, "Resume requires a persisted Codex session.");
   }
-  const executable = requiredText(command, "codex command", CODEX_CONTINUATION_ERRORS.CAPABILITY_UNAVAILABLE);
-  const args = selectedMode === CODEX_CONTINUATION_MODE.QUEUE
+  if (validatedRuntime.capabilities[selectedMode] !== true) {
+    fail(CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE, `Bound Codex runtime lacks required capability: ${selectedMode}.`);
+  }
+  const continuationArgs = selectedMode === CODEX_CONTINUATION_MODE.QUEUE
     ? ["queue", "--thread", validatedBinding.thread_id, "--message", validatedRequest.prompt]
     : ["exec", "resume", "--json", validatedBinding.thread_id, validatedRequest.prompt];
   return Object.freeze({
-    command: executable,
-    args: Object.freeze(args),
+    command: validatedRuntime.executable_path,
+    args: Object.freeze([...validatedRuntime.launch_args, ...continuationArgs]),
     cwd: validatedBinding.working_directory,
     mode: selectedMode,
     thread_id: validatedBinding.thread_id,
     return_id: validatedRequest.return_id,
+    runtime_binding_id: validatedRuntime.binding_id,
+    runtime_fingerprint: validatedRuntime.runtime_fingerprint,
   });
 }
 
@@ -366,10 +390,11 @@ function exitCodeOf(result) {
   return value === undefined || value === null ? 0 : Number(value);
 }
 
-/** Default bounded process adapter; tests can inject an executor and never spawn Codex. */
-export function invokeCodexProcess({ command = "codex", args = [], cwd, timeoutMs = 30000 } = {}) {
+/** Bounded process adapter; callers must supply the already-bound absolute runtime path. */
+export function invokeCodexProcess({ command, args = [], cwd, timeoutMs = 30000 } = {}) {
+  const executable = normalizeCodexRuntimePath(command, "codex command", CODEX_RUNTIME_ERRORS.REQUIRED);
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(executable, args, { cwd, windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -396,10 +421,11 @@ export function invokeCodexProcess({ command = "codex", args = [], cwd, timeoutM
   });
 }
 
-export async function probeCodexCapabilities({ command = "codex", cwd = process.cwd(), invoke = invokeCodexProcess } = {}) {
+export async function probeCodexCapabilities({ command, cwd = process.cwd(), invoke = invokeCodexProcess } = {}) {
+  const executable = normalizeCodexRuntimePath(command, "codex command", CODEX_RUNTIME_ERRORS.REQUIRED);
   let result;
   try {
-    result = await invoke({ command, args: ["--help"], cwd, purpose: "capability-probe" });
+    result = await invoke({ command: executable, args: ["--help"], cwd, purpose: "capability-probe" });
   } catch (error) {
     fail(CODEX_CONTINUATION_ERRORS.CAPABILITY_UNAVAILABLE, "Codex capability probe failed.", error);
   }
@@ -466,30 +492,39 @@ function immutableResult(value) {
  */
 export function createCodexContinuationSender({
   binding,
-  command = "codex",
-  capabilities = null,
+  runtime,
+  required_mode = null,
+  mode = null,
+  require_queue = false,
+  runtimeProbe = null,
   probe = null,
+  verifyRuntime = verifyCodexRuntimeBinding,
   invoke = invokeCodexProcess,
 } = {}) {
   const validatedBinding = validateCodexContinuationBinding(binding);
+  const validatedRuntime = validateCodexRuntimeBinding(runtime);
   const records = new Map();
-  let capabilityPromise = null;
 
-  const getCapabilities = async () => {
-    if (!capabilityPromise) {
-      capabilityPromise = capabilities
-        ? Promise.resolve(normalizeCapabilities(capabilities))
-        : (probe
-          ? Promise.resolve()
-            .then(() => probe({ command, cwd: validatedBinding.working_directory, invoke }))
-            .then(normalizeCapabilities)
-            .catch((error) => {
-              if (error?.code === CODEX_CONTINUATION_ERRORS.CAPABILITY_UNAVAILABLE) throw error;
-              fail(CODEX_CONTINUATION_ERRORS.CAPABILITY_UNAVAILABLE, "Codex capability probe failed.", error);
-            })
-          : probeCodexCapabilities({ command, cwd: validatedBinding.working_directory, invoke }));
+  const verifyRuntimeForSend = async () => {
+    const probeFunction = runtimeProbe || probe;
+    let observed = null;
+    if (probeFunction) {
+      try {
+        observed = await probeFunction({ ...validatedRuntime, cwd: validatedBinding.working_directory, invoke });
+      } catch (error) {
+        if (Object.values(CODEX_RUNTIME_ERRORS).includes(error?.code)) throw error;
+        throw new CodexContinuationError("Codex runtime probe failed.", CODEX_RUNTIME_ERRORS.PROBE_FAILED);
+      }
     }
-    return capabilityPromise;
+    if (probeFunction && (observed === null || observed === undefined)) {
+      throw new CodexContinuationError("Codex runtime probe returned no evidence.", CODEX_RUNTIME_ERRORS.PROBE_FAILED);
+    }
+    try {
+      return await verifyRuntime(validatedRuntime, { observed });
+    } catch (error) {
+      if (Object.values(CODEX_RUNTIME_ERRORS).includes(error?.code)) throw error;
+      throw new CodexContinuationError("Codex runtime verification failed.", CODEX_RUNTIME_ERRORS.DRIFT);
+    }
   };
 
   const send = async (request) => {
@@ -508,10 +543,18 @@ export function createCodexContinuationSender({
     const record = { status: "IN_FLIGHT", prompt_sha256: validatedRequest.prompt_sha256, invocation_started: false, mode: null };
     records.set(validatedRequest.return_id, record);
     try {
-      const detected = await getCapabilities();
-      const selectedMode = detected?.queue ? CODEX_CONTINUATION_MODE.QUEUE : detected?.resume ? CODEX_CONTINUATION_MODE.RESUME : null;
+      await verifyRuntimeForSend();
+      const requiredMode = required_mode || mode || (require_queue === true ? CODEX_CONTINUATION_MODE.QUEUE : null);
+      if (requiredMode !== null && !Object.values(CODEX_CONTINUATION_MODE).includes(requiredMode)) {
+        fail(CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE, `Unsupported Codex continuation mode: ${requiredMode}.`);
+      }
+      const selectedMode = requiredMode
+        || (validatedRuntime.capabilities.queue ? CODEX_CONTINUATION_MODE.QUEUE : validatedRuntime.capabilities.resume ? CODEX_CONTINUATION_MODE.RESUME : null);
       if (!selectedMode) fail(CODEX_CONTINUATION_ERRORS.CAPABILITY_UNAVAILABLE, "Codex continuation capability is unavailable.");
-      const invocation = buildCodexContinuationInvocation({ binding: validatedBinding, request: validatedRequest, mode: selectedMode, command });
+      if (validatedRuntime.capabilities[selectedMode] !== true) {
+        fail(CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE, `Bound Codex runtime lacks required capability: ${selectedMode}.`);
+      }
+      const invocation = buildCodexContinuationInvocation({ binding: validatedBinding, request: validatedRequest, mode: selectedMode, runtime: validatedRuntime });
       record.mode = selectedMode;
       record.invocation_started = true;
       const rawResult = await invoke(invocation);
@@ -521,7 +564,16 @@ export function createCodexContinuationSender({
       return immutableResult({ status: "DISPATCHED", dispatched: true, mode: selectedMode, return_id: validatedRequest.return_id, thread_id: validatedBinding.thread_id });
     } catch (error) {
       record.error_code = error?.code || CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN;
-      record.status = error?.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH || error?.code === CODEX_CONTINUATION_ERRORS.EPHEMERAL_SESSION ? "REJECTED" : record.invocation_started ? "DELIVERY_UNKNOWN" : "REJECTED";
+      record.status = error?.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH
+        || error?.code === CODEX_CONTINUATION_ERRORS.EPHEMERAL_SESSION
+        || error?.code === CODEX_RUNTIME_ERRORS.REQUIRED
+        || error?.code === CODEX_RUNTIME_ERRORS.INVALID
+        || error?.code === CODEX_RUNTIME_ERRORS.UNAVAILABLE
+        || error?.code === CODEX_RUNTIME_ERRORS.DRIFT
+        || error?.code === CODEX_RUNTIME_ERRORS.CAPABILITY_UNAVAILABLE
+        || error?.code === CODEX_RUNTIME_ERRORS.PROBE_FAILED
+        ? "REJECTED"
+        : record.invocation_started ? "DELIVERY_UNKNOWN" : "REJECTED";
       throw error;
     }
   };
@@ -531,7 +583,7 @@ export function createCodexContinuationSender({
     return record ? Object.freeze({ status: record.status, mode: record.mode, error_code: record.error_code || null, prompt_sha256: record.prompt_sha256 }) : null;
   };
 
-  return Object.freeze({ send, dispatch: send, inspect, binding: validatedBinding });
+  return Object.freeze({ send, dispatch: send, inspect, binding: validatedBinding, runtime: validatedRuntime });
 }
 
 export const createCodexContinuationAdapter = createCodexContinuationSender;

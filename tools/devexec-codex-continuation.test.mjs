@@ -1,4 +1,7 @@
+import fs from "node:fs";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -13,12 +16,17 @@ import {
   validateCodexContinuationBinding,
   validateCodexContinuationReturn,
 } from "./devexec-codex-continuation.mjs";
+import { createCodexRuntimeBinding } from "./devexec-codex-runtime-binding.mjs";
 
 const BOUND_AT = "2026-09-02T09:00:00.000Z";
 const THREAD_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const THREAD_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const WORK_A = "D:\\Documents\\Codex\\task-a";
 const WORK_B = "D:\\Documents\\Codex\\task-b";
+const RUNTIME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-codex-runtime-test-"));
+let runtimeNumber = 0;
+
+test.after(() => fs.rmSync(RUNTIME_ROOT, { recursive: true, force: true }));
 
 function binding({ mission_id = "mission-1", task_id = "task-a", thread_id = THREAD_A, working_directory = WORK_A } = {}) {
   return createCodexContinuationBinding({ mission_id, task_id, thread_id, working_directory, repo_root: "D:\\Documents\\Codex\\repo", bound_at: BOUND_AT });
@@ -28,16 +36,30 @@ function continuation(bound, prompt = "continue the same task", response_id = "r
   return createCodexContinuationReturn({ binding: bound, prompt, response_id });
 }
 
+function runtimeBinding({ queue = true, resume = true, version = "codex-cli test-runtime 1.0.0" } = {}) {
+  const executablePath = path.join(RUNTIME_ROOT, `codex-${runtimeNumber += 1}.exe`);
+  fs.writeFileSync(executablePath, `test runtime ${executablePath}\n`, "utf8");
+  return createCodexRuntimeBinding({
+    executable_path: executablePath,
+    version,
+    capabilities: { queue, resume },
+    bound_at: BOUND_AT,
+    provenance: "test-fixture",
+  });
+}
+
 test("Task A binds to thread A and builds an exact queue command", () => {
   const bound = binding();
   const request = continuation(bound);
-  const invocation = buildCodexContinuationInvocation({ binding: bound, request, mode: CODEX_CONTINUATION_MODE.QUEUE });
+  const runtime = runtimeBinding();
+  const invocation = buildCodexContinuationInvocation({ binding: bound, request, mode: CODEX_CONTINUATION_MODE.QUEUE, runtime });
   assert.equal(bound.protocol, "devexec.codex-continuation-binding");
   assert.equal(bound.thread_id, THREAD_A);
   assert.equal(bound.session_persisted, true);
   assert.equal(Object.isFrozen(bound), true);
   assert.deepEqual(invocation.args, ["queue", "--thread", THREAD_A, "--message", request.prompt]);
   assert.equal(invocation.cwd, WORK_A);
+  assert.equal(invocation.command, runtime.executable_path);
   assert.equal(invocation.args.includes("--last"), false);
 });
 
@@ -46,7 +68,7 @@ test("Task A/thread A and Task B/thread B cannot cross-route", () => {
   const taskB = binding({ task_id: "task-b", thread_id: THREAD_B, working_directory: WORK_B });
   const requestB = continuation(taskB, "B prompt", "relay-b");
   assert.throws(() => validateCodexContinuationReturn(requestB, taskA), (error) => error.code === CODEX_CONTINUATION_ERRORS.TASK_MISMATCH || error.code === CODEX_CONTINUATION_ERRORS.BINDING_MISMATCH);
-  const senderA = createCodexContinuationSender({ binding: taskA, capabilities: { queue: true, resume: true }, invoke: async () => ({ thread_id: THREAD_A }) });
+  const senderA = createCodexContinuationSender({ binding: taskA, runtime: runtimeBinding(), invoke: async () => ({ thread_id: THREAD_A }) });
   assert.rejects(() => senderA.send(requestB), (error) => error.code === CODEX_CONTINUATION_ERRORS.TASK_MISMATCH || error.code === CODEX_CONTINUATION_ERRORS.BINDING_MISMATCH);
 });
 
@@ -66,8 +88,9 @@ test("wrong thread or session identity fails closed", () => {
 test("autonomous invocation never uses --last, picker, or mutable defaults", () => {
   const bound = binding();
   const request = continuation(bound);
-  const queue = buildCodexContinuationInvocation({ binding: bound, request, mode: "queue" });
-  const resume = buildCodexContinuationInvocation({ binding: bound, request, mode: "resume" });
+  const runtime = runtimeBinding();
+  const queue = buildCodexContinuationInvocation({ binding: bound, request, mode: "queue", runtime });
+  const resume = buildCodexContinuationInvocation({ binding: bound, request, mode: "resume", runtime });
   for (const invocation of [queue, resume]) {
     assert.equal(invocation.args.includes("--last"), false);
     assert.equal(invocation.args.includes("--default"), false);
@@ -80,7 +103,7 @@ test("same return identity and payload is idempotent with no second dispatch", a
   const bound = binding();
   const request = continuation(bound, "same prompt", "relay-1");
   let calls = 0;
-  const sender = createCodexContinuationSender({ binding: bound, capabilities: { queue: true, resume: true }, invoke: async (invocation) => { calls += 1; assert.equal(invocation.mode, "queue"); return { thread_id: THREAD_A }; } });
+  const sender = createCodexContinuationSender({ binding: bound, runtime: runtimeBinding(), invoke: async (invocation) => { calls += 1; assert.equal(invocation.mode, "queue"); return { thread_id: THREAD_A }; } });
   assert.equal((await sender.send(request)).status, "DISPATCHED");
   assert.equal((await sender.send(request)).status, "IDEMPOTENT");
   assert.equal(calls, 1);
@@ -90,7 +113,7 @@ test("same return identity with changed prompt is rejected", async () => {
   const bound = binding();
   const first = continuation(bound, "first", "relay-1");
   const changed = continuation(bound, "changed", "relay-1");
-  const sender = createCodexContinuationSender({ binding: bound, capabilities: { queue: true }, invoke: async () => ({ thread_id: THREAD_A }) });
+  const sender = createCodexContinuationSender({ binding: bound, runtime: runtimeBinding({ queue: true, resume: false }), invoke: async () => ({ thread_id: THREAD_A }) });
   await sender.send(first);
   await assert.rejects(() => sender.send(changed), (error) => error.code === CODEX_CONTINUATION_ERRORS.RETURN_CONFLICT);
 });
@@ -100,7 +123,7 @@ test("resume fallback rejects a new or different thread ID", async () => {
   const request = continuation(bound, "resume", "relay-resume");
   const sender = createCodexContinuationSender({
     binding: bound,
-    capabilities: { queue: false, resume: true },
+    runtime: runtimeBinding({ queue: false, resume: true }),
     invoke: async () => ({ exitCode: 0, stdout: JSON.stringify({ type: "thread.started", thread_id: THREAD_B }) }),
   });
   await assert.rejects(() => sender.send(request), (error) => error.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH);
@@ -113,7 +136,7 @@ test("resume fallback accepts only the exact reported thread.started.thread_id",
   let seen;
   const sender = createCodexContinuationSender({
     binding: bound,
-    capabilities: { queue: false, resume: true },
+    runtime: runtimeBinding({ queue: false, resume: true }),
     invoke: async (invocation) => {
       seen = invocation;
       return { exitCode: 0, stdout: JSON.stringify({ type: "thread.started", thread_id: THREAD_A }) };
@@ -137,8 +160,8 @@ test("concurrent Task A and Task B returns preserve their independent thread tar
     await new Promise((resolve) => setTimeout(resolve, invocation.thread_id === THREAD_A ? 20 : 1));
     return { thread_id: invocation.thread_id };
   };
-  const senderA = createCodexContinuationSender({ binding: taskA, capabilities: { queue: true }, invoke });
-  const senderB = createCodexContinuationSender({ binding: taskB, capabilities: { queue: true }, invoke });
+  const senderA = createCodexContinuationSender({ binding: taskA, runtime: runtimeBinding(), invoke });
+  const senderB = createCodexContinuationSender({ binding: taskB, runtime: runtimeBinding(), invoke });
   const results = await Promise.all([senderA.send(requestA), senderB.send(requestB)]);
   assert.deepEqual(new Map(seen.map((entry) => [entry.thread_id, entry.prompt])), new Map([
     [THREAD_A, requestA.prompt],
@@ -160,7 +183,7 @@ test("simultaneous duplicate returns reserve one external injection", async () =
     await new Promise((resolve) => { release = resolve; });
     return { thread_id: THREAD_A };
   };
-  const sender = createCodexContinuationSender({ binding: bound, capabilities: { queue: true }, invoke });
+  const sender = createCodexContinuationSender({ binding: bound, runtime: runtimeBinding(), invoke });
   const first = sender.send(request);
   await started;
   await assert.rejects(() => sender.send(request), (error) => error.code === CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN);
