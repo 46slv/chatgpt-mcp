@@ -16,6 +16,7 @@ const targetCli = path.join(here, "devexec-target.mjs");
 const localAgentCli = path.join(here, "local-agent-facade.mjs");
 const runtimeCli = path.join(here, "devexec-runtime-cli.mjs");
 const goalCli = path.join(here, "devexec-goal.mjs");
+const closedLoopCli = path.join(here, "devexec-closed-loop-cli.mjs");
 const runner = process.env.DEV_EXEC_RUNNER_PATH || path.join(here, "dev-exec-loop.mjs");
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR = process.env.DEV_EXEC_STATE_DIR || path.join(BASE, "ChatGPTMCPProbe", "dev-exec-state");
@@ -78,6 +79,9 @@ function usage() {
  " devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]",
  " devexec runtime metrics summarize <ledger-dir>",
  " devexec runtime recovery scan --state-dir <state-dir>",
+ " devexec closed-loop admit --mission-id <id> --task-id <id> --thread-id <uuid> --initial-turn-id <uuid> --chat-url <url> --runtime-path <path> --working-directory <path>",
+ " devexec closed-loop run --admission <id-or-manifest-path> [--relay-url <loopback-url>] [--relay-model <id>]",
+ " devexec closed-loop inspect --admission <id-or-manifest-path>",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
  " devexec recover inspect <run-id>",
@@ -110,6 +114,11 @@ if (command === "runtime") {
  const subcommand = args[0];
  if (!["select", "run", "metrics", "recovery"].includes(subcommand)) throw new Error("runtime requires select, run, metrics, or recovery.");
  const code = await runNode(runtimeCli, args, process.env);
+ process.exit(code);
+}
+
+if (command === "closed-loop") {
+ const code = await runNode(closedLoopCli, ["closed-loop", ...args], process.env);
  process.exit(code);
 }
 
