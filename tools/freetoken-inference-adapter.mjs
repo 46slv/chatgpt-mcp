@@ -407,6 +407,11 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       return { status: "BLOCKED", code, reason: String(error.message || error) };
     }
   }
+  // The runtime parent uses this read-only gate before acquiring its
+  // single-host lease. start() repeats the probe immediately before provider
+  // use, so a workload that appears in between still blocks rather than being
+  // stopped or displaced.
+  async function gpuGate() { return Promise.resolve(gpuProbe()); }
   async function stop() {
     if (stopping) return stopping;
     stopping = (async () => {
@@ -490,5 +495,5 @@ export function createFreeTokenInferenceAdapter(options = {}) {
       context.onLifecycle?.("cleanup_end");
     }
   }
-  return Object.freeze({ identity, config, health, start, run, stop, waitReady });
+  return Object.freeze({ identity, config, health, start, run, stop, waitReady, gpuGate });
 }
