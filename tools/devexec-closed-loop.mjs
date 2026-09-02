@@ -100,6 +100,7 @@ export const CODEX_APP_SERVER_EVENTS = Object.freeze({
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
+const MAX_APP_SERVER_FRAME_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY = 21;
 const MAX_OBSERVER_TURNS = 256;
 const MAX_OBSERVER_ITEMS_PER_TURN = 512;
@@ -491,8 +492,8 @@ class NativeAppServerConnection {
       const line = this.buffer.slice(0, index).replace(/\r$/, "");
       this.buffer = this.buffer.slice(index + 1);
       if (!line.trim()) continue;
-      if (Buffer.byteLength(line, "utf8") > MAX_MESSAGE_BYTES * 8) {
-        this.#failPending(new ClosedLoopError("Codex app-server emitted an unbounded JSONL frame.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
+      if (Buffer.byteLength(line, "utf8") > MAX_APP_SERVER_FRAME_BYTES) {
+        this.#failPending(new ClosedLoopError(`Codex app-server emitted an unbounded JSONL frame (${Buffer.byteLength(line, "utf8")} bytes).`, CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
         this.buffer = "";
         return;
       }
@@ -516,8 +517,9 @@ class NativeAppServerConnection {
     }
     // A burst of many bounded notifications may arrive in one data chunk;
     // only an incomplete individual frame is unbounded at this boundary.
-    if (Buffer.byteLength(this.buffer, "utf8") > MAX_MESSAGE_BYTES * 8) {
-      this.#failPending(new ClosedLoopError("Codex app-server emitted an unbounded JSONL frame.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_APP_SERVER_FRAME_BYTES) {
+      const methods = [...this.pending.values()].map((pending) => pending.method).filter(Boolean).join(",");
+      this.#failPending(new ClosedLoopError(`Codex app-server emitted an unbounded JSONL frame (${Buffer.byteLength(this.buffer, "utf8")} bytes; pending=${methods || "notification"}).`, CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
       this.buffer = "";
     }
   }
@@ -550,7 +552,7 @@ class NativeAppServerConnection {
         this.pending.delete(id);
         reject(new ClosedLoopError(`Codex app-server request timed out: ${method}.`, CLOSED_LOOP_ERRORS.OBSERVER_TIMEOUT));
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       try { this.child.stdin.write(`${JSON.stringify(message)}\n`); }
       catch (error) {
         clearTimeout(timer);
