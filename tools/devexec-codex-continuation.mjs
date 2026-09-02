@@ -53,6 +53,7 @@ export const CODEX_RUNTIME_CAPABILITY_UNAVAILABLE = CODEX_RUNTIME_ERRORS.CAPABIL
 export const CODEX_RUNTIME_PROBE_FAILED = CODEX_RUNTIME_ERRORS.PROBE_FAILED;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const QUEUE_SUCCESS_RE = /^Queued message ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) for thread ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.$/;
 const BINDING_FIELDS = Object.freeze([
   "protocol",
   "schema_version",
@@ -459,6 +460,17 @@ export function parseCodexThreadStartedIds(value) {
   return Object.freeze({ ids: Object.freeze(ids), parse_errors: Object.freeze(parseErrors) });
 }
 
+/** Extract the exact thread identity from native `codex queue` success text. */
+export function parseCodexQueueResultThreadIds(value) {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length !== 1) return Object.freeze({ ids: Object.freeze([]), parse_errors: Object.freeze(["queue success output must contain exactly one line"]) });
+  const match = QUEUE_SUCCESS_RE.exec(lines[0]);
+  if (!match) return Object.freeze({ ids: Object.freeze([]), parse_errors: Object.freeze(["queue success output did not match the native success shape"]) });
+  return Object.freeze({ ids: Object.freeze([match[2]]), parse_errors: Object.freeze([]), submission_ids: Object.freeze([match[1]]) });
+}
+
 /** Require the actual continuation result to prove the bound thread identity. */
 export function validateCodexContinuationResult({ binding, mode, result } = {}) {
   const validatedBinding = validateCodexContinuationBinding(binding);
@@ -466,7 +478,9 @@ export function validateCodexContinuationResult({ binding, mode, result } = {}) 
   if (result?.ephemeral === true || result?.session_persisted === false) fail(CODEX_CONTINUATION_ERRORS.EPHEMERAL_SESSION, "Continuation result identifies an ephemeral session.");
   if (exitCodeOf(result) !== 0) fail(CODEX_CONTINUATION_ERRORS.EXECUTION_FAILED, "Codex continuation returned a non-zero exit code.");
 
-  const parsed = parseCodexThreadStartedIds(result?.events || result?.stdout || result);
+  const parsed = mode === CODEX_CONTINUATION_MODE.QUEUE && isObject(result) && result.events === undefined
+    ? parseCodexQueueResultThreadIds(result.stdout || result.output || "")
+    : parseCodexThreadStartedIds(result?.events || result?.stdout || result);
   if (mode === CODEX_CONTINUATION_MODE.RESUME && parsed.parse_errors.length > 0) {
     fail(CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH, "Codex resume output was not valid JSONL proof of the bound thread.");
   }

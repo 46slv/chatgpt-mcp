@@ -12,8 +12,10 @@ import {
   createCodexContinuationReturn,
   createCodexContinuationSender,
   parseCodexCapabilities,
+  parseCodexQueueResultThreadIds,
   parseCodexThreadStartedIds,
   validateCodexContinuationBinding,
+  validateCodexContinuationResult,
   validateCodexContinuationReturn,
 } from "./devexec-codex-continuation.mjs";
 import { createCodexRuntimeBinding } from "./devexec-codex-runtime-binding.mjs";
@@ -220,3 +222,30 @@ test("capability parsing prefers queue and thread-start parsing is strict", () =
   assert.deepEqual(parseCodexCapabilities("Commands:\n  resume      Resume a session\n"), { queue: false, resume: true });
   assert.deepEqual(parseCodexThreadStartedIds(JSON.stringify({ type: "thread.started", thread_id: THREAD_A })), { ids: [THREAD_A], parse_errors: [] });
 });
+
+test("native queue success output proves the exact bound thread", () => {
+  const queuedSubmission = "11111111-1111-4111-8111-111111111111";
+  const result = { exitCode: 0, stdout: `Queued message ${queuedSubmission} for thread ${THREAD_A}.\r\n` };
+  assert.deepEqual(parseCodexQueueResultThreadIds(result.stdout), {
+    ids: [THREAD_A],
+    parse_errors: [],
+    submission_ids: [queuedSubmission],
+  });
+  assert.deepEqual(
+    requireQueueResult(THREAD_A, result),
+    { status: "ACCEPTED", mode: "queue", thread_id: THREAD_A },
+  );
+});
+
+test("native queue success output with a different or ambiguous thread fails closed", () => {
+  const queuedSubmission = "22222222-2222-4222-8222-222222222222";
+  const different = { exitCode: 0, stdout: `Queued message ${queuedSubmission} for thread ${THREAD_B}.\n` };
+  assert.throws(() => requireQueueResult(THREAD_A, different), (error) => error.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH);
+  const multiple = { exitCode: 0, stdout: `${different.stdout}Queued message ${queuedSubmission} for thread ${THREAD_A}.\n` };
+  assert.throws(() => requireQueueResult(THREAD_A, multiple), (error) => error.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH);
+});
+
+function requireQueueResult(thread_id, result) {
+  const bound = binding({ thread_id });
+  return validateCodexContinuationResult({ binding: bound, mode: CODEX_CONTINUATION_MODE.QUEUE, result });
+}
