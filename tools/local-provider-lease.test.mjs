@@ -52,3 +52,9 @@ test("read-only scan is bounded and does not expose raw owner data", () => {
   const before = fs.readFileSync(fileFor(manager), "utf8"); const scan = manager.scan({ maxEntries: 1 }); const after = fs.readFileSync(fileFor(manager), "utf8");
   assert.equal(scan.status, "CLEAN"); assert.equal(before, after); assert.equal(JSON.stringify(scan).includes("134000000000000000"), false); assert.equal(JSON.stringify(scan).includes("1234"), false);
 });
+
+test("Windows default process identity can acquire and release without touching a provider", (t) => {
+  if (process.platform !== "win32") { t.skip("Windows process identity probe only"); return; }
+  const manager = createProviderLeaseManager({ stateDir: root() }); const acquired = manager.acquire(input({ runId: "run-default-probe" }));
+  assert.equal(acquired.status, "ACQUIRED"); assert.equal(manager.release(acquired.lease).status, "RELEASED");
+});
