@@ -130,14 +130,17 @@ function defaultProbe() {
   const boot = (() => {
     if (process.platform !== "win32") return null;
     const code = "$x=(Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToFileTimeUtc();[Console]::Write($x)";
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", code], { encoding: "utf8", timeout: 1200, windowsHide: true, maxBuffer: 128 });
+    // CIM cold-start on a busy Windows workstation can exceed one second.
+    // Keep this bounded, but do not turn a harmless startup delay into a
+    // permanent inability to acquire a local lease.
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", code], { encoding: "utf8", timeout: 4000, windowsHide: true, maxBuffer: 128 });
     return result.status === 0 && FILETIME.test(String(result.stdout).trim()) ? String(result.stdout).trim() : null;
   })();
   const host = boot ? sha(`${os.hostname()}|${boot}`) : null;
   const creation = (pid) => {
     if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return null;
     const code = `$p=Get-Process -Id ${pid} -ErrorAction Stop;[Console]::Write($p.StartTime.ToUniversalTime().ToFileTimeUtc())`;
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", code], { encoding: "utf8", timeout: 1200, windowsHide: true, maxBuffer: 128 });
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", code], { encoding: "utf8", timeout: 4000, windowsHide: true, maxBuffer: 128 });
     const value = String(result.stdout || "").trim(); return result.status === 0 && FILETIME.test(value) ? value : null;
   };
   return Object.freeze({
