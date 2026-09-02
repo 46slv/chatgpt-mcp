@@ -573,9 +573,20 @@ export function createCodexContinuationSender({
       record.invocation_started = true;
       const rawResult = await invoke(invocation);
       const accepted = validateCodexContinuationResult({ binding: validatedBinding, mode: selectedMode, result: rawResult });
+      // Preserve the native queue submission identity when the executor exposes
+      // the one-line success response.  The public validation result remains
+      // intentionally stable; the controller uses this optional field only for
+      // app-server causal correlation.
+      let submissionId = null;
+      if (selectedMode === CODEX_CONTINUATION_MODE.QUEUE && isObject(rawResult) && rawResult.events === undefined) {
+        const parsedQueue = parseCodexQueueResultThreadIds(rawResult.stdout || rawResult.output || "");
+        if (parsedQueue.submission_ids?.length === 1) submissionId = parsedQueue.submission_ids[0];
+      }
       record.status = "COMPLETED";
       record.result = accepted;
-      return immutableResult({ status: "DISPATCHED", dispatched: true, mode: selectedMode, return_id: validatedRequest.return_id, thread_id: validatedBinding.thread_id });
+      const dispatched = { status: "DISPATCHED", dispatched: true, mode: selectedMode, return_id: validatedRequest.return_id, thread_id: validatedBinding.thread_id };
+      if (submissionId !== null) dispatched.submission_id = submissionId;
+      return immutableResult(dispatched);
     } catch (error) {
       record.error_code = error?.code || CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN;
       record.status = error?.code === CODEX_CONTINUATION_ERRORS.IDENTITY_MISMATCH
