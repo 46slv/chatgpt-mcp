@@ -610,9 +610,11 @@ function errorText(error) {
   return values.filter((value) => typeof value === "string").join(" | ");
 }
 
-function isActiveWriterConflict(error) {
+function isActiveWriterConflict(error, expectedThread = null) {
   const text = errorText(error);
-  return /thread-store conflict/i.test(text) && /already has an active writer/i.test(text);
+  if (!/already has an active writer/i.test(text)) return false;
+  if (expectedThread && /thread\s+([0-9a-f-]{36})/i.test(text) && !text.includes(expectedThread)) return false;
+  return true;
 }
 
 function pageThreadId(result) {
@@ -872,7 +874,7 @@ export function createCodexAppServerTurnObserver({
         // A task that is already open in the native Codex app owns its
         // thread writer.  Do not steal that writer or create another thread;
         // switch to bounded, exact durable-history polling instead.
-        if (!isActiveWriterConflict(error)) throw error;
+        if (!isActiveWriterConflict(error, expectedThread)) throw error;
         readOnly = true;
         if (expected?.turn_id) {
           const turn = await hydrateExactTurn(current, expected.turn_id);
