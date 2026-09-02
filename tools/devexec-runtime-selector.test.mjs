@@ -122,3 +122,12 @@ test("nonterminal recovery evidence blocks without auto-resume or provider use",
   assert.equal(invoked, false);
   assert.equal(scanRecoveryState(recovery).runs[0].classification, "NONTERMINAL");
 });
+
+test("parent-owned recovery and lease state cannot be placed inside the task worktree", async () => {
+  const task = fixture(); let invoked = false;
+  const provider = { identity: { runtime: "local", provider: "freetoken" }, config: { idleStopMs: 0 }, async run() { invoked = true; return { status: "PASS" }; } };
+  const entry = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: provider }, recoveryStateDir: path.join(task.worktree, "runtime-state"), leaseStateDir: path.join(task.worktree, "lease-state") });
+  await assert.rejects(() => entry.run(task, { runTest: runTestCommand }), (error) => error.code === "RUNTIME_STATE_INSIDE_WORKTREE");
+  assert.equal(invoked, false);
+  assert.equal(fs.existsSync(path.join(task.worktree, "runtime-state")), false);
+});

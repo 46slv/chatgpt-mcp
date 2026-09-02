@@ -1,6 +1,7 @@
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { runLocalWorkerTask, validateTaskContract, validateTaskBoundary } from "./local-worker-runtime.mjs";
 import { logicalModelId } from "./freetoken-inference-adapter.mjs";
 import { createRecoveryJournal, scanRecoveryState } from "./local-runtime-recovery-journal.mjs";
@@ -115,6 +116,14 @@ function providerLeaseRequest(adapter, runId) {
   };
 }
 
+function assertExternalRuntimeStateDir(stateDir, worktree, label) {
+  if (!stateDir) return;
+  const relative = path.relative(path.resolve(worktree), path.resolve(stateDir));
+  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+    throw new DevExecRuntimeSelectionError(`${label} must be outside the task worktree`, "RUNTIME_STATE_INSIDE_WORKTREE");
+  }
+}
+
 /**
  * Explicit FreeToken runs have a small parent-owned lifecycle envelope.  It
  * intentionally has no routing, takeover, resume, or process-kill behavior:
@@ -134,6 +143,11 @@ export function createDevExecEntrypoint({ selection, env = process.env, adapters
       // recomputation of changes before exposing the result.
       validateTaskContract(task, { verifyGit: false });
       if (adapter?.config?.idleStopMs > 0) throw new DevExecRuntimeSelectionError("idleStopMs must be 0 for the leased local runtime", "IDLE_STOP_UNSUPPORTED");
+      // Journal/lease artifacts belong to the parent, not the worker's
+      // worktree. Otherwise their own terminal event becomes an untrusted
+      // worker diff during parent postflight.
+      assertExternalRuntimeStateDir(recoveryStateDir, task.worktree, "recovery state directory");
+      assertExternalRuntimeStateDir(leaseStateDir, task.worktree, "lease state directory");
       const runId = context.runId || crypto.randomUUID();
       let journal = null;
       let manager = null;
