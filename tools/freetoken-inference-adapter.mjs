@@ -62,7 +62,7 @@ export function createFreeTokenConfig(input = {}, env = process.env) {
   };
   const lifecycleRequestTimeoutMs = boundedNumber(input.lifecycleRequestTimeoutMs ?? input.requestTimeoutMs ?? 60000, 60000, 1000, 120000);
   const inferenceRequestTimeoutMs = boundedNumber(input.inferenceRequestTimeoutMs ?? env.FREETOKEN_INFERENCE_REQUEST_TIMEOUT_MS ?? 180000, 180000, 1000, 600000);
-  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), deviceIndex, controlUrl: localUrl(controlUrl, "controlUrl"), serveUrl: localUrl(serveUrl, "serveUrl"), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? 30000, 30000, 1000, 120000), requestTimeoutMs: lifecycleRequestTimeoutMs, lifecycleRequestTimeoutMs, inferenceRequestTimeoutMs, idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
+  return Object.freeze({ enabled, model: String(model), modelPath: String(modelPath), deviceIndex, controlUrl: localUrl(controlUrl, "controlUrl"), serveUrl: localUrl(serveUrl, "serveUrl"), startMode, readyTimeoutMs: boundedNumber(input.readyTimeoutMs ?? env.FREETOKEN_READY_TIMEOUT_MS ?? 75000, 75000, 1000, 120000), requestTimeoutMs: lifecycleRequestTimeoutMs, lifecycleRequestTimeoutMs, inferenceRequestTimeoutMs, idleStopMs: boundedNumber(input.idleStopMs ?? 0, 0, 0, 120000) });
 }
 
 export function classifyFreeTokenFailure(error) {
