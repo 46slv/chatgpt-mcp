@@ -23,6 +23,10 @@ Codex exact completed turn
 
 Real verification has completed three consecutive `CONTINUE` round-trips on one persisted Codex thread followed by a clean `STOP`.
 
+**Next active development goal:** [`DEVEXEC_CHATGPT_SUPERVISOR_COMPLETION_GOAL.md`](DEVEXEC_CHATGPT_SUPERVISOR_COMPLETION_GOAL.md)
+
+That goal makes the critical next proof explicit: a real ChatGPT next-task response must pass through the actual Local Model `RETURN_CODEX_PROMPT` gate and then reach the exact same persisted Codex thread without human copy/paste. After that proof, ChatGPT becomes the semantic Goal-completion authority (`CONTINUE` / `COMPLETE` / `NEEDS_HUMAN`) while Dev Exec retains deterministic routing, recovery, idempotency, and fail-closed safety authority.
+
 Supporting authority/safety documents:
 
 - [`DEVEXEC_TASK_BOUND_CHAT_TARGET.md`](DEVEXEC_TASK_BOUND_CHAT_TARGET.md) — exact immutable ChatGPT conversation binding; no unattended target fallback.
