@@ -61,7 +61,7 @@ A safe implementation order is:
 
 `DEV-CTR-001` is a supporting control-plane usability goal and may be implemented independently or as an enabling slice when Dev Exec needs to route Local Model/Codex reports back to named ChatGPT conversations without manually supplying URLs.
 
-Neither goal weakens existing Dev Exec safety boundaries. In particular:
+None of these goals weakens existing Dev Exec safety boundaries. In particular:
 
 - Local Model reasoning does not become Mission/control authority.
 - Chat title or Project name never becomes runtime target identity.
