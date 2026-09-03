@@ -5,9 +5,23 @@ This directory contains both current operational documentation and historical/de
 ## Strategic architecture authority
 
 - [`DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md`](DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md) — long-term Dev Exec architecture in which the deterministic Control Plane retains operational intelligence while Local Model, Codex, ChatGPT, Pi, and future agents remain replaceable. Defines Kernel / Reflex Engine / Skills / Forge / Ephemeral Agents, Decision Episode promotion, bounded self-maintenance, internet/GitHub operation boundaries, and one-way Obsidian reporting.
+- [`DEVEXEC_MISSION_INTERFACE_AND_OBSERVABILITY.md`](DEVEXEC_MISSION_INTERFACE_AND_OBSERVABILITY.md) — operator-facing target contract: one external Request becomes one durable Mission, any bounded number of fresh disposable Episodes may run internally, and one canonical verified MissionResult is returned. Also defines exact running-Mission Event attachment and the read-only Mission Observatory boundary.
 - [`goals/DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md`](goals/DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md) — first implementation component for fresh FIND / SOLVE / VERIFY / GOAL_CHECK reasoning episodes with durable Dev Exec state.
+- [`goals/DEV-EVT-001-OPERATOR-EVENT-INGRESS.md`](goals/DEV-EVT-001-OPERATOR-EVENT-INGRESS.md) — typed new-Mission Task/Consultation admission, exact existing-Mission follow-up at safe fresh-Episode boundaries, idempotency/no-replay, and one canonical terminal MissionResult.
+- [`goals/DEV-OBS-001-MISSION-OBSERVATORY.md`](goals/DEV-OBS-001-MISSION-OBSERVATORY.md) — loopback-only read-only projection of Mission, Episode, Event, actual runtime/model, resource, log, evidence, blocker, and terminal-result state.
+- [`goals/README.md`](goals/README.md) — implementation Goal index and ordering guidance.
 
 The strategic architecture is a target authority, not a claim that every component is implemented. Current operational behavior and exact command usage remain owned by the runbooks and live code/tests below.
+
+The Mission interface Goals are deliberately separated:
+
+```text
+DEV-EVT-001  external Request/Event admission and MissionResult identity
+DEV-LER-001  fresh bounded reasoning Episodes and durable continuity
+DEV-OBS-001  human-readable read-only state/evidence projection
+```
+
+A running autonomous Mission receives new operator information through a typed Event for the exact `mission_id`; the Event is not injected into an already-running agent context. Future Observatory controls must submit the same typed Events rather than becoming a second launch or mutation path.
 
 ## Current operational entrypoints
 
@@ -104,3 +118,7 @@ The implemented outer loop normally returns the exact ChatGPT continuation promp
 - Keep Local Model `RELAY` authority separate from Local Worker `AGENT` authority.
 - Keep transport and execution safety bounded (rounds only in legacy mode), and stop on unprovable identity/causality.
 - Preserve unrelated dirty worktrees; use dedicated worktrees for autonomous mutation.
+- Do not inject follow-up text into an already-running Ephemeral Episode; append a typed Event and apply it at a safe fresh boundary.
+- Do not let a browser Observatory own Mission persistence, process execution, provider lifecycle, or action replay.
+- Do not treat configured, selected, loaded, and active-Episode model identities as interchangeable.
+- Do not create more than one canonical terminal MissionResult for one Mission.
