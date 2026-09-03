@@ -223,6 +223,37 @@ test("state store rejects unknown fields and preserves immutable loop identity",
   assert.throws(() => store.create({ ...state, loop_id: "loop-state", thread_id: THREAD_B }), /state identity|persisted loop identity|state.loop_id|thread_id/);
 });
 
+test("legacy bounded history without completion-driven fields remains readable", () => {
+  const f = fixture({ label: "legacy-history" });
+  const store = createClosedLoopStateStore({ stateDir: f.stateDir, now: () => BOUND_AT });
+  const legacy = store.create({
+    loop_id: "loop-legacy-history",
+    mission_id: f.chat.mission_id,
+    task_id: f.chat.task_id,
+    task_chat_binding_id: f.chat.binding_id,
+    conversation_id: f.chat.conversation_id,
+    codex_continuation_binding_id: f.continuation.binding_id,
+    codex_runtime_binding_id: f.runtime.binding_id,
+    codex_runtime_fingerprint: f.runtime.runtime_fingerprint,
+    thread_id: THREAD_A,
+    limits: { max_rounds: 2 },
+    history: [{
+      round_index: 0,
+      source_turn_id: "legacy-turn",
+      source_turn_sha256: `sha256:${"1".repeat(64)}`,
+      report_sha256: `sha256:${"2".repeat(64)}`,
+      relay_request_id: `sha256:${"3".repeat(64)}`,
+      decision: "STOP",
+      codex_return_id: null,
+      submission_id: null,
+      resulting_turn_id: null,
+      resulting_turn_sha256: null,
+    }],
+  });
+  assert.equal(legacy.execution_mode, "bounded");
+  assert.equal(legacy.history[0].decision, "STOP");
+});
+
 test("wrong-thread turn/completed is ignored and never consumed", () => {
   const event = { method: CODEX_APP_SERVER_EVENTS.TURN_COMPLETED, params: { threadId: THREAD_B, turn: { id: "turn-b", status: "completed", items: [{ type: "agentMessage", text: "wrong" }] } } };
   const parsed = parseCodexAppServerNotification(event, { thread_id: THREAD_A, sequence: 2 });

@@ -449,6 +449,16 @@ test("STOP and NEEDS_HUMAN are terminal and never inject a Codex prompt", async 
   }
 });
 
+test("COMPLETE is a distinct semantic terminal and never injects a Codex prompt", async () => {
+  const f = fixture({ label: "terminal-COMPLETE" });
+  let injects = 0;
+  const o = orchestrator(f, relayAdapters({ response: (payload) => envelopeFromPayload(payload, { decision: "COMPLETE", prompt: undefined }), invoke: async () => { injects += 1; return { thread_id: THREAD_A }; } }));
+  const result = await o.run();
+  assert.equal(result.status, FULL_RELAY_STATES.COMPLETE);
+  assert.equal(result.semantic_complete, true);
+  assert.equal(injects, 0);
+});
+
 test("return-leg Local Model hash mutation rejects the exact prompt without Codex injection", async () => {
   const f = fixture({ label: "return-hash" });
   let calls = 0;

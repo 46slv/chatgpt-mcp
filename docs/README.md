@@ -8,20 +8,29 @@ This directory contains both current operational documentation and historical/de
 
 **Start with:** [`DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](DEVEXEC_CLOSED_LOOP_RUNBOOK.md)
 
-Current verified behavior:
+Current verified behavior (completion-driven mode):
 
 ```text
 Codex exact completed turn
   -> Local Model RELAY
   -> exact task-bound ChatGPT conversation
-  -> correlated CONTINUE / STOP / NEEDS_HUMAN
+  -> correlated CONTINUE / COMPLETE / NEEDS_HUMAN (STOP remains compatible)
   -> Local Model RELAY
   -> bound native Codex runtime queue
   -> exact same Codex thread
   -> next exact turn
 ```
 
-Real verification has completed three consecutive `CONTINUE` round-trips on one persisted Codex thread followed by a clean `STOP`.
+`COMPLETE` is the semantic completion authority. Codex's own completion text
+is evidence only. Every cycle persists source-turn/report identity, the
+Supervisor response and decision, exact next-task hash, queue/resulting-turn
+ids, and same-thread proof. `max_rounds` remains the legacy bounded-mode
+terminal; completion-driven mode does not use a fixed round cap as its normal
+completion condition.
+
+The real completion-driven canary is runtime-only and must show a Supervisor
+`CONTINUE` followed by same-thread work and correlated `COMPLETE`; the older
+CGL-005 `STOP` evidence does not satisfy that gate.
 
 Supporting authority/safety documents:
 
@@ -30,6 +39,7 @@ Supporting authority/safety documents:
 - [`tasks/DEV-CGL-003-FULL-RELAY.md`](tasks/DEV-CGL-003-FULL-RELAY.md) — one-round relay contract.
 - [`tasks/DEV-CGL-004-REAL-E2E-PROBE.md`](tasks/DEV-CGL-004-REAL-E2E-PROBE.md) — real one-round proof.
 - [`tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md`](tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md) — current bounded multi-round acceptance contract.
+- [`tasks/DEV-CGL-006-COMPLETION-DRIVEN.md`](tasks/DEV-CGL-006-COMPLETION-DRIVEN.md) — completion-driven semantic terminal and cycle persistence contract.
 
 Primary implementation:
 
@@ -45,7 +55,7 @@ The explicit operational surface is:
 
 ```text
 node tools/devexec.mjs closed-loop admit ...
-node tools/devexec.mjs closed-loop run --admission <id-or-manifest>
+node tools/devexec.mjs closed-loop run --admission <id-or-manifest> --until-complete
 node tools/devexec.mjs closed-loop inspect --admission <id-or-manifest>
 ```
 
@@ -54,6 +64,9 @@ source turn; it does not create a new thread. The canonical ChatGPT URL,
 absolute native runtime, and absolute worktree are immutable inputs. If the
 bound thread has an active writer, the facade uses bounded read-only exact
 durable history rather than selecting another thread or replaying a delivery.
+Select completion-driven operation with `--until-complete` (or
+`--mode completion-driven` during admission); `COMPLETE`/`NEEDS_HUMAN` are
+the normal terminals and any optional safety limit is reported separately.
 
 ### Windows / Dev Exec setup
 
@@ -82,5 +95,5 @@ The implemented outer loop normally returns the exact ChatGPT continuation promp
 - Do not silently switch Codex executables when a required capability is missing.
 - Do not retry ambiguous ChatGPT sends or Codex queue injections.
 - Keep Local Model `RELAY` authority separate from Local Worker `AGENT` authority.
-- Keep loops bounded by explicit rounds/time and stop on unprovable identity/causality.
+- Keep transport and execution safety bounded (rounds only in legacy mode), and stop on unprovable identity/causality.
 - Preserve unrelated dirty worktrees; use dedicated worktrees for autonomous mutation.

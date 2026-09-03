@@ -38,6 +38,10 @@ export const FULL_RELAY_STATES = Object.freeze({
   LOCAL_RETURN_APPROVED: "LOCAL_RETURN_APPROVED",
   CODEX_IN_FLIGHT: "CODEX_IN_FLIGHT",
   COMPLETED: "COMPLETED",
+  // `COMPLETED` is retained for the historical one-round meaning (the
+  // exact Codex queue return was accepted). `COMPLETE` is the distinct
+  // semantic terminal decision made by the ChatGPT Supervisor.
+  COMPLETE: "COMPLETE",
   STOPPED: "STOPPED",
   NEEDS_HUMAN: "NEEDS_HUMAN",
   DELIVERY_UNKNOWN: "DELIVERY_UNKNOWN",
@@ -81,7 +85,7 @@ export const LOCAL_RELAY_ACTIONS = Object.freeze({
 export const LOCAL_RELAY_ACTION = LOCAL_RELAY_ACTIONS;
 export const LOCAL_RELAY_ACTIONS_ALLOWED = LOCAL_RELAY_ACTIONS;
 
-export const RESPONSE_DECISIONS = Object.freeze({ CONTINUE: "CONTINUE", STOP: "STOP", NEEDS_HUMAN: "NEEDS_HUMAN" });
+export const RESPONSE_DECISIONS = Object.freeze({ CONTINUE: "CONTINUE", COMPLETE: "COMPLETE", STOP: "STOP", NEEDS_HUMAN: "NEEDS_HUMAN" });
 export const CODEX_PROMPT_DECISIONS = RESPONSE_DECISIONS;
 
 const CORE_ID_FIELDS = Object.freeze([
@@ -301,20 +305,59 @@ function reportTextFields(report) {
   return output;
 }
 
+function reportEvidenceFields(report) {
+  const output = {};
+  // These are parent-produced evidence fields.  They are copied byte-for-byte
+  // into the ChatGPT payload after a bounded canonical-size check; the Local
+  // Model RELAY still receives hashes only and never sees or rewrites them.
+  const allowed = [
+    "goal",
+    "current_task",
+    "branch",
+    "head",
+    "changed_files",
+    "validation",
+    "diff_evidence",
+    "unresolved_blockers",
+    "codex_self_report",
+    "parent_verifiable_evidence",
+    "source_identity",
+    "source_thread_id",
+    "source_turn_id",
+    "source_turn_sha256",
+    "source_causal_proof",
+  ];
+  for (const field of allowed) {
+    if (!hasOwn(report, field)) continue;
+    const value = report[field];
+    if (typeof value === "string") output[field] = boundedText(value, `report.${field}`, { maxBytes: MAX_TEXT_BYTES });
+    else {
+      let serialized;
+      try { serialized = canonicalJson(value); }
+      catch (error) { fail(FULL_RELAY_ERRORS.INVALID, `report.${field} cannot be serialized.`, error); }
+      if (Buffer.byteLength(serialized, "utf8") > 24 * 1024) fail(FULL_RELAY_ERRORS.INVALID, `report.${field} exceeds the bounded evidence size.`);
+      output[field] = value;
+    }
+  }
+  return output;
+}
+
 function reportPayload({ report, identity }) {
   const payload = {
     protocol: "devexec.full-relay-report",
     schema_version: 1,
-    instruction: "Return exactly one devexec.codex-prompt JSON envelope with the matching correlation fields. Use decision CONTINUE with prompt, STOP, or NEEDS_HUMAN; do not add fields.",
+    instruction: "Return exactly one devexec.codex-prompt JSON envelope with the matching correlation fields. Use decision CONTINUE with prompt, COMPLETE, STOP, or NEEDS_HUMAN; do not add fields.",
     correlation: {
       mission_id: identity.mission_id,
       task_id: identity.task_id,
       relay_request_id: identity.relay_request_id,
       report_sha256: identity.report_sha256,
     },
-    report: reportTextFields(report),
+    report: { ...reportTextFields(report), ...reportEvidenceFields(report) },
   };
-  return canonicalJson(payload);
+  const serialized = canonicalJson(payload);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PAYLOAD_BYTES) fail(FULL_RELAY_ERRORS.INVALID, "Relay report payload exceeds the bounded size.");
+  return serialized;
 }
 
 function validateBindings({ taskChatBinding, chatBinding, chat, codexContinuationBinding, continuationBinding, continuation, codexRuntimeBinding, runtimeBinding, runtime } = {}) {
@@ -463,6 +506,34 @@ function validateStateRecord(value) {
   requiredText(value.conversation_id, "conversation_id", FULL_RELAY_ERRORS.STATE_INVALID);
   requiredText(value.report_payload, "report_payload", FULL_RELAY_ERRORS.STATE_INVALID);
   if (!isDigest(value.report_payload_sha256) || digestBytes(value.report_payload) !== value.report_payload_sha256) fail(FULL_RELAY_ERRORS.STATE_INVALID, "Relay state report payload hash is invalid.");
+  if (value.chatgpt_response !== undefined || value.chatgpt_response_sha256 !== undefined) {
+    if (!isObject(value.chatgpt_response) || !isDigest(value.chatgpt_response_sha256) || hashJson(value.chatgpt_response) !== value.chatgpt_response_sha256) {
+      fail(FULL_RELAY_ERRORS.STATE_INVALID, "Relay state ChatGPT response hash is invalid.");
+    }
+  }
+  if (value.codex_prompt_sha256 !== undefined && value.codex_prompt_sha256 !== null && !isDigest(value.codex_prompt_sha256)) {
+    fail(FULL_RELAY_ERRORS.STATE_INVALID, "Relay state Codex prompt hash is invalid.");
+  }
+  if (value.chatgpt_response?.decision === RESPONSE_DECISIONS.CONTINUE && value.codex_prompt_sha256 !== undefined && value.codex_prompt_sha256 !== null) {
+    if (typeof value.chatgpt_response.prompt !== "string" || digestBytes(value.chatgpt_response.prompt) !== value.codex_prompt_sha256) {
+      fail(FULL_RELAY_ERRORS.STATE_INVALID, "Relay state Codex prompt hash does not match the correlated response prompt.");
+    }
+  }
+  if (value.phase === FULL_RELAY_STATES.COMPLETE) {
+    if (!isObject(value.chatgpt_response) || value.chatgpt_response.decision !== RESPONSE_DECISIONS.COMPLETE || !isDigest(value.chatgpt_response_sha256) || hashJson(value.chatgpt_response) !== value.chatgpt_response_sha256) {
+      fail(FULL_RELAY_ERRORS.STATE_INVALID, "Semantic COMPLETE state requires the exact correlated COMPLETE response.");
+    }
+    try {
+      validateCodexPromptResponse(value.chatgpt_response, {
+        mission_id: value.mission_id,
+        task_id: value.task_id,
+        relay_request_id: value.relay_request_id,
+        report_sha256: value.report_sha256,
+      });
+    } catch (error) {
+      fail(FULL_RELAY_ERRORS.STATE_INVALID, "Semantic COMPLETE state response correlation is invalid.", error);
+    }
+  }
   return value;
 }
 
@@ -778,7 +849,10 @@ export function validateCodexPromptResponse(value, expected = {}) {
   requiredText(parsed.relay_request_id, "relay_request_id", FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID);
   if (!isDigest(parsed.report_sha256)) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "ChatGPT response report_sha256 is invalid.");
   if (!Object.values(RESPONSE_DECISIONS).includes(parsed.decision)) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "ChatGPT response decision is not allowed.");
-  if (parsed.decision === RESPONSE_DECISIONS.CONTINUE) boundedText(parsed.prompt, "prompt", { required: true });
+  if (parsed.decision === RESPONSE_DECISIONS.CONTINUE) {
+    boundedText(parsed.prompt, "prompt", { required: true });
+    if (!parsed.prompt.trim()) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "CONTINUE requires a non-blank continuation prompt.");
+  }
   if (parsed.decision !== RESPONSE_DECISIONS.CONTINUE && hasOwn(parsed, "prompt") && parsed.prompt !== null) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "Terminal ChatGPT decisions cannot carry a continuation prompt.");
   if (hasOwn(parsed, "prompt_id")) requiredText(parsed.prompt_id, "prompt_id", FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID);
   for (const field of ["mission_id", "task_id", "relay_request_id", "report_sha256"]) {
@@ -855,7 +929,7 @@ function terminalResult(state, extra = {}) {
 }
 
 function isTerminal(phase) {
-  return [FULL_RELAY_STATES.COMPLETED, FULL_RELAY_STATES.STOPPED, FULL_RELAY_STATES.NEEDS_HUMAN, FULL_RELAY_STATES.DELIVERY_UNKNOWN, FULL_RELAY_STATES.REJECTED].includes(phase);
+  return [FULL_RELAY_STATES.COMPLETED, FULL_RELAY_STATES.COMPLETE, FULL_RELAY_STATES.STOPPED, FULL_RELAY_STATES.NEEDS_HUMAN, FULL_RELAY_STATES.DELIVERY_UNKNOWN, FULL_RELAY_STATES.REJECTED].includes(phase);
 }
 
 function classifyCodexError(error, sender, returnId) {
@@ -1056,6 +1130,11 @@ export function createFullRelayOrchestrator({
       if (state.phase === FULL_RELAY_STATES.STOPPED) releaseLease();
       return terminalResult(state);
     }
+    if (response.decision === RESPONSE_DECISIONS.COMPLETE) {
+      state = save({ phase: FULL_RELAY_STATES.COMPLETE, terminal_reason: "ChatGPT declared the semantic goal complete" }, { expectedPhase: [FULL_RELAY_STATES.CHATGPT_RESPONSE_RECEIVED] });
+      if (state.phase === FULL_RELAY_STATES.COMPLETE) releaseLease();
+      return terminalResult(state, { semantic_complete: true });
+    }
     if (response.decision === RESPONSE_DECISIONS.NEEDS_HUMAN) {
       state = save({ phase: FULL_RELAY_STATES.NEEDS_HUMAN, terminal_reason: "ChatGPT requested human attention" }, { expectedPhase: FULL_RELAY_STATES.CHATGPT_RESPONSE_RECEIVED });
       if (state.phase === FULL_RELAY_STATES.NEEDS_HUMAN) releaseLease();
@@ -1121,7 +1200,7 @@ export function createFullRelayOrchestrator({
         const cleanup = acquireLease();
         if (cleanup.status === "ACQUIRED") releaseLease();
       }
-      return terminalResult(state, { idempotent: state.phase === FULL_RELAY_STATES.COMPLETED });
+      return terminalResult(state, { idempotent: [FULL_RELAY_STATES.COMPLETED, FULL_RELAY_STATES.COMPLETE].includes(state.phase) });
     }
     if (state.phase === FULL_RELAY_STATES.CHATGPT_IN_FLIGHT || state.phase === FULL_RELAY_STATES.CODEX_IN_FLIGHT) {
       return terminalResult(state, { delivery_unknown: true, resumed: true });

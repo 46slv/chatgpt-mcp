@@ -9,6 +9,7 @@ import {
   CLOSED_LOOP_ADMISSION_PROTOCOL,
   CLOSED_LOOP_ADMISSION_SCHEMA_VERSION,
   admitExistingCodexTask,
+  computeLegacyClosedLoopAdmissionId,
   createHttpLocalRelayAdapter,
   loadClosedLoopAdmission,
   runAdmittedClosedLoop,
@@ -79,6 +80,28 @@ test("admitExistingCodexTask persists exact identities and is idempotent", async
   assert.equal(second.created, false);
   assert.equal(second.admission.admission_id, first.admission.admission_id);
   assert.deepEqual(second.thread_identity, first.thread_identity);
+});
+
+test("legacy bounded admission id remains loadable after the completion-driven extension", async () => {
+  const root = tempRoot("legacy-id");
+  const input = baseInput(root);
+  const legacyId = computeLegacyClosedLoopAdmissionId({
+    mission_id: input.mission_id,
+    task_id: input.task_id,
+    initial_turn_id: input.initial_turn_id,
+    task_chat_binding: { chat_url: input.chat_url, conversation_id: "facade-conversation" },
+    codex_continuation_binding: { thread_id: input.thread_id, working_directory: input.working_directory, repo_root: input.repo_root },
+    codex_runtime_binding: { executable_path: input.runtime_path },
+  });
+  const first = await admitExistingCodexTask({ ...input, admission_id: legacyId });
+  const second = await admitExistingCodexTask({
+    ...input,
+    runtime_probe: async () => { throw new Error("legacy admission must not re-probe runtime"); },
+    thread_probe: async () => { throw new Error("legacy admission must not re-probe thread"); },
+  });
+  assert.equal(first.admission.admission_id, legacyId);
+  assert.equal(second.created, false);
+  assert.equal(second.admission.admission_id, legacyId);
 });
 test("admission requires explicit URL, absolute runtime, absolute worktree, and exact initial turn", async () => {
   const root = tempRoot("strict");
@@ -169,4 +192,48 @@ test("runAdmittedClosedLoop wires two real relay rounds to the admitted thread",
   assert.equal(waitCount, 2);
   assert.equal(result.state.thread_id, threadId);
   assert.equal(hashJson(result.state.history) !== null, true);
+});
+
+test("runAdmittedClosedLoop exposes Supervisor COMPLETE as a semantic terminal", async () => {
+  const root = tempRoot("completion");
+  const input = { ...baseInput(root), execution_mode: "completion-driven", max_rounds: null, goal: "Finish the facade canary", current_task: "Run the exact initial task" };
+  const admitted = await admitExistingCodexTask(input);
+  let waitCount = 0;
+  let sendCount = 0;
+  const observer = {
+    wait: async (expected) => {
+      waitCount += 1;
+      const turnId = waitCount === 1 ? input.initial_turn_id : uuid(4);
+      const value = { kind: "TURN_COMPLETED", thread_id: input.thread_id, turn_id: turnId, turn_status: "completed", message: "Codex says done (evidence only)." };
+      if (waitCount > 1) value.user_prompt = expected.prompt;
+      return value;
+    },
+    checkpoint: () => ({ sequence: waitCount }),
+    close: () => {},
+  };
+  const localRelay = { decide: async (request) => createLocalRelayDecision({ request_id: request.request_id, payload_sha256: request.payload_sha256, action: request.action_expected }) };
+  const chatgptTransport = { send: async (request) => {
+    const correlation = JSON.parse(request.payload).correlation;
+    const decision = sendCount++ === 0 ? "CONTINUE" : "COMPLETE";
+    return createCodexPromptResponse({
+      mission_id: correlation.mission_id,
+      task_id: correlation.task_id,
+      relay_request_id: correlation.relay_request_id,
+      report_sha256: correlation.report_sha256,
+      decision,
+      prompt: decision === "CONTINUE" ? "Run the exact follow-up facade check." : undefined,
+      prompt_id: decision === "CONTINUE" ? "facade-completion-prompt" : undefined,
+    });
+  } };
+  const codexSender = { send: async (request) => ({ status: "DISPATCHED", dispatched: true, mode: "queue", return_id: request.return_id, thread_id: input.thread_id, submission_id: "submission-completion-1" }), inspect: () => null };
+  const result = await runAdmittedClosedLoop({ admission: admitted.admission, observer, localRelay, chatgptTransport, codexSender, ownerId: "facade-completion-owner", now: () => "2026-09-02T12:00:00.000Z" });
+  assert.equal(result.result.status, "COMPLETE");
+  assert.equal(result.result.semantic_terminal, true);
+  assert.equal(result.result.supervisor_decision, "COMPLETE");
+  assert.deepEqual(result.result.history.map((entry) => entry.decision), ["CONTINUE", "COMPLETE"]);
+  assert.equal(result.result.history[0].same_thread_proof, "exact_bound_thread");
+  assert.equal(result.evidence.execution_mode, "completion-driven");
+  assert.equal(result.evidence.semantic_terminal, true);
+  assert.equal(waitCount, 2);
+  assert.equal(sendCount, 2);
 });

@@ -21,9 +21,10 @@ const HELP = [
   "   --chat-url <exact canonical URL> --runtime-path <absolute codex.exe>",
   "   --working-directory <absolute path> [--repo-root <absolute path>]",
   "   [--admission <id>] [--admission-root <absolute path>] [--state-dir <absolute path>]",
-  "   [--max-rounds <1..20>] [--turn-timeout-ms <ms>] [--chatgpt-timeout-ms <ms>] [--local-relay-timeout-ms <ms>]",
+  "   [--mode <bounded|completion-driven>] [--until-complete] [--goal <text>] [--current-task <text>]",
+  "   [--max-rounds <1..20 legacy / 1..1000 completion>] [--safety-max-rounds <1..10000>] [--turn-timeout-ms <ms>] [--chatgpt-timeout-ms <ms>] [--local-relay-timeout-ms <ms>] [--wall-clock-budget-ms <ms>]",
   " devexec closed-loop run --admission <id-or-absolute-manifest-path>",
-  "   [--admission-root <absolute path>] [--relay-url <loopback URL>] [--relay-model <id>] [--mcp-config <absolute path>]",
+  "   [--admission-root <absolute path>] [--mode <bounded|completion-driven>] [--until-complete] [--relay-url <loopback URL>] [--relay-model <id>] [--mcp-config <absolute path>]",
   " devexec closed-loop inspect --admission <id-or-absolute-manifest-path> [--admission-root <absolute path>]",
   "",
   "Admission and continuation are exact and parent-owned. No target alias, current chat, default target, PATH, --last, or fuzzy session fallback is available.",
@@ -45,6 +46,11 @@ const VALUE_OPTIONS = new Set([
   "turn-timeout-ms",
   "chatgpt-timeout-ms",
   "local-relay-timeout-ms",
+  "wall-clock-budget-ms",
+  "safety-max-rounds",
+  "mode",
+  "goal",
+  "current-task",
   "relay-url",
   "relay-model",
   "mcp-config",
@@ -56,6 +62,10 @@ function parseArgs(argv) {
     const token = argv[index];
     if (!token.startsWith("--")) throw new Error(`Unexpected argument: ${token}`);
     const name = token.slice(2);
+    if (name === "until-complete" || name === "completion-driven") {
+      values[name] = true;
+      continue;
+    }
     if (!VALUE_OPTIONS.has(name)) throw new Error(`Unknown closed-loop argument: ${token}`);
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) throw new Error(`${token} requires a value.`);
@@ -89,6 +99,7 @@ function admissionRoot(values) {
 }
 
 async function admit(values) {
+  const executionMode = values.mode || (values["until-complete"] || values["completion-driven"] ? "completion-driven" : "bounded");
   const result = await admitExistingCodexTask({
     mission_id: required(values, "mission-id"),
     task_id: required(values, "task-id"),
@@ -101,10 +112,15 @@ async function admit(values) {
     admission_id: values.admission,
     admission_root: admissionRoot(values),
     state_dir: values["state-dir"],
-    max_rounds: integer(values, "max-rounds", 8),
+    execution_mode: executionMode,
+    goal: values.goal,
+    current_task: values["current-task"],
+    max_rounds: integer(values, "max-rounds", executionMode === "bounded" ? 8 : null),
+    safety_max_rounds: integer(values, "safety-max-rounds"),
     turn_timeout_ms: integer(values, "turn-timeout-ms"),
     chatgpt_timeout_ms: integer(values, "chatgpt-timeout-ms"),
     local_relay_timeout_ms: integer(values, "local-relay-timeout-ms"),
+    wall_clock_budget_ms: integer(values, "wall-clock-budget-ms"),
     runtime_provenance: "explicit-cli-runtime",
   });
   print({
@@ -119,6 +135,9 @@ async function admit(values) {
     codex_continuation_binding_id: result.admission.codex_continuation_binding.binding_id,
     codex_runtime_binding_id: result.admission.codex_runtime_binding.binding_id,
     limits: result.admission.limits,
+    execution_mode: result.admission.execution_mode,
+    goal: result.admission.goal,
+    current_task: result.admission.current_task,
   });
 }
 
@@ -129,6 +148,8 @@ async function run(values) {
     relayUrl: values["relay-url"] || process.env.DEV_EXEC_LOCAL_RELAY_URL || DEFAULT_LOCAL_RELAY_URL,
     relayModel: values["relay-model"] || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || "qwen/qwen3.5-4b",
     mcpConfigPath: values["mcp-config"] || process.env.DEV_EXEC_MCP_CONFIG || DEFAULT_MCP_CONFIG_PATH,
+    mode: values.mode,
+    until_complete: values["until-complete"] || values["completion-driven"] || false,
   });
   print({
     command: "closed-loop run",
@@ -137,7 +158,7 @@ async function run(values) {
     evidence: result.evidence,
     state_file: path.join(result.admission.state_dir, "loops-v1"),
   });
-  if (["DELIVERY_UNKNOWN", "REJECTED", "CANCELLED"].includes(result.result.status)) process.exitCode = 3;
+  if (["DELIVERY_UNKNOWN", "REJECTED", "CANCELLED", "SAFETY_LIMIT_REACHED"].includes(result.result.status)) process.exitCode = 3;
   else if (result.result.status === "NEEDS_HUMAN") process.exitCode = 2;
 }
 

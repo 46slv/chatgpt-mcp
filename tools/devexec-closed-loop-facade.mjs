@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -26,6 +27,7 @@ import {
 import {
   CLOSED_LOOP_PROTOCOL,
   CLOSED_LOOP_SCHEMA_VERSION,
+  CLOSED_LOOP_MODES,
   createCodexAppServerTurnObserver,
   createClosedLoopOrchestrator,
   validateClosedLoopLimits,
@@ -93,7 +95,11 @@ const ADMISSION_FIELDS = Object.freeze([
   "admission_root",
   "created_at",
   "updated_at",
+  "execution_mode",
+  "goal",
+  "current_task",
 ]);
+const ADMISSION_OPTIONAL_FIELDS = Object.freeze(["execution_mode", "goal", "current_task"]);
 const THREAD_PROBE_FIELDS = Object.freeze([
   "thread_id",
   "turn_id",
@@ -122,6 +128,20 @@ function requiredText(value, label, code = CLOSED_LOOP_FACADE_ERRORS.REQUIRED) {
 function optionalText(value, label) {
   if (value === null || value === undefined) return null;
   return requiredText(value, label, CLOSED_LOOP_FACADE_ERRORS.INVALID);
+}
+
+function boundedOptionalText(value, label, maxBytes = 16 * 1024) {
+  if (value === null || value === undefined) return null;
+  const text = requiredText(value, label, CLOSED_LOOP_FACADE_ERRORS.INVALID);
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw new ClosedLoopFacadeError(`${label} exceeds the bounded size.`, CLOSED_LOOP_FACADE_ERRORS.INVALID);
+  return text;
+}
+
+function normalizeExecutionMode(value, label = "execution_mode") {
+  const raw = value === null || value === undefined || value === "" ? CLOSED_LOOP_MODES.BOUNDED : value;
+  if (raw === "until-complete" || raw === "completion_driven" || raw === "completion-driven") return CLOSED_LOOP_MODES.COMPLETION_DRIVEN;
+  if (raw === CLOSED_LOOP_MODES.BOUNDED) return CLOSED_LOOP_MODES.BOUNDED;
+  throw new ClosedLoopFacadeError(`${label} must be bounded or completion-driven.`, CLOSED_LOOP_FACADE_ERRORS.INVALID);
 }
 
 function absolutePath(value, label) {
@@ -217,11 +237,46 @@ function admissionIdentity(input) {
     working_directory: continuation.working_directory,
     repo_root: continuation.repo_root,
     runtime_path: runtime.executable_path,
+    execution_mode: normalizeExecutionMode(input.execution_mode || input.mode || (input.until_complete ? CLOSED_LOOP_MODES.COMPLETION_DRIVEN : input.limits?.mode)),
+    goal: input.goal ?? input.goal_text ?? null,
+    current_task: input.current_task ?? input.currentTask ?? null,
+  };
+}
+
+// CGL-005 derived admission ids before execution mode and report context were
+// part of the manifest. Keep the old projection available so re-admitting an
+// existing bounded task remains an idempotent load instead of creating a
+// second manifest after this schema extension.
+function legacyAdmissionIdentity(input) {
+  const chat = input.task_chat_binding || input.taskChatBinding || { chat_url: input.chat_url, conversation_id: input.conversation_id };
+  const continuation = input.codex_continuation_binding || input.codexContinuationBinding || {
+    thread_id: input.thread_id,
+    working_directory: input.working_directory,
+    repo_root: input.repo_root ?? null,
+  };
+  const runtime = input.codex_runtime_binding || input.codexRuntimeBinding || { executable_path: input.runtime_path };
+  return {
+    protocol: CLOSED_LOOP_ADMISSION_PROTOCOL,
+    schema_version: CLOSED_LOOP_ADMISSION_SCHEMA_VERSION,
+    mission_id: input.mission_id,
+    task_id: input.task_id,
+    initial_turn_id: input.initial_turn_id,
+    chat_url: chat.chat_url,
+    conversation_id: chat.conversation_id,
+    thread_id: continuation.thread_id,
+    working_directory: continuation.working_directory,
+    repo_root: continuation.repo_root,
+    runtime_path: runtime.executable_path,
   };
 }
 
 export function computeClosedLoopAdmissionId(input = {}) {
   const text = sha256(canonicalJson(admissionIdentity(input))).slice("sha256:".length);
+  return `admit-${text}`;
+}
+
+export function computeLegacyClosedLoopAdmissionId(input = {}) {
+  const text = sha256(canonicalJson(legacyAdmissionIdentity(input))).slice("sha256:".length);
   return `admit-${text}`;
 }
 
@@ -245,15 +300,16 @@ function validateThreadProbe(value, continuation, initialTurn) {
   };
 }
 
-function exactKeys(value, fields, label) {
+function exactKeys(value, fields, label, optional = []) {
   if (!isObject(value)) throw new ClosedLoopFacadeError(`${label} must be an object.`, CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
-  for (const field of fields) if (!hasOwn(value, field)) throw new ClosedLoopFacadeError(`${label} field is missing: ${field}.`, CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
+  const optionalSet = new Set(optional);
+  for (const field of fields) if (!optionalSet.has(field) && !hasOwn(value, field)) throw new ClosedLoopFacadeError(`${label} field is missing: ${field}.`, CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
   for (const field of Object.keys(value)) if (!fields.includes(field)) throw new ClosedLoopFacadeError(`${label} contains an unknown field: ${field}.`, CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
 }
 
 /** Validate one persisted admission without resolving any aliases or defaults. */
 export function validateClosedLoopAdmission(value) {
-  exactKeys(value, ADMISSION_FIELDS, "closed-loop admission");
+  exactKeys(value, ADMISSION_FIELDS, "closed-loop admission", ADMISSION_OPTIONAL_FIELDS);
   if (value.protocol !== CLOSED_LOOP_ADMISSION_PROTOCOL || value.schema_version !== CLOSED_LOOP_ADMISSION_SCHEMA_VERSION) {
     throw new ClosedLoopFacadeError("Unsupported closed-loop admission protocol or schema_version.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
   }
@@ -273,6 +329,10 @@ export function validateClosedLoopAdmission(value) {
   }
   const threadProbe = validateThreadProbe(value.thread_probe, continuation, initialTurnId);
   const limits = validateClosedLoopLimits(value.limits);
+  const executionMode = normalizeExecutionMode(value.execution_mode ?? limits.mode);
+  if (limits.mode !== executionMode) throw new ClosedLoopFacadeError("Admission execution_mode does not match limits.mode.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
+  const goal = boundedOptionalText(value.goal, "goal");
+  const currentTask = boundedOptionalText(value.current_task, "current_task");
   const stateDir = absolutePath(value.state_dir, "state_dir");
   const admissionRoot = absolutePath(value.admission_root, "admission_root");
   const createdAt = requiredText(value.created_at, "created_at", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID);
@@ -290,6 +350,9 @@ export function validateClosedLoopAdmission(value) {
     codex_runtime_binding: runtime,
     thread_probe: threadProbe,
     limits,
+    execution_mode: executionMode,
+    goal,
+    current_task: currentTask,
     state_dir: stateDir,
     admission_root: admissionRoot,
     created_at: createdAt,
@@ -332,6 +395,9 @@ function sameAdmissionIdentity(left, right) {
     codex_continuation_binding: left.codex_continuation_binding,
     codex_runtime_binding: left.codex_runtime_binding,
     limits: left.limits,
+    execution_mode: left.execution_mode,
+    goal: left.goal,
+    current_task: left.current_task,
     state_dir: left.state_dir,
   }) === canonicalJson({
     admission_id: right.admission_id,
@@ -342,6 +408,9 @@ function sameAdmissionIdentity(left, right) {
     codex_continuation_binding: right.codex_continuation_binding,
     codex_runtime_binding: right.codex_runtime_binding,
     limits: right.limits,
+    execution_mode: right.execution_mode,
+    goal: right.goal,
+    current_task: right.current_task,
     state_dir: right.state_dir,
   });
 }
@@ -410,13 +479,21 @@ export async function admitExistingCodexTask(input = {}) {
   const workingDirectory = absolutePath(input.working_directory || input.workingDirectory || input.cwd, "working_directory");
   const repoRoot = input.repo_root === undefined && input.repoRoot === undefined ? null : absolutePath(input.repo_root || input.repoRoot, "repo_root");
   const admissionRoot = absolutePath(input.admission_root || input.admissionRoot || DEFAULT_CLOSED_LOOP_ADMISSION_ROOT, "admission_root");
-  const limits = validateClosedLoopLimits(input.limits || {
-    max_rounds: input.max_rounds ?? input.maxRounds ?? 8,
-    turn_timeout_ms: input.turn_timeout_ms ?? input.turnTimeoutMs,
-    chatgpt_timeout_ms: input.chatgpt_timeout_ms ?? input.chatGPTTimeoutMs,
-    local_relay_timeout_ms: input.local_relay_timeout_ms ?? input.localRelayTimeoutMs,
-    wall_clock_budget_ms: input.wall_clock_budget_ms ?? input.wallClockBudgetMs,
-  });
+  const executionMode = normalizeExecutionMode(input.execution_mode || input.mode || (input.until_complete ? CLOSED_LOOP_MODES.COMPLETION_DRIVEN : input.limits?.mode));
+  const limitInput = {
+    ...(input.limits || {}),
+    mode: executionMode,
+    turn_timeout_ms: input.turn_timeout_ms ?? input.turnTimeoutMs ?? input.limits?.turn_timeout_ms,
+    chatgpt_timeout_ms: input.chatgpt_timeout_ms ?? input.chatGPTTimeoutMs ?? input.limits?.chatgpt_timeout_ms,
+    local_relay_timeout_ms: input.local_relay_timeout_ms ?? input.localRelayTimeoutMs ?? input.limits?.local_relay_timeout_ms,
+    wall_clock_budget_ms: input.wall_clock_budget_ms ?? input.wallClockBudgetMs ?? input.limits?.wall_clock_budget_ms,
+    safety_max_rounds: input.safety_max_rounds ?? input.safetyMaxRounds ?? input.limits?.safety_max_rounds,
+  };
+  if (input.max_rounds !== undefined || input.maxRounds !== undefined) limitInput.max_rounds = input.max_rounds ?? input.maxRounds;
+  else if (executionMode === CLOSED_LOOP_MODES.BOUNDED && limitInput.max_rounds === undefined && limitInput.maxRounds === undefined) limitInput.max_rounds = 8;
+  const limits = validateClosedLoopLimits(limitInput);
+  const goal = boundedOptionalText(input.goal ?? input.goal_text ?? null, "goal");
+  const currentTask = boundedOptionalText(input.current_task ?? input.currentTask ?? null, "current_task");
   const requestedAdmissionId = input.admission_id || input.admissionId || null;
   if (requestedAdmissionId !== null) validateAdmissionId(requestedAdmissionId);
 
@@ -440,18 +517,45 @@ export async function admitExistingCodexTask(input = {}) {
   // If a deterministic admission already exists, load it before probing or
   // rebinding the native runtime. A changed runtime remains drift, not a new
   // implicit admission.
-  const candidateId = requestedAdmissionId || computeClosedLoopAdmissionId({
+  const candidateInput = {
     mission_id: missionId,
     task_id: taskId,
     initial_turn_id: initialTurnId,
     task_chat_binding: chat,
     codex_continuation_binding: continuation,
     codex_runtime_binding: { executable_path: runtimePath },
-  });
-  const candidateFile = admissionPath(admissionRoot, candidateId);
-  if (fs.existsSync(candidateFile)) {
+    execution_mode: executionMode,
+    goal,
+    current_task: currentTask,
+  };
+  const candidateId = requestedAdmissionId || computeClosedLoopAdmissionId(candidateInput);
+  const candidateIds = requestedAdmissionId
+    ? [candidateId]
+    : [candidateId, computeLegacyClosedLoopAdmissionId(candidateInput)].filter((value, index, values) => values.indexOf(value) === index);
+  let candidateFile = null;
+  let existingCandidateId = candidateId;
+  for (const id of candidateIds) {
+    const file = admissionPath(admissionRoot, id);
+    if (fs.existsSync(file)) {
+      candidateFile = file;
+      existingCandidateId = id;
+      break;
+    }
+  }
+  if (candidateFile !== null) {
     const existing = loadClosedLoopAdmission(candidateFile);
-    if (existing.mission_id !== missionId || existing.task_id !== taskId || existing.initial_turn_id !== initialTurnId || existing.task_chat_binding.chat_url !== chat.chat_url || existing.codex_continuation_binding.thread_id !== threadId || existing.codex_continuation_binding.working_directory !== workingDirectory || existing.codex_runtime_binding.executable_path.toLowerCase() !== runtimePath.toLowerCase()) {
+    const requestedStateDir = input.state_dir || input.stateDir ? absolutePath(input.state_dir || input.stateDir, "state_dir") : null;
+    const limitFields = [
+      ["max_rounds", ["max_rounds", "maxRounds"]],
+      ["safety_max_rounds", ["safety_max_rounds", "safetyMaxRounds"]],
+      ["turn_timeout_ms", ["turn_timeout_ms", "turnTimeoutMs"]],
+      ["chatgpt_timeout_ms", ["chatgpt_timeout_ms", "chatGPTTimeoutMs"]],
+      ["local_relay_timeout_ms", ["local_relay_timeout_ms", "localRelayTimeoutMs"]],
+      ["wall_clock_budget_ms", ["wall_clock_budget_ms", "wallClockBudgetMs"]],
+    ];
+    const limitsConflict = limitFields.some(([field, aliases]) => aliases.some((alias) => hasOwn(input, alias) || hasOwn(input.limits || {}, alias)) && existing.limits[field] !== limits[field]);
+    const stateDirConflict = requestedStateDir !== null && existing.state_dir !== requestedStateDir;
+    if (existing.mission_id !== missionId || existing.task_id !== taskId || existing.initial_turn_id !== initialTurnId || existing.task_chat_binding.chat_url !== chat.chat_url || existing.codex_continuation_binding.thread_id !== threadId || existing.codex_continuation_binding.working_directory !== workingDirectory || existing.codex_runtime_binding.executable_path.toLowerCase() !== runtimePath.toLowerCase() || existing.execution_mode !== executionMode || existing.goal !== goal || existing.current_task !== currentTask || limitsConflict || stateDirConflict) {
       throw new ClosedLoopFacadeError("Existing admission conflicts with the explicit task/thread/runtime identity.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
     }
     return Object.freeze({ admission: existing, created: false, file: candidateFile, thread_identity: { thread_id: existing.codex_continuation_binding.thread_id, initial_turn_id: existing.initial_turn_id, probe_turn_id: existing.thread_probe.turn_id, source_turn_sha256: existing.thread_probe.source_turn_sha256 } });
@@ -491,7 +595,7 @@ export async function admitExistingCodexTask(input = {}) {
     threadProbe: input.thread_probe || input.threadProbe,
     now,
   });
-  const admissionId = requestedAdmissionId || candidateId;
+  const admissionId = requestedAdmissionId || existingCandidateId;
   const admission = validateClosedLoopAdmission({
     protocol: CLOSED_LOOP_ADMISSION_PROTOCOL,
     schema_version: CLOSED_LOOP_ADMISSION_SCHEMA_VERSION,
@@ -505,11 +609,15 @@ export async function admitExistingCodexTask(input = {}) {
     codex_runtime_binding: runtime,
     thread_probe: threadProbe,
     limits,
+    execution_mode: executionMode,
+    goal,
+    current_task: currentTask,
     state_dir: input.state_dir || input.stateDir || path.join(admissionRoot, admissionId, "state"),
     admission_root: admissionRoot,
     created_at: now(),
     updated_at: now(),
   });
+  candidateFile = admissionPath(admissionRoot, admissionId);
   const written = existingOrWrite(admission, candidateFile);
   return Object.freeze({
     ...written,
@@ -638,11 +746,89 @@ export async function connectBoundChatGPTTransport({ taskChatBinding, mcpConfigP
   });
 }
 
+function execGit(cwd, args, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: timeoutMs, windowsHide: true, maxBuffer: 128 * 1024 }, (error, stdout = "", stderr = "") => {
+      resolve({ ok: !error, stdout: String(stdout).slice(0, 64 * 1024), stderr: String(stderr).slice(0, 16 * 1024), error: error ? String(error.message || error) : null });
+    });
+  });
+}
+
+function parseChangedFiles(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() && !line.trimStart().startsWith("##"))
+    .map((line) => {
+      const match = line.match(/^[ MADRCU?!]{2}\s+(.*)$/);
+      return match ? match[1].trim() : line.trim();
+    })
+    .filter(Boolean)
+    .slice(0, 512);
+}
+
+/**
+ * Collect read-only parent evidence for the Supervisor report. A failed Git
+ * probe is represented as evidence rather than guessed as a clean tree; the
+ * semantic decision remains the Supervisor's responsibility.
+ */
+export async function collectClosedLoopParentEvidence({ admission, validation = null, unresolved_blockers, unresolvedBlockers } = {}) {
+  if (!admission || !isObject(admission.codex_continuation_binding)) throw new ClosedLoopFacadeError("admission is required for parent evidence.", CLOSED_LOOP_FACADE_ERRORS.REQUIRED);
+  const cwd = admission.codex_continuation_binding.working_directory;
+  const [status, branch, head, files, diffStat] = await Promise.all([
+    execGit(cwd, ["status", "--short", "--branch"]),
+    execGit(cwd, ["branch", "--show-current"]),
+    execGit(cwd, ["rev-parse", "HEAD"]),
+    execGit(cwd, ["diff", "--name-only", "HEAD"]),
+    execGit(cwd, ["diff", "--stat", "HEAD"]),
+  ]);
+  const blockers = unresolved_blockers === undefined || unresolved_blockers === null
+    ? unresolvedBlockers ?? []
+    : unresolved_blockers;
+  // `git diff --name-only HEAD` omits untracked files.  The parent-owned
+  // status probe is the source for the changed-path list so the Supervisor
+  // sees additions as well as tracked edits; retain the explicit diff probes
+  // below as independently inspectable evidence.
+  const changed = parseChangedFiles(status.ok ? status.stdout : files.stdout);
+  return {
+    goal: admission.goal,
+    current_task: admission.current_task,
+    branch: branch.ok ? branch.stdout.trim() : null,
+    head: head.ok ? head.stdout.trim() : null,
+    changed_files: changed,
+    validation,
+    diff_evidence: {
+      working_directory: cwd,
+      repo_root: admission.codex_continuation_binding.repo_root,
+      status_short: status.stdout,
+      status_ok: status.ok,
+      diff_name_only: files.stdout,
+      diff_stat: diffStat.stdout,
+      branch_probe_ok: branch.ok,
+      head_probe_ok: head.ok,
+      probe_errors: [status, branch, head, files, diffStat].filter((item) => !item.ok).map((item) => item.error || item.stderr).filter(Boolean).slice(0, 8),
+    },
+    unresolved_blockers: Array.isArray(blockers) ? blockers.slice(0, 64) : [String(blockers)],
+    parent_verifiable_evidence: {
+      evidence_origin: "devexec-parent-readonly-git-probe",
+      working_directory: cwd,
+      repo_root: admission.codex_continuation_binding.repo_root,
+      git_status_observed: status.ok,
+      git_branch_observed: branch.ok,
+      git_head_observed: head.ok,
+      changed_file_count: changed.length,
+    },
+  };
+}
+
 function evidenceFromRun(admission, result, state) {
   const history = Array.isArray(result?.history) ? result.history : Array.isArray(state?.history) ? state.history : [];
-  const sameThread = history.every((entry) => entry && typeof entry.source_turn_id === "string") && admission.codex_continuation_binding.thread_id === admission.thread_probe.thread_id;
+  const sameThread = history.every((entry) => entry && typeof entry.source_turn_id === "string" && (entry.same_thread_proof === undefined || entry.same_thread_proof === null || entry.same_thread_proof === "exact_bound_thread")) && admission.codex_continuation_binding.thread_id === admission.thread_probe.thread_id;
   return {
     status: result?.status || state?.phase || null,
+    execution_mode: result?.execution_mode || state?.execution_mode || admission.execution_mode,
+    supervisor_decision: result?.supervisor_decision || state?.supervisor_decision || null,
+    semantic_terminal: result?.semantic_terminal === true || state?.semantic_terminal === true,
     loop_id: admission.loop_id,
     mission_id: admission.mission_id,
     task_id: admission.task_id,
@@ -655,14 +841,36 @@ function evidenceFromRun(admission, result, state) {
     admitted_probe_turn_id: admission.thread_probe.turn_id,
     history,
     same_thread_identity: sameThread,
-    queue_submissions: history.map((entry) => ({ submission_id: entry.submission_id || null, resulting_turn_id: entry.resulting_turn_id || null, thread_id: admission.codex_continuation_binding.thread_id })),
+    queue_submissions: history.map((entry) => ({ submission_id: entry.queue_submission_id || entry.submission_id || null, resulting_turn_id: entry.resulting_turn_id || null, thread_id: admission.codex_continuation_binding.thread_id, same_thread_proof: entry.same_thread_proof || null })),
   };
 }
 
-/** Run one admitted bounded loop using the existing implementation seams. */
-export async function runAdmittedClosedLoop({ admission: inputAdmission, admissionReference, admissionRoot, observer, localRelay, localModel, chatgptTransport, codexSender, invokeCodex, runtimeProbe, limits, mcpConfigPath, relayUrl, relayModel, ownerId, now } = {}) {
+/** Run one admitted loop using the existing implementation seams. */
+export async function runAdmittedClosedLoop({ admission: inputAdmission, admissionReference, admissionRoot, observer, localRelay, localModel, chatgptTransport, codexSender, invokeCodex, runtimeProbe, limits, mcpConfigPath, relayUrl, relayModel, ownerId, now, report_context, reportContext, report_context_provider, reportContextProvider, validation, unresolved_blockers, unresolvedBlockers, until_complete = false, completion_driven = false, completionDriven = false, mode } = {}) {
   const admission = validateClosedLoopAdmission(inputAdmission || loadClosedLoopAdmission(admissionReference, { admissionRoot }));
-  const selectedLimits = validateClosedLoopLimits(limits || admission.limits);
+  const requestedMode = mode || (until_complete || completion_driven || completionDriven ? CLOSED_LOOP_MODES.COMPLETION_DRIVEN : null);
+  const normalizedRequestedMode = requestedMode === null ? null : normalizeExecutionMode(requestedMode);
+  if (normalizedRequestedMode !== null && normalizedRequestedMode !== admission.execution_mode) {
+    throw new ClosedLoopFacadeError("Run execution mode does not match the immutable admission mode.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
+  }
+  const selectedLimits = validateClosedLoopLimits(normalizedRequestedMode ? { ...(limits || admission.limits), mode: normalizedRequestedMode, ...(normalizedRequestedMode === CLOSED_LOOP_MODES.COMPLETION_DRIVEN && limits?.max_rounds === undefined ? { max_rounds: null } : {}) } : (limits || admission.limits));
+  if (selectedLimits.mode !== admission.execution_mode) throw new ClosedLoopFacadeError("Run limits.mode does not match the immutable admission mode.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
+  const suppliedContext = report_context || reportContext || {};
+  const suppliedProvider = report_context_provider || reportContextProvider;
+  const reportProvider = typeof suppliedProvider === "function"
+    ? suppliedProvider
+    : async ({ completion } = {}) => {
+      const currentTask = completion?.user_prompt || admission.current_task;
+      return {
+        ...(await collectClosedLoopParentEvidence({ admission, validation, unresolved_blockers, unresolvedBlockers })),
+        goal: admission.goal,
+        current_task: currentTask,
+        validation,
+        unresolved_blockers: unresolved_blockers ?? unresolvedBlockers ?? [],
+        ...suppliedContext,
+        ...(suppliedContext.current_task === undefined && suppliedContext.currentTask === undefined ? { current_task: currentTask } : {}),
+      };
+    };
   const resolvedLocalRelay = localRelay || localModel || createHttpLocalRelayAdapter({ baseUrl: relayUrl || process.env.DEV_EXEC_LOCAL_RELAY_URL || DEFAULT_LOCAL_RELAY_URL, model: relayModel || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || "qwen/qwen3.5-4b", timeoutMs: selectedLimits.local_relay_timeout_ms });
   let chatConnection = null;
   let resolvedObserver = observer;
@@ -690,6 +898,7 @@ export async function runAdmittedClosedLoop({ admission: inputAdmission, admissi
       runtimeProbe: runtimeProbe || probeCodexRuntime,
       verifyRuntime: verifyCodexRuntimeBinding,
       limits: selectedLimits,
+      report_context_provider: reportProvider,
       owner_id: ownerId,
       now: now || (() => new Date().toISOString()),
     });

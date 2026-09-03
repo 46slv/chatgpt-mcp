@@ -10,6 +10,7 @@ import {
   FULL_RELAY_STATES,
   canonicalJson,
   createFullRelayOrchestrator,
+  createRelayStateStore,
   hashJson,
   sha256,
 } from "./devexec-full-relay.mjs";
@@ -30,12 +31,22 @@ export const CLOSED_LOOP_PHASES = Object.freeze({
   ROUND_PREPARED: "ROUND_PREPARED",
   RELAY_IN_PROGRESS: "RELAY_IN_PROGRESS",
   WAITING_FOR_CODEX_AFTER_CONTINUE: "WAITING_FOR_CODEX_AFTER_CONTINUE",
+  // Semantic terminal authority comes only from the correlated Supervisor
+  // response.  Keep STOPPED separate for backward-compatible operator stop
+  // semantics and for machine-readable reporting.
+  COMPLETE: "COMPLETE",
   STOPPED: "STOPPED",
   NEEDS_HUMAN: "NEEDS_HUMAN",
   MAX_ROUNDS_REACHED: "MAX_ROUNDS_REACHED",
+  SAFETY_LIMIT_REACHED: "SAFETY_LIMIT_REACHED",
   DELIVERY_UNKNOWN: "DELIVERY_UNKNOWN",
   REJECTED: "REJECTED",
   CANCELLED: "CANCELLED",
+});
+
+export const CLOSED_LOOP_MODES = Object.freeze({
+  BOUNDED: "bounded",
+  COMPLETION_DRIVEN: "completion-driven",
 });
 
 export const CLOSED_LOOP_STATES = CLOSED_LOOP_PHASES;
@@ -70,12 +81,18 @@ export const CLOSED_LOOP_ERRORS = Object.freeze({
 });
 
 export const CLOSED_LOOP_TERMINAL_PHASES = Object.freeze([
+  CLOSED_LOOP_PHASES.COMPLETE,
   CLOSED_LOOP_PHASES.STOPPED,
   CLOSED_LOOP_PHASES.NEEDS_HUMAN,
   CLOSED_LOOP_PHASES.MAX_ROUNDS_REACHED,
+  CLOSED_LOOP_PHASES.SAFETY_LIMIT_REACHED,
   CLOSED_LOOP_PHASES.DELIVERY_UNKNOWN,
   CLOSED_LOOP_PHASES.REJECTED,
   CLOSED_LOOP_PHASES.CANCELLED,
+]);
+export const CLOSED_LOOP_SEMANTIC_TERMINAL_PHASES = Object.freeze([
+  CLOSED_LOOP_PHASES.COMPLETE,
+  CLOSED_LOOP_PHASES.NEEDS_HUMAN,
 ]);
 
 export const CODEX_APP_SERVER_METHODS = Object.freeze({
@@ -101,7 +118,7 @@ const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const MAX_APP_SERVER_FRAME_BYTES = 4 * 1024 * 1024;
-const MAX_HISTORY = 21;
+const MAX_HISTORY = 256;
 const MAX_OBSERVER_TURNS = 256;
 const MAX_OBSERVER_ITEMS_PER_TURN = 512;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -128,6 +145,7 @@ const LOOP_STATE_FIELDS = new Set([
   "codex_runtime_binding_id",
   "codex_runtime_fingerprint",
   "thread_id",
+  "execution_mode",
   "limits",
   "round_index",
   "last_observed_turn_id",
@@ -146,6 +164,9 @@ const LOOP_STATE_FIELDS = new Set([
   "observer_checkpoint",
   "pending_history",
   "history",
+  "supervisor_decision",
+  "supervisor_response_sha256",
+  "semantic_terminal",
   "phase",
   "terminal_reason",
   "error_code",
@@ -1021,8 +1042,25 @@ class JsonFileStore {
 
 function normalizeLimits(value = {}) {
   if (!isObject(value)) throw new ClosedLoopError("limits must be an object.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
-  const maxRounds = Number(value.max_rounds ?? value.maxRounds);
-  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 20) throw new ClosedLoopError("max_rounds must be an integer between 1 and 20.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
+  const rawMode = value.mode ?? value.execution_mode ?? value.loop_mode ?? CLOSED_LOOP_MODES.BOUNDED;
+  const mode = rawMode === "until-complete" || rawMode === "completion_driven" || rawMode === "completion-driven"
+    ? CLOSED_LOOP_MODES.COMPLETION_DRIVEN
+    : rawMode === CLOSED_LOOP_MODES.BOUNDED
+      ? CLOSED_LOOP_MODES.BOUNDED
+      : null;
+  if (!mode) throw new ClosedLoopError("limits.mode must be bounded or completion-driven.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
+  const rawMaxRounds = value.max_rounds ?? value.maxRounds;
+  let maxRounds = rawMaxRounds === null || rawMaxRounds === undefined ? null : Number(rawMaxRounds);
+  const maxRoundsUpperBound = mode === CLOSED_LOOP_MODES.BOUNDED ? 20 : 1000;
+  if (maxRounds !== null && (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > maxRoundsUpperBound)) {
+    throw new ClosedLoopError(`max_rounds must be an integer between 1 and ${maxRoundsUpperBound} when supplied.`, CLOSED_LOOP_ERRORS.LIMIT_INVALID);
+  }
+  if (mode === CLOSED_LOOP_MODES.BOUNDED && maxRounds === null) maxRounds = 8;
+  const rawSafetyRounds = value.safety_max_rounds ?? value.safetyMaxRounds;
+  const safetyMaxRounds = rawSafetyRounds === null || rawSafetyRounds === undefined ? null : Number(rawSafetyRounds);
+  if (safetyMaxRounds !== null && (!Number.isInteger(safetyMaxRounds) || safetyMaxRounds < 1 || safetyMaxRounds > 10000)) {
+    throw new ClosedLoopError("safety_max_rounds must be an integer between 1 and 10000 when supplied.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
+  }
   const turnTimeout = Number(value.turn_timeout_ms ?? value.turnTimeoutMs ?? 10 * 60 * 1000);
   if (!Number.isInteger(turnTimeout) || turnTimeout < 1 || turnTimeout > 24 * 60 * 60 * 1000) throw new ClosedLoopError("turn_timeout_ms is outside the bounded range.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
   const chatTimeout = Number(value.chatgpt_timeout_ms ?? value.chatGPTTimeoutMs ?? 30 * 60 * 1000);
@@ -1031,7 +1069,15 @@ function normalizeLimits(value = {}) {
   if (!Number.isInteger(localTimeout) || localTimeout < 1 || localTimeout > 120 * 1000) throw new ClosedLoopError("local_relay_timeout_ms is outside the bounded range.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
   const wall = value.wall_clock_budget_ms ?? value.wallClockBudgetMs ?? null;
   if (wall !== null && (!Number.isInteger(Number(wall)) || Number(wall) < 1 || Number(wall) > 7 * 24 * 60 * 60 * 1000)) throw new ClosedLoopError("wall_clock_budget_ms is outside the bounded range.", CLOSED_LOOP_ERRORS.LIMIT_INVALID);
-  return Object.freeze({ max_rounds: maxRounds, turn_timeout_ms: turnTimeout, chatgpt_timeout_ms: chatTimeout, local_relay_timeout_ms: localTimeout, wall_clock_budget_ms: wall === null ? null : Number(wall) });
+  return Object.freeze({
+    mode,
+    max_rounds: maxRounds,
+    safety_max_rounds: safetyMaxRounds,
+    turn_timeout_ms: turnTimeout,
+    chatgpt_timeout_ms: chatTimeout,
+    local_relay_timeout_ms: localTimeout,
+    wall_clock_budget_ms: wall === null ? null : Number(wall),
+  });
 }
 
 export const validateClosedLoopLimits = normalizeLimits;
@@ -1040,37 +1086,104 @@ function validateHistory(history) {
   if (!Array.isArray(history) || history.length > MAX_HISTORY) throw new ClosedLoopError("loop history is invalid or unbounded.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   return history.map((entry) => {
     if (!isObject(entry)) throw new ClosedLoopError("loop history entry must be an object.", CLOSED_LOOP_ERRORS.STATE_INVALID);
-    const allowed = ["round_index", "source_turn_id", "source_turn_sha256", "report_sha256", "relay_request_id", "decision", "codex_return_id", "submission_id", "resulting_turn_id", "resulting_turn_sha256"];
+    const allowed = [
+      "round_index",
+      "cycle_id",
+      "supervisor_round_id",
+      "source_turn_id",
+      "source_turn_sha256",
+      "report_sha256",
+      "relay_request_id",
+      "decision",
+      "supervisor_response_sha256",
+      "next_task_sha256",
+      "codex_return_id",
+      "submission_id",
+      "queue_submission_id",
+      "resulting_turn_id",
+      "resulting_turn_sha256",
+      "same_thread_proof",
+    ];
     for (const key of Object.keys(entry)) if (!allowed.includes(key)) throw new ClosedLoopError(`Unknown loop history field: ${key}.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
-    if (!Number.isInteger(entry.round_index) || entry.round_index < 0 || entry.round_index > 20) throw new ClosedLoopError("loop history round_index is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    if (!Number.isInteger(entry.round_index) || entry.round_index < 0 || entry.round_index > 10000) throw new ClosedLoopError("loop history round_index is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
     for (const key of ["source_turn_id", "source_turn_sha256", "report_sha256", "relay_request_id", "decision"]) {
       boundedText(requiredText(entry[key], `history.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID), `history.${key}`, MAX_MESSAGE_BYTES, { required: true });
     }
-    if (!["CONTINUE", "STOP", "NEEDS_HUMAN"].includes(entry.decision)) throw new ClosedLoopError("loop history decision is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    if (!["CONTINUE", "COMPLETE", "STOP", "NEEDS_HUMAN"].includes(entry.decision)) throw new ClosedLoopError("loop history decision is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
     for (const key of ["source_turn_sha256", "report_sha256", "relay_request_id"]) if (!isDigest(entry[key])) throw new ClosedLoopError(`history.${key} must be a sha256 digest.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
-    for (const key of ["codex_return_id", "submission_id", "resulting_turn_id", "resulting_turn_sha256"]) {
+    for (const key of ["cycle_id", "supervisor_round_id", "supervisor_response_sha256", "next_task_sha256", "codex_return_id", "submission_id", "queue_submission_id", "resulting_turn_id", "resulting_turn_sha256", "same_thread_proof"]) {
       const optional = optionalText(entry[key] ?? null, `history.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
       if (optional !== null) boundedText(optional, `history.${key}`, MAX_MESSAGE_BYTES, { required: true });
     }
-    if (entry.resulting_turn_sha256 !== null && !isDigest(entry.resulting_turn_sha256)) throw new ClosedLoopError("history.resulting_turn_sha256 must be a sha256 digest.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    for (const key of ["cycle_id", "supervisor_round_id", "source_turn_sha256", "report_sha256", "relay_request_id", "supervisor_response_sha256", "next_task_sha256", "resulting_turn_sha256"]) {
+      if (entry[key] !== null && entry[key] !== undefined && !isDigest(entry[key])) throw new ClosedLoopError(`history.${key} must be a sha256 digest.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+    }
+    if (entry.queue_submission_id !== null && entry.queue_submission_id !== undefined && entry.submission_id !== null && entry.submission_id !== undefined && entry.queue_submission_id !== entry.submission_id) {
+      throw new ClosedLoopError("history.queue_submission_id must match submission_id.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    }
+    if (entry.same_thread_proof !== null && entry.same_thread_proof !== undefined && entry.same_thread_proof !== "exact_bound_thread") {
+      throw new ClosedLoopError("history.same_thread_proof is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    }
+    // States written before CGL-006 did not carry the cycle/next-task fields.
+    // Preserve those legacy entries, but reject a partially-populated new
+    // entry that claims CONTINUE without the exact prompt hash.
+    const hasCompletionDrivenFields = ["cycle_id", "supervisor_round_id", "supervisor_response_sha256", "next_task_sha256", "queue_submission_id", "same_thread_proof"].some((key) => hasOwn(entry, key));
+    if (entry.decision === "CONTINUE" && entry.next_task_sha256 == null && hasCompletionDrivenFields) throw new ClosedLoopError("CONTINUE history entries require next_task_sha256.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    if (entry.decision !== "CONTINUE" && entry.next_task_sha256 !== null && entry.next_task_sha256 !== undefined) throw new ClosedLoopError("Terminal history entries cannot carry next_task_sha256.", CLOSED_LOOP_ERRORS.STATE_INVALID);
     return Object.freeze({ ...entry });
   });
 }
 
+function validateCompletionDrivenHistory(history, { allowPending = false } = {}) {
+  for (const entry of history) {
+    const hasCompletionDrivenFields = ["cycle_id", "supervisor_round_id", "supervisor_response_sha256", "next_task_sha256", "queue_submission_id", "same_thread_proof"].some((key) => hasOwn(entry, key));
+    if (!hasCompletionDrivenFields) continue;
+    for (const key of ["cycle_id", "supervisor_round_id", "supervisor_response_sha256", "same_thread_proof"]) {
+      if (entry[key] === null || entry[key] === undefined) throw new ClosedLoopError(`Completion-driven history.${key} is required.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+    }
+    if (entry.decision === CODEX_PROMPT_DECISIONS.CONTINUE) {
+      for (const key of ["next_task_sha256", "submission_id", "queue_submission_id"]) {
+        if (entry[key] === null || entry[key] === undefined) throw new ClosedLoopError(`CONTINUE history.${key} is required.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+      }
+      if (!allowPending) {
+        for (const key of ["resulting_turn_id", "resulting_turn_sha256"]) {
+          if (entry[key] === null || entry[key] === undefined) throw new ClosedLoopError(`Resolved CONTINUE history.${key} is required.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+        }
+      }
+    }
+  }
+}
+
 function validateLoopState(value) {
   if (!isObject(value)) throw new ClosedLoopError("Loop state must be an object.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  // v1 states written before completion-driven mode did not carry these
+  // fields.  Normalize them on read so legacy bounded admissions remain
+  // resumable while every newly-written state is explicit.
+  value = {
+    ...value,
+    execution_mode: value.execution_mode ?? value.limits?.mode ?? CLOSED_LOOP_MODES.BOUNDED,
+    supervisor_decision: value.supervisor_decision ?? null,
+    supervisor_response_sha256: value.supervisor_response_sha256 ?? null,
+    semantic_terminal: value.semantic_terminal ?? (value.phase === CLOSED_LOOP_PHASES.COMPLETE),
+  };
   for (const key of Object.keys(value)) if (!LOOP_STATE_FIELDS.has(key)) throw new ClosedLoopError(`Unknown loop state field: ${key}.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
-  for (const key of ["protocol", "loop_id", "mission_id", "task_id", "task_chat_binding_id", "conversation_id", "codex_continuation_binding_id", "codex_runtime_binding_id", "codex_runtime_fingerprint", "thread_id", "phase", "created_at", "updated_at"]) requiredText(value[key], `state.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+  for (const key of ["protocol", "loop_id", "mission_id", "task_id", "task_chat_binding_id", "conversation_id", "codex_continuation_binding_id", "codex_runtime_binding_id", "codex_runtime_fingerprint", "thread_id", "execution_mode", "phase", "created_at", "updated_at"]) requiredText(value[key], `state.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.protocol !== CLOSED_LOOP_PROTOCOL || value.schema_version !== CLOSED_LOOP_SCHEMA_VERSION) throw new ClosedLoopError("Unsupported closed-loop state protocol.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (!Object.values(CLOSED_LOOP_PHASES).includes(value.phase)) throw new ClosedLoopError("Closed-loop state phase is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   const limits = normalizeLimits(value.limits);
-  if (!Number.isInteger(value.round_index) || value.round_index < 0 || value.round_index > limits.max_rounds) throw new ClosedLoopError("state.round_index is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (value.execution_mode !== limits.mode) throw new ClosedLoopError("state.execution_mode does not match limits.mode.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (!Number.isInteger(value.round_index) || value.round_index < 0 || (limits.mode === CLOSED_LOOP_MODES.BOUNDED && limits.max_rounds !== null && value.round_index > limits.max_rounds) || (limits.safety_max_rounds !== null && value.round_index > limits.safety_max_rounds)) throw new ClosedLoopError("state.round_index is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   for (const key of ["last_observed_turn_id", "last_observed_turn_sha256", "last_observed_turn_status", "last_observed_causal_proof", "current_relay_request_id", "current_report_sha256", "expected_after_turn_id", "expected_prompt_sha256", "expected_submission_id", "error_code"]) optionalText(value[key] ?? null, `state.${key}`, CLOSED_LOOP_ERRORS.STATE_INVALID);
   nullableBoundedText(value.last_observed_message, "state.last_observed_message", MAX_MESSAGE_BYTES);
   nullableBoundedText(value.expected_prompt, "state.expected_prompt", MAX_PROMPT_BYTES);
   nullableBoundedText(value.terminal_reason, "state.terminal_reason", MAX_MESSAGE_BYTES);
   nullableBoundedText(value.error_message, "state.error_message", MAX_MESSAGE_BYTES);
   for (const key of ["last_observed_turn_sha256", "current_relay_request_id", "current_report_sha256", "expected_prompt_sha256"]) if (value[key] !== null && !isDigest(value[key])) throw new ClosedLoopError(`state.${key} must be a sha256 digest.`, CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (value.supervisor_decision !== null && !Object.values(CODEX_PROMPT_DECISIONS).includes(value.supervisor_decision)) throw new ClosedLoopError("state.supervisor_decision is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (value.supervisor_response_sha256 !== null && !isDigest(value.supervisor_response_sha256)) throw new ClosedLoopError("state.supervisor_response_sha256 must be a sha256 digest.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (typeof value.semantic_terminal !== "boolean") throw new ClosedLoopError("state.semantic_terminal must be boolean.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (value.semantic_terminal !== (value.phase === CLOSED_LOOP_PHASES.COMPLETE)) throw new ClosedLoopError("state.semantic_terminal does not match phase.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+  if (value.phase === CLOSED_LOOP_PHASES.COMPLETE && (value.supervisor_decision !== CODEX_PROMPT_DECISIONS.COMPLETE || value.supervisor_response_sha256 === null)) throw new ClosedLoopError("COMPLETE state requires a correlated Supervisor decision hash.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.last_observed_turn_id === null && value.last_observed_turn_sha256 !== null) throw new ClosedLoopError("state.last_observed_turn_sha256 requires last_observed_turn_id.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.last_observed_turn_id !== null && value.last_observed_turn_sha256 === null) throw new ClosedLoopError("state.last_observed_turn_id requires last_observed_turn_sha256.", CLOSED_LOOP_ERRORS.STATE_INVALID);
   if (value.last_observed_turn_status !== null && value.last_observed_turn_status !== "completed") throw new ClosedLoopError("state.last_observed_turn_status must be completed.", CLOSED_LOOP_ERRORS.STATE_INVALID);
@@ -1092,8 +1205,10 @@ function validateLoopState(value) {
     if (!isObject(value.pending_history)) throw new ClosedLoopError("state.pending_history is invalid.", CLOSED_LOOP_ERRORS.STATE_INVALID);
     const pending = validateHistory([value.pending_history])[0];
     if (pending.decision !== "CONTINUE" || pending.resulting_turn_id !== null || pending.resulting_turn_sha256 !== null) throw new ClosedLoopError("state.pending_history must be an unresolved CONTINUE entry.", CLOSED_LOOP_ERRORS.STATE_INVALID);
+    validateCompletionDrivenHistory([pending], { allowPending: true });
   }
   validateHistory(value.history);
+  validateCompletionDrivenHistory(value.history);
   return cloneFrozen({ ...value, limits, history: value.history.map((entry) => ({ ...entry })) });
 }
 
@@ -1132,6 +1247,10 @@ export function createClosedLoopStateStore({ stateDir, directory, now = () => ne
       observer_checkpoint: input.observer_checkpoint ?? null,
       pending_history: input.pending_history ?? null,
       history: input.history ?? [],
+      execution_mode: input.execution_mode || input.limits?.mode || CLOSED_LOOP_MODES.BOUNDED,
+      supervisor_decision: input.supervisor_decision ?? null,
+      supervisor_response_sha256: input.supervisor_response_sha256 ?? null,
+      semantic_terminal: input.semantic_terminal ?? ((input.phase || CLOSED_LOOP_PHASES.READY) === CLOSED_LOOP_PHASES.COMPLETE),
       terminal_reason: input.terminal_reason ?? null,
       error_code: input.error_code ?? null,
       error_message: input.error_message ?? null,
@@ -1184,7 +1303,7 @@ export function createClosedLoopStateStore({ stateDir, directory, now = () => ne
 export const createClosedLoopRunStateStore = createClosedLoopStateStore;
 
 function compareLoopImmutable(expected, actual) {
-  for (const key of ["loop_id", "mission_id", "task_id", "task_chat_binding_id", "conversation_id", "codex_continuation_binding_id", "codex_runtime_binding_id", "codex_runtime_fingerprint", "thread_id"]) {
+  for (const key of ["loop_id", "mission_id", "task_id", "task_chat_binding_id", "conversation_id", "codex_continuation_binding_id", "codex_runtime_binding_id", "codex_runtime_fingerprint", "thread_id", "execution_mode"]) {
     if (expected[key] !== actual[key]) throw new ClosedLoopError(`${key} does not match persisted loop identity.`, CLOSED_LOOP_ERRORS.IDENTITY_MISMATCH);
   }
   if (canonicalJson(expected.limits) !== canonicalJson(actual.limits)) throw new ClosedLoopError("Loop limits do not match persisted loop identity.", CLOSED_LOOP_ERRORS.IDENTITY_MISMATCH);
@@ -1287,11 +1406,36 @@ function completionFromValue(value, expectedThread) {
 export const validateCodexCompletionEvidence = completionFromValue;
 export const normalizeCodexCompletion = completionFromValue;
 
-function makeRoundReport(binding, completion, roundIndex) {
+function boundedReportValue(value, label, maxBytes = 24 * 1024) {
+  if (value === undefined || value === null) return null;
+  let serialized;
+  try { serialized = canonicalJson(value); }
+  catch (error) { throw new ClosedLoopError(`${label} cannot be serialized.`, CLOSED_LOOP_ERRORS.INVALID, error); }
+  if (Buffer.byteLength(serialized, "utf8") > maxBytes) throw new ClosedLoopError(`${label} exceeds the bounded report evidence size.`, CLOSED_LOOP_ERRORS.INVALID);
+  return value;
+}
+
+function makeRoundReport(binding, completion, roundIndex, reportContext = {}) {
   const thread = requiredText(completion.thread_id, "completion.thread_id", CLOSED_LOOP_ERRORS.TURN_INVALID);
   const turn = requiredText(completion.turn_id, "completion.turn_id", CLOSED_LOOP_ERRORS.TURN_INVALID);
   const message = boundedText(completion.message, "completion.message", MAX_MESSAGE_BYTES, { required: true });
   const situation = `round=${roundIndex} thread_id=${thread} turn_id=${turn} status=${completion.turn_status} source_turn_sha256=${completion.source_turn_sha256}`;
+  const context = isObject(reportContext) ? reportContext : {};
+  const sourceIdentity = {
+    thread_id: thread,
+    turn_id: turn,
+    turn_status: completion.turn_status,
+    source_turn_sha256: completion.source_turn_sha256,
+    submission_id: completion.submission_id,
+    codex_return_id: completion.codex_return_id,
+    causal_proof: completion.causal_proof,
+  };
+  const parentEvidence = context.parent_verifiable_evidence ?? context.parentEvidence ?? {
+    source_turn_id: turn,
+    source_turn_sha256: completion.source_turn_sha256,
+    observer_causal_proof: completion.causal_proof,
+    evidence_origin: "parent_observer",
+  };
   return createTaskChatRelayReport({
     binding,
     mission_id: binding.mission_id,
@@ -1302,6 +1446,17 @@ function makeRoundReport(binding, completion, roundIndex) {
     source_turn_id: turn,
     source_turn_sha256: completion.source_turn_sha256,
     source_causal_proof: completion.causal_proof,
+    goal: context.goal ?? context.goal_text ?? null,
+    current_task: context.current_task ?? context.currentTask ?? completion.user_prompt ?? null,
+    branch: context.branch ?? null,
+    head: context.head ?? context.commit ?? null,
+    changed_files: boundedReportValue(context.changed_files ?? context.changedFiles ?? [], "changed_files"),
+    validation: boundedReportValue(context.validation ?? context.tests ?? null, "validation"),
+    diff_evidence: boundedReportValue(context.diff_evidence ?? context.diffEvidence ?? null, "diff_evidence"),
+    unresolved_blockers: boundedReportValue(context.unresolved_blockers ?? context.unresolvedBlockers ?? [], "unresolved_blockers"),
+    codex_self_report: message,
+    parent_verifiable_evidence: boundedReportValue(parentEvidence, "parent_verifiable_evidence"),
+    source_identity: boundedReportValue(sourceIdentity, "source_identity"),
   });
 }
 
@@ -1314,17 +1469,39 @@ function relayRequestId(loopId, roundIndex, completion) {
 export const createClosedLoopRelayRequestId = relayRequestId;
 
 function historyEntryFrom({ state, completion, requestId, reportSha, response, codexResult = null, resulting = null }) {
+  const responseSha = hashJson(response);
+  const cycleId = digestValue({
+    protocol: CLOSED_LOOP_PROTOCOL,
+    loop_id: state.loop_id,
+    round_index: state.round_index,
+    source_turn_id: completion.turn_id,
+    source_turn_sha256: completion.source_turn_sha256,
+    relay_request_id: requestId,
+    report_sha256: reportSha,
+  });
+  const isContinue = response.decision === CODEX_PROMPT_DECISIONS.CONTINUE;
+  const sameThread = completion?.thread_id
+    ? completion.thread_id === state.thread_id
+    : codexResult
+      ? codexResult.thread_id === state.thread_id
+      : null;
   return {
     round_index: state.round_index,
+    cycle_id: cycleId,
+    supervisor_round_id: cycleId,
     source_turn_id: completion.turn_id,
     source_turn_sha256: completion.source_turn_sha256,
     report_sha256: reportSha,
     relay_request_id: requestId,
     decision: response.decision,
+    supervisor_response_sha256: responseSha,
+    next_task_sha256: isContinue ? sha256(response.prompt) : null,
     codex_return_id: codexResult?.return_id ?? state.codex_return_id ?? null,
     submission_id: codexResult?.submission_id ?? null,
+    queue_submission_id: codexResult?.submission_id ?? null,
     resulting_turn_id: resulting?.turn_id ?? null,
     resulting_turn_sha256: resulting?.source_turn_sha256 ?? null,
+    same_thread_proof: sameThread === null ? null : sameThread ? "exact_bound_thread" : "thread_mismatch",
   };
 }
 
@@ -1333,7 +1510,20 @@ function isTerminalPhase(phase) {
 }
 
 function terminalResult(state, extra = {}) {
-  return Object.freeze({ status: state.phase, loop_id: state.loop_id, mission_id: state.mission_id, task_id: state.task_id, thread_id: state.thread_id, round_index: state.round_index, terminal_reason: state.terminal_reason, history: state.history, ...extra });
+  return Object.freeze({
+    status: state.phase,
+    execution_mode: state.execution_mode,
+    loop_id: state.loop_id,
+    mission_id: state.mission_id,
+    task_id: state.task_id,
+    thread_id: state.thread_id,
+    round_index: state.round_index,
+    terminal_reason: state.terminal_reason,
+    supervisor_decision: state.supervisor_decision,
+    semantic_terminal: state.semantic_terminal === true || state.phase === CLOSED_LOOP_PHASES.COMPLETE,
+    history: state.history,
+    ...extra,
+  });
 }
 
 /**
@@ -1370,6 +1560,15 @@ export function createClosedLoopOrchestrator({
   limits,
   max_rounds,
   maxRounds,
+  execution_mode,
+  mode,
+  until_complete = false,
+  completion_driven = false,
+  completionDriven = false,
+  report_context,
+  reportContext,
+  report_context_provider,
+  reportContextProvider,
   now = () => new Date().toISOString(),
   owner_id,
   ownerId,
@@ -1382,7 +1581,13 @@ export function createClosedLoopOrchestrator({
   const selectedInitialTurn = optionalText(initial_turn_id || initialTurnId || null, "initial_turn_id", CLOSED_LOOP_ERRORS.TURN_INVALID);
   if (chat.mission_id !== continuation.mission_id || chat.task_id !== continuation.task_id) throw new ClosedLoopError("Task chat and continuation identities do not match.", CLOSED_LOOP_ERRORS.IDENTITY_MISMATCH);
   if (runtime.capabilities.queue !== true) throw new ClosedLoopError("Bound runtime queue capability is required; no fallback is allowed.", CLOSED_LOOP_ERRORS.RUNTIME_INVALID);
-  const selectedLimits = normalizeLimits({ ...(limits || {}), max_rounds: max_rounds ?? maxRounds ?? limits?.max_rounds ?? limits?.maxRounds ?? 8 });
+  const requestedMode = execution_mode || mode || (until_complete || completion_driven || completionDriven ? CLOSED_LOOP_MODES.COMPLETION_DRIVEN : limits?.mode || limits?.execution_mode || CLOSED_LOOP_MODES.BOUNDED);
+  const limitInput = { ...(limits || {}), mode: requestedMode };
+  const selectedMaxRounds = max_rounds ?? maxRounds;
+  if (selectedMaxRounds !== undefined) limitInput.max_rounds = selectedMaxRounds;
+  else if (requestedMode === CLOSED_LOOP_MODES.BOUNDED && limitInput.max_rounds === undefined && limitInput.maxRounds === undefined) limitInput.max_rounds = 8;
+  const selectedLimits = normalizeLimits(limitInput);
+  const selectedMode = selectedLimits.mode;
   const stableId = {
     mission_id: chat.mission_id,
     task_id: chat.task_id,
@@ -1391,6 +1596,7 @@ export function createClosedLoopOrchestrator({
     codex_runtime_binding_id: runtime.binding_id,
     codex_runtime_fingerprint: runtime.runtime_fingerprint,
     thread_id: continuation.thread_id,
+    execution_mode: selectedMode,
     limits: selectedLimits,
   };
   const id = requiredText(loop_id || loopId || digestValue(stableId), "loop_id");
@@ -1413,6 +1619,26 @@ export function createClosedLoopOrchestrator({
   let ownerHandle = null;
   let activeRun = null;
   let cancellationRequested = false;
+  const staticReportContext = report_context || reportContext || {};
+  const reportContextFn = report_context_provider || reportContextProvider;
+
+  const buildReport = async (completion, roundIndex) => {
+    let context = staticReportContext;
+    if (typeof reportContextFn === "function") {
+      context = await reportContextFn({
+        loop_id: id,
+        mission_id: chat.mission_id,
+        task_id: chat.task_id,
+        round_index: roundIndex,
+        completion,
+        state: cloneFrozen(state),
+        bindings: cloneFrozen({ chat, continuation, runtime }),
+      });
+    }
+    if (context === null || context === undefined) context = {};
+    if (!isObject(context)) throw new ClosedLoopError("report_context must be an object.", CLOSED_LOOP_ERRORS.INVALID);
+    return makeRoundReport(chat, completion, roundIndex, context);
+  };
 
   const verifyBoundRuntime = async () => {
     const verifier = typeof verifyRuntime === "function" ? verifyRuntime : verifyCodexRuntimeBinding;
@@ -1481,7 +1707,13 @@ export function createClosedLoopOrchestrator({
   });
 
   const markTerminal = (phase, reason, error = null) => {
-    state = save({ phase, terminal_reason: reason, error_code: error?.code || null, error_message: error ? String(error.message || error) : null }, { expectedPhase: [state.phase] });
+    state = save({
+      phase,
+      semantic_terminal: phase === CLOSED_LOOP_PHASES.COMPLETE,
+      terminal_reason: reason,
+      error_code: error?.code || null,
+      error_message: error ? String(error.message || error) : null,
+    }, { expectedPhase: [state.phase] });
     return terminalResult(state, error ? { error_code: state.error_code } : {});
   };
 
@@ -1495,7 +1727,10 @@ export function createClosedLoopOrchestrator({
     try {
       while (true) {
         if (cancellationRequested) return markTerminal(CLOSED_LOOP_PHASES.CANCELLED, "operator cancellation requested");
-        if (selectedLimits.wall_clock_budget_ms !== null && Date.now() - startedAt >= selectedLimits.wall_clock_budget_ms) return markTerminal(CLOSED_LOOP_PHASES.MAX_ROUNDS_REACHED, "bounded wall-clock budget reached");
+        if (selectedLimits.wall_clock_budget_ms !== null && Date.now() - startedAt >= selectedLimits.wall_clock_budget_ms) {
+          const phase = selectedMode === CLOSED_LOOP_MODES.BOUNDED ? CLOSED_LOOP_PHASES.MAX_ROUNDS_REACHED : CLOSED_LOOP_PHASES.SAFETY_LIMIT_REACHED;
+          return markTerminal(phase, "bounded wall-clock budget reached before semantic completion");
+        }
         if (isTerminalPhase(state.phase)) return terminalResult(state);
         try { await verifyBoundRuntime(); }
         catch (error) { return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "bound Codex runtime fingerprint/capability drifted", error); }
@@ -1520,19 +1755,27 @@ export function createClosedLoopOrchestrator({
             const pending = { ...state.pending_history, resulting_turn_id: admitted.completion.turn_id, resulting_turn_sha256: admitted.completion.source_turn_sha256 };
             const history = [...state.history, pending].slice(-MAX_HISTORY);
             const nextRoundIndex = state.round_index + 1;
-            if (nextRoundIndex >= selectedLimits.max_rounds) {
+            const boundedLimitReached = selectedMode === CLOSED_LOOP_MODES.BOUNDED && selectedLimits.max_rounds !== null && nextRoundIndex >= selectedLimits.max_rounds;
+            const safetyLimitReached = selectedLimits.safety_max_rounds !== null && nextRoundIndex >= selectedLimits.safety_max_rounds;
+            if (boundedLimitReached || safetyLimitReached) {
               state = save({ history, pending_history: null, expected_after_turn_id: null, expected_prompt: null, expected_prompt_sha256: null, expected_submission_id: null, expected_observer_sequence: null, observer_checkpoint: null, round_index: nextRoundIndex, current_relay_request_id: null, current_report: null, current_report_sha256: null, phase: CLOSED_LOOP_PHASES.ROUND_PREPARED }, { expectedPhase: [CLOSED_LOOP_PHASES.WAITING_FOR_CODEX_AFTER_CONTINUE] });
-              return markTerminal(CLOSED_LOOP_PHASES.MAX_ROUNDS_REACHED, "max_rounds reached after the exact queued turn completed");
+              const phase = boundedLimitReached ? CLOSED_LOOP_PHASES.MAX_ROUNDS_REACHED : CLOSED_LOOP_PHASES.SAFETY_LIMIT_REACHED;
+              const reason = boundedLimitReached ? "max_rounds reached after the exact queued turn completed" : "safety_max_rounds reached after the exact queued turn completed";
+              return markTerminal(phase, reason);
             }
             // The resulting turn is already an admitted exact source. Build the
             // next report now; do not re-wait for it or infer a new turn by
             // arrival order after reconnect.
-            const nextReport = makeRoundReport(chat, admitted.completion, nextRoundIndex);
+            let nextReport;
+            try { nextReport = await buildReport(admitted.completion, nextRoundIndex); }
+            catch (error) { return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "parent completion report evidence could not be built", error); }
             const nextRequestId = relayRequestId(id, nextRoundIndex, admitted.completion);
             state = save({ history, pending_history: null, expected_after_turn_id: null, expected_prompt: null, expected_prompt_sha256: null, expected_submission_id: null, expected_observer_sequence: null, observer_checkpoint: null, round_index: nextRoundIndex, current_relay_request_id: nextRequestId, current_report: nextReport, current_report_sha256: hashJson(nextReport), phase: CLOSED_LOOP_PHASES.ROUND_PREPARED }, { expectedPhase: [CLOSED_LOOP_PHASES.WAITING_FOR_CODEX_AFTER_CONTINUE] });
             continue;
           }
-          const report = makeRoundReport(chat, admitted.completion, state.round_index);
+          let report;
+          try { report = await buildReport(admitted.completion, state.round_index); }
+          catch (error) { return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "parent completion report evidence could not be built", error); }
           const requestId = relayRequestId(id, state.round_index, admitted.completion);
           const reportSha = hashJson(report);
           state = save({ phase: CLOSED_LOOP_PHASES.ROUND_PREPARED, current_relay_request_id: requestId, current_report: report, current_report_sha256: reportSha }, { expectedPhase: [CLOSED_LOOP_PHASES.WAITING_FOR_CODEX_TURN] });
@@ -1540,6 +1783,18 @@ export function createClosedLoopOrchestrator({
 
         if (state.phase === CLOSED_LOOP_PHASES.ROUND_PREPARED || state.phase === CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS) {
           if (!state.current_report || !state.current_relay_request_id) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "persisted round report identity is incomplete");
+          if (state.phase === CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS) {
+            // The parent marks the relay in-flight before creating the child
+            // state.  After a restart, a missing or malformed child state is
+            // persisted-state corruption, not permission to recreate and
+            // resend a report whose external delivery may already have begun.
+            try {
+              const relayStore = createRelayStateStore({ stateDir: path.join(store.stateDir, "full-relay"), now });
+              if (!relayStore.load(state.current_relay_request_id)) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "persisted Full Relay state is missing for an in-flight parent round");
+            } catch (error) {
+              return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "persisted Full Relay state is corrupt for an in-flight parent round", error);
+            }
+          }
           const checkpoint = state.observer_checkpoint || resolvedObserver.checkpoint();
           state = save({ phase: CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS, observer_checkpoint: checkpoint, expected_observer_sequence: checkpoint?.sequence ?? null }, { expectedPhase: [CLOSED_LOOP_PHASES.ROUND_PREPARED, CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
           const relay = createRelay(state.current_report, state.current_relay_request_id);
@@ -1550,23 +1805,29 @@ export function createClosedLoopOrchestrator({
           if ([FULL_RELAY_STATES.CHATGPT_IN_FLIGHT, FULL_RELAY_STATES.CODEX_IN_FLIGHT, FULL_RELAY_STATES.DELIVERY_UNKNOWN].includes(relayResult.status)) return markTerminal(CLOSED_LOOP_PHASES.DELIVERY_UNKNOWN, "Full Relay side effect or delivery is ambiguous", new ClosedLoopError("Full Relay returned an in-flight or unknown state.", CLOSED_LOOP_ERRORS.OBSERVER_INVALID));
           if (relayResult.status === FULL_RELAY_STATES.WAITING_FOR_CONVERSATION_SLOT) return terminalResult(state, { waiting: true, holder: relayResult.holder || null });
           if (relayResult.status === FULL_RELAY_STATES.REJECTED) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay rejected the bounded round", new ClosedLoopError(relayState.error_message || "Full Relay rejected the round.", relayState.error_code || FULL_RELAY_ERRORS.INVALID));
-          if (relayResult.status !== FULL_RELAY_STATES.COMPLETED && relayResult.status !== FULL_RELAY_STATES.STOPPED && relayResult.status !== FULL_RELAY_STATES.NEEDS_HUMAN) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay returned an unexpected state", new ClosedLoopError(`Unexpected Full Relay status: ${relayResult.status}.`, CLOSED_LOOP_ERRORS.INVALID));
+          if (relayResult.status !== FULL_RELAY_STATES.COMPLETED && relayResult.status !== FULL_RELAY_STATES.COMPLETE && relayResult.status !== FULL_RELAY_STATES.STOPPED && relayResult.status !== FULL_RELAY_STATES.NEEDS_HUMAN) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay returned an unexpected state", new ClosedLoopError(`Unexpected Full Relay status: ${relayResult.status}.`, CLOSED_LOOP_ERRORS.INVALID));
           const response = relayState.chatgpt_response;
+          if (response?.decision === CODEX_PROMPT_DECISIONS.COMPLETE || relayResult.status === FULL_RELAY_STATES.COMPLETE) {
+            if (!response || response.decision !== CODEX_PROMPT_DECISIONS.COMPLETE || relayResult.status !== FULL_RELAY_STATES.COMPLETE) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay semantic completion state was not correlated", new ClosedLoopError("COMPLETE requires a correlated COMPLETE response.", CLOSED_LOOP_ERRORS.IDENTITY_MISMATCH));
+            const entry = historyEntryFrom({ state, completion: { thread_id: state.thread_id, turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response });
+            state = save({ history: [...state.history, entry].slice(-MAX_HISTORY), supervisor_decision: response.decision, supervisor_response_sha256: hashJson(response) }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
+            return markTerminal(CLOSED_LOOP_PHASES.COMPLETE, "ChatGPT declared the semantic goal complete");
+          }
           if (!response || response.decision === CODEX_PROMPT_DECISIONS.STOP) {
-            const entry = historyEntryFrom({ state, completion: { turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response: response || { decision: "STOP" } });
-            state = save({ history: [...state.history, entry].slice(-MAX_HISTORY) }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
+            const entry = historyEntryFrom({ state, completion: { thread_id: state.thread_id, turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response: response || { decision: "STOP" } });
+            state = save({ history: [...state.history, entry].slice(-MAX_HISTORY), supervisor_decision: response?.decision || CODEX_PROMPT_DECISIONS.STOP, supervisor_response_sha256: response ? hashJson(response) : null }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
             return markTerminal(CLOSED_LOOP_PHASES.STOPPED, "ChatGPT requested STOP");
           }
           if (response.decision === CODEX_PROMPT_DECISIONS.NEEDS_HUMAN) {
-            const entry = historyEntryFrom({ state, completion: { turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response });
-            state = save({ history: [...state.history, entry].slice(-MAX_HISTORY) }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
+            const entry = historyEntryFrom({ state, completion: { thread_id: state.thread_id, turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response });
+            state = save({ history: [...state.history, entry].slice(-MAX_HISTORY), supervisor_decision: response.decision, supervisor_response_sha256: hashJson(response) }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
             return markTerminal(CLOSED_LOOP_PHASES.NEEDS_HUMAN, "ChatGPT requested human attention");
           }
           if (response.decision !== CODEX_PROMPT_DECISIONS.CONTINUE || typeof response.prompt !== "string") return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "ChatGPT response decision is not admissible");
           const codexResult = relayState.codex_result || {};
           if (codexResult.mode !== "queue") return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay did not use the bound queue continuation", new ClosedLoopError("Only the native queue continuation is admissible.", CLOSED_LOOP_ERRORS.RUNTIME_INVALID));
           if (codexResult.thread_id !== continuation.thread_id) return markTerminal(CLOSED_LOOP_PHASES.REJECTED, "Full Relay queue result did not prove the exact thread", new ClosedLoopError("Queue result thread mismatch.", CLOSED_LOOP_ERRORS.WRONG_THREAD));
-          const pending = historyEntryFrom({ state, completion: { turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response, codexResult });
+          const pending = historyEntryFrom({ state, completion: { thread_id: state.thread_id, turn_id: state.last_observed_turn_id, source_turn_sha256: state.last_observed_turn_sha256 }, requestId: state.current_relay_request_id, reportSha: state.current_report_sha256, response, codexResult });
           const persistedCheckpoint = state.observer_checkpoint;
           state = save({
             phase: CLOSED_LOOP_PHASES.WAITING_FOR_CODEX_AFTER_CONTINUE,
@@ -1576,6 +1837,8 @@ export function createClosedLoopOrchestrator({
             expected_submission_id: codexResult.submission_id || null,
             expected_observer_sequence: persistedCheckpoint?.sequence ?? null,
             pending_history: pending,
+            supervisor_decision: response.decision,
+            supervisor_response_sha256: hashJson(response),
           }, { expectedPhase: [CLOSED_LOOP_PHASES.RELAY_IN_PROGRESS] });
           continue;
         }
