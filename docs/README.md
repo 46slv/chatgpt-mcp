@@ -1,12 +1,47 @@
 # Dev Exec documentation index
 
-This directory separates the current operational closed-loop contract from
-older design notes and the CGL acceptance records.
+This directory contains both current operational documentation and historical/design material. Start here rather than assuming every older design document describes the current runtime.
 
-## Current operational entrypoint
+## Current operational entrypoints
 
-Start with [`DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](DEVEXEC_CLOSED_LOOP_RUNBOOK.md).
-The first-class facade is exposed by:
+### Closed Goal Loop
+
+**Start with:** [`DEVEXEC_CLOSED_LOOP_RUNBOOK.md`](DEVEXEC_CLOSED_LOOP_RUNBOOK.md)
+
+Current verified behavior:
+
+```text
+Codex exact completed turn
+  -> Local Model RELAY
+  -> exact task-bound ChatGPT conversation
+  -> correlated CONTINUE / STOP / NEEDS_HUMAN
+  -> Local Model RELAY
+  -> bound native Codex runtime queue
+  -> exact same Codex thread
+  -> next exact turn
+```
+
+Real verification has completed three consecutive `CONTINUE` round-trips on one persisted Codex thread followed by a clean `STOP`.
+
+Supporting authority/safety documents:
+
+- [`DEVEXEC_TASK_BOUND_CHAT_TARGET.md`](DEVEXEC_TASK_BOUND_CHAT_TARGET.md) — exact immutable ChatGPT conversation binding; no unattended target fallback.
+- [`DEVEXEC_CONCURRENT_RELAY_SAFETY.md`](DEVEXEC_CONCURRENT_RELAY_SAFETY.md) — multi-Codex isolation, conversation-scoped single-flight, response correlation.
+- [`tasks/DEV-CGL-003-FULL-RELAY.md`](tasks/DEV-CGL-003-FULL-RELAY.md) — one-round relay contract.
+- [`tasks/DEV-CGL-004-REAL-E2E-PROBE.md`](tasks/DEV-CGL-004-REAL-E2E-PROBE.md) — real one-round proof.
+- [`tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md`](tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md) — current bounded multi-round acceptance contract.
+
+Primary implementation:
+
+- `tools/devexec-closed-loop-facade.mjs`
+- `tools/devexec-closed-loop-cli.mjs`
+- `tools/devexec-task-chat-binding.mjs`
+- `tools/devexec-codex-runtime-binding.mjs`
+- `tools/devexec-codex-continuation.mjs`
+- `tools/devexec-full-relay.mjs`
+- `tools/devexec-closed-loop.mjs`
+
+The explicit operational surface is:
 
 ```text
 node tools/devexec.mjs closed-loop admit ...
@@ -14,59 +49,38 @@ node tools/devexec.mjs closed-loop run --admission <id-or-manifest>
 node tools/devexec.mjs closed-loop inspect --admission <id-or-manifest>
 ```
 
-Admission binds an existing persisted Codex task/thread, an exact completed
-source turn, a canonical ChatGPT conversation, an absolute native runtime, and
-an absolute worktree. It does not create a new thread. The run remains bounded
-by explicit rounds and timeouts.
+Admission accepts an existing persisted Codex task/thread and exact completed
+source turn; it does not create a new thread. The canonical ChatGPT URL,
+absolute native runtime, and absolute worktree are immutable inputs. If the
+bound thread has an active writer, the facade uses bounded read-only exact
+durable history rather than selecting another thread or replaying a delivery.
 
-The operational path is:
+### Windows / Dev Exec setup
 
-```text
-exact Codex turn
-  -> hash-only Local Model RELAY
-  -> bound ChatGPT conversation
-  -> correlated CONTINUE / STOP / NEEDS_HUMAN
-  -> exact prompt bytes to the same bound Codex thread only on CONTINUE
-```
+- [`DEVEXEC_WINDOWS_SETUP.md`](DEVEXEC_WINDOWS_SETUP.md)
+- [`DEVEXEC_LOCAL_RUN_LEDGER.md`](DEVEXEC_LOCAL_RUN_LEDGER.md)
 
-Supporting contract documents:
+## Historical / earlier design material
 
-- [`DEVEXEC_TASK_BOUND_CHAT_TARGET.md`](DEVEXEC_TASK_BOUND_CHAT_TARGET.md) —
-  immutable exact ChatGPT target and correlation.
-- [`DEVEXEC_CONCURRENT_RELAY_SAFETY.md`](DEVEXEC_CONCURRENT_RELAY_SAFETY.md) —
-  single-flight and ambiguous-delivery safety.
-- [`tasks/DEV-CGL-003-FULL-RELAY.md`](tasks/DEV-CGL-003-FULL-RELAY.md) —
-  one-round relay contract.
-- [`tasks/DEV-CGL-004-REAL-E2E-PROBE.md`](tasks/DEV-CGL-004-REAL-E2E-PROBE.md) —
-  real one-round proof.
-- [`tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md`](tasks/DEV-CGL-005-BOUNDED-MULTI-ROUND.md) —
-  the prior bounded-loop proof; this facade does not recreate it.
+[`DEVEXEC_CODEX_CLOSED_GOAL_LOOP.md`](DEVEXEC_CODEX_CLOSED_GOAL_LOOP.md) records the original closed-loop design exploration. Some early sections describe a Local Model task-compiler and fresh-Codex-task-per-cycle architecture. That is **not** the current operational behavior.
 
-Primary implementation modules:
+Current precedence for target, continuation, runtime and relay semantics is:
 
-- `tools/devexec-closed-loop-facade.mjs`
-- `tools/devexec-closed-loop-cli.mjs`
-- `tools/devexec-closed-loop.mjs`
-- `tools/devexec-full-relay.mjs`
-- `tools/devexec-task-chat-binding.mjs`
-- `tools/devexec-codex-runtime-binding.mjs`
-- `tools/devexec-codex-continuation.mjs`
+1. `DEVEXEC_CLOSED_LOOP_RUNBOOK.md`
+2. `DEVEXEC_TASK_BOUND_CHAT_TARGET.md`
+3. `DEVEXEC_CONCURRENT_RELAY_SAFETY.md`
+4. CGL-003/004/005 task acceptance documents
+5. implemented tests/modules
+6. older `DEVEXEC_CODEX_CLOSED_GOAL_LOOP.md` design notes
 
-## Non-negotiable routing rules
+The implemented outer loop normally returns the exact ChatGPT continuation prompt to the **same persisted Codex thread**. The Local Model is a hash-only `RELAY` gate in this path; it does not semantically rewrite the task or choose the next target.
 
-- `TaskChatBinding`, persisted thread identity, and native runtime identity are
-  immutable after admission.
-- The Local Model receives only the hash/action `RELAY` envelope; it cannot
-  select a target, thread, path, command, or prompt bytes.
-- Only a correlated `CONTINUE` queues the exact returned
-  `devexec.codex-prompt` bytes to the bound thread.
-- `STOP`, `NEEDS_HUMAN`, in-flight, and ambiguous delivery states never queue
-  or automatically resend.
-- No current-chat, mutable default, PATH, `--last`, fuzzy session lookup, or
-  arrival-order routing is used.
-- Preserve unrelated dirty worktrees and use a dedicated bound worktree for
-  autonomous mutation.
+## Safety rules that apply across the current system
 
-Historical architecture notes in
-[`DEVEXEC_CODEX_CLOSED_GOAL_LOOP.md`](DEVEXEC_CODEX_CLOSED_GOAL_LOOP.md) are
-not authority when they conflict with this runbook and the implemented tests.
+- Do not commit a real ChatGPT conversation URL.
+- Do not use `current-chat`, mutable defaults, browser focus, `--last`, fuzzy Codex session selection, or PATH resolution as unattended routing authority.
+- Do not silently switch Codex executables when a required capability is missing.
+- Do not retry ambiguous ChatGPT sends or Codex queue injections.
+- Keep Local Model `RELAY` authority separate from Local Worker `AGENT` authority.
+- Keep loops bounded by explicit rounds/time and stop on unprovable identity/causality.
+- Preserve unrelated dirty worktrees; use dedicated worktrees for autonomous mutation.
