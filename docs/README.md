@@ -2,6 +2,13 @@
 
 This directory contains both current operational documentation and historical/design material. Start here rather than assuming every older design document describes the current runtime.
 
+## Strategic architecture authority
+
+- [`DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md`](DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md) — long-term Dev Exec architecture in which the deterministic Control Plane retains operational intelligence while Local Model, Codex, ChatGPT, Pi, and future agents remain replaceable. Defines Kernel / Reflex Engine / Skills / Forge / Ephemeral Agents, Decision Episode promotion, bounded self-maintenance, internet/GitHub operation boundaries, and one-way Obsidian reporting.
+- [`goals/DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md`](goals/DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md) — first implementation component for fresh FIND / SOLVE / VERIFY / GOAL_CHECK reasoning episodes with durable Dev Exec state.
+
+The strategic architecture is a target authority, not a claim that every component is implemented. Current operational behavior and exact command usage remain owned by the runbooks and live code/tests below.
+
 ## Current operational entrypoints
 
 ### Closed Goal Loop

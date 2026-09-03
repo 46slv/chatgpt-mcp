@@ -1,9 +1,12 @@
 # DEV-LER-001 — Local Ephemeral Reasoning Engine
 
 Status: PROPOSED / GOAL AUTHORITY  
-Scope: Dev Exec local-model operation
+Scope: Dev Exec local-model operation  
+Parent architecture: [`../DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md`](../DEVEXEC_SELF_EVOLVING_ARCHITECTURE.md)
 
 > **Repository scope note:** This Goal belongs to **Dev Exec**, not specifically to the ChatGPT MCP transport. It is colocated in `46slv/chatgpt-mcp` because this repository is currently the implementation home of Dev Exec. A future repository split or rename must preserve this Goal and its invariants rather than reinterpret it as a ChatGPT-transport-specific feature.
+
+This Goal implements the initial **Ephemeral Agents** mechanism under the parent architecture. It may emit structured Decision Episodes for later Forge analysis, but it does not own Reflex policy, Skill promotion, canonical Mission state, or control-plane authority.
 
 ## Goal
 
@@ -138,6 +141,18 @@ Keep existing Dev Exec modes distinct:
 
 Do not merge these authorities for convenience.
 
+## Relationship to Reflex and Forge
+
+The reasoning engine may return bounded facts, reason codes, candidate actions, selected action, and evidence requirements suitable for a `devexec.decision-episode`. Raw reasoning is not Forge input.
+
+The parent architecture decides whether repeated verified episodes become a rule candidate. This Goal must not:
+
+- activate a Reflex rule;
+- expand a Skill's authority;
+- replace an in-use adapter;
+- promote its own output based only on self-report;
+- bypass shadow evaluation or independent verification.
+
 ## Self-development target
 
 The first high-value consumer is Dev Exec self-development:
@@ -199,6 +214,7 @@ A bounded real Local Model run must prove at least:
 - Solver self-certification of success
 - replacement of Codex Closed Goal Loop
 - solving every long-context problem through summarization/compaction
+- direct activation or promotion of Reflex rules and Skills
 
 ## Success condition
 
