@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devexec.harness-outer.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "outer_run_id", "status", "created_at", "updated_at", "harness_binding", "cycles"],
+  "properties": {
+    "schema": {"const": "devexec.harness-outer.v1"},
+    "outer_run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["RUNNING", "COMPLETE", "NEEDS_HUMAN"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "harness_binding": {"type": "object", "additionalProperties": false, "required": ["harness_repository", "harness_commit_sha", "target_repository", "target_ref", "working_directory", "evidence_root"], "properties": {"harness_repository": {"type": "string"}, "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "target_repository": {"type": "string"}, "target_ref": {"type": "string"}, "working_directory": {"type": "string"}, "evidence_root": {"type": "string"}}},
+    "cycles": {"type": "array", "items": {"type": "object", "required": ["cycle_index", "child_run_id", "harness_commit_sha", "input_state_hash", "resulting_state_hash", "ephemeral", "transcripts_forwarded"], "properties": {"cycle_index": {"type": "integer", "minimum": 0}, "child_run_id": {"type": "string"}, "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "input_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "resulting_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "ephemeral": {"const": true}, "transcripts_forwarded": {"const": false}}}
+  }
+}
