@@ -8,12 +8,12 @@ This list belongs to Dev Exec as a system, not specifically to the ChatGPT MCP t
 
 | Goal | Status | Purpose |
 | --- | --- | --- |
-| [`DEV-LER-001 — Local Ephemeral Reasoning Engine`](DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md) | PROPOSED / GOAL AUTHORITY | Decouple long-running Local Model Missions from small model context windows using fresh ephemeral FIND / SOLVE / VERIFY / GOAL_CHECK episodes and durable Dev Exec state. |
+| [`DEV-LER-001 — Local Ephemeral Reasoning Engine`](DEV-LER-001-LOCAL-EPHEMERAL-REASONING.md) | ACTIVE / GOAL AUTHORITY | Decouple long-running Local Model Missions from small model context windows using fresh ephemeral FIND / SOLVE / VERIFY / GOAL_CHECK episodes and durable Dev Exec state. Active implementation branch: `automation/devexec-local-ephemeral-reasoning-20260903`; first slice: `docs/tasks/DEV-LER-001-V0-FIRST-SLICE.md`. |
 | [`DEV-CTR-001 — Chat Target Discovery / Semantic Resolution`](DEV-CTR-001-CHAT-TARGET-RESOLUTION.md) | PROPOSED / IMPLEMENTATION GOAL | Discover a ChatGPT conversation by human-facing title/Project descriptors, then resolve and freeze one exact canonical conversation identity before sending or starting a run. |
 
 ## Ordering guidance
 
-`DEV-LER-001` is the primary Local Model operation goal.
+`DEV-LER-001` is the primary Local Model operation goal and is currently active.
 
 `DEV-CTR-001` is a supporting control-plane usability goal and may be implemented independently or as an enabling slice when Dev Exec needs to route Local Model/Codex reports back to named ChatGPT conversations without manually supplying URLs.
 
