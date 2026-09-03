@@ -3,6 +3,8 @@
 Status: PROPOSED / GOAL AUTHORITY  
 Scope: Dev Exec local-model operation
 
+> **Repository scope note:** This Goal belongs to **Dev Exec**, not specifically to the ChatGPT MCP transport. It is colocated in `46slv/chatgpt-mcp` because this repository is currently the implementation home of Dev Exec. A future repository split or rename must preserve this Goal and its invariants rather than reinterpret it as a ChatGPT-transport-specific feature.
+
 ## Goal
 
 Enable small-context local models to continue long-horizon Dev Exec problem solving without Mission duration being constrained by one model session's context window.
