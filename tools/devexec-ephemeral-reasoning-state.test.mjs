@@ -8,6 +8,7 @@ import {
   openEphemeralReasoningEpisode,
   applyEphemeralReasoningResult,
   resolveEphemeralContextRequest,
+  registerEphemeralEvidenceRefs,
   ephemeralReasoningStateDigest,
 } from "./devexec-ephemeral-reasoning-state.mjs";
 
@@ -17,6 +18,7 @@ const base = () => createEphemeralReasoningState({
   goal_id: "DEV-LER-001",
   goal: { text: "Finish two bounded verified problems", acceptance: ["P1 and P2 solved"], required_evidence_refs: ["ev:goal"] },
   constraints: ["fresh context per episode", "no transcript forwarding"],
+  evidence_authority_refs: ["ev:goal", "ev:p1", "ev:p2-observed", "ev:problem", "ev:fact", "ev:solver"],
   approved_context_refs: ["ctx:base"],
 });
 const result = (episode, outcome, overrides = {}) => ({
@@ -54,11 +56,11 @@ test("bounded 12-episode mission has distinct fresh episode identities and separ
   for (let index = 0; index < 3; index += 1) {
     ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "ATTEMPTED", { summary: "same-size-attempt" }));
     ep = open(state); capture(ep);
-    if (index < 2) state = applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED"));
+    if (index < 2) state = applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { evidence_refs: ["ev:p1"] }));
     else state = applyEphemeralReasoningResult(state, ep, result(ep, "SOLVED", { evidence_refs: ["ev:p1"] }));
   }
   assert.equal(state.next_role, "GOAL_CHECK"); assert.equal(state.terminal, null);
-  ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "INCOMPLETE"));
+  ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "INCOMPLETE", { evidence_refs: ["ev:p1"] }));
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "FOUND", { problem: { problem_id: "P2", statement: "solve p2", required_evidence_refs: [] } }));
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "ATTEMPTED"));
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "SOLVED", { evidence_refs: ["ev:p2-observed"] }));
@@ -82,7 +84,7 @@ test("three UNSOLVED cycles do not accumulate prior model context into SOLVE pro
     assert.ok(ep.input.prior_attempt === null || ep.input.prior_attempt.problem_id === "P1");
     state = applyEphemeralReasoningResult(state, ep, result(ep, "ATTEMPTED", { summary: "fixed-attempt" }));
     const verifyEp = open(state);
-    state = applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "UNSOLVED"));
+    state = applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "UNSOLVED", { evidence_refs: ["ev:p1"] }));
   }
   assert.equal(state.attempts.length, 3);
   assert.equal(solveInputSizes[1], solveInputSizes[2]);
@@ -117,15 +119,15 @@ test("SOLVED and COMPLETE fail closed without their deterministic evidence", () 
   let state = findProblem(base(), "P-evidence", ["ev:problem"]);
   [state] = solveAttempt(state);
   const verifyEp = open(state);
-  assert.throws(() => applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED")), /requires deterministic evidence|missing required deterministic evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED")), /requires evidence|requires deterministic evidence|missing required deterministic evidence/);
   state = applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED", { evidence_refs: ["ev:problem"] }));
   const goalEp = open(state);
-  assert.throws(() => applyEphemeralReasoningResult(state, goalEp, result(goalEp, "COMPLETE")), /requires deterministic evidence|missing required deterministic evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(state, goalEp, result(goalEp, "COMPLETE")), /requires evidence|requires deterministic evidence|missing required deterministic evidence/);
 
   let emptyRequired = findProblem(base(), "P-empty", []);
   [emptyRequired] = solveAttempt(emptyRequired);
   const emptyVerify = open(emptyRequired);
-  assert.throws(() => applyEphemeralReasoningResult(emptyRequired, emptyVerify, result(emptyVerify, "SOLVED")), /requires deterministic evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(emptyRequired, emptyVerify, result(emptyVerify, "SOLVED")), /requires evidence|requires deterministic evidence/);
 });
 
 test("Solver cannot self-certify SOLVED and stale episode results cannot advance state", () => {
@@ -167,6 +169,27 @@ test("JSON restart reconstructs the next episode from durable state without conv
   assert.equal(JSON.stringify(restored).includes("conversation"), false);
 });
 
+test("restart validator rejects impossible role/problem/attempt combinations", () => {
+  const initial = base();
+  assert.throws(() => validateEphemeralReasoningState({ ...initial, current_problem: { problem_id: "P-bad", statement: "bad", required_evidence_refs: [] } }), /FIND requires no current_problem/);
+
+  let state = findProblem(initial, "P-struct");
+  assert.throws(() => validateEphemeralReasoningState({ ...state, next_role: "GOAL_CHECK" }), /GOAL_CHECK requires solved current_problem/);
+  assert.throws(() => validateEphemeralReasoningState({ ...state, episode_seq: 4 }), /last_result does not match episode_seq/);
+  assert.throws(() => validateEphemeralReasoningState({ ...state, attempts: [{ episode_id: "E000001-deadbeefdeadbeef", problem_id: "P-other", outcome: "ATTEMPTED", summary: "x", evidence_refs: [], requested_context_refs: [] }] }), /unknown problem/);
+});
+
+test("model results cannot manufacture evidence authority; parent registration is explicit", () => {
+  let state = findProblem(base(), "P-authority");
+  [state] = solveAttempt(state);
+  let ep = open(state);
+  assert.throws(() => applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { evidence_refs: ["ev:unregistered"] })), /outside parent evidence authority/);
+  state = registerEphemeralEvidenceRefs(state, { evidence_refs: ["ev:unregistered"] });
+  ep = open(state);
+  state = applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { evidence_refs: ["ev:unregistered"] }));
+  assert.ok(state.evidence_authority_refs.includes("ev:unregistered"));
+});
+
 test("apply validates the full episode envelope so callers cannot forge budget or identity authority", () => {
   let state = findProblem(base(), "P-forge");
   const ep = open(state);
@@ -187,7 +210,7 @@ test("verified facts require evidence carried by the same independent result", (
   [state] = solveAttempt(state);
   const ep = open(state);
   const fact = { key: "fact.one", value: "verified", evidence_ref: "ev:fact" };
-  assert.throws(() => applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { verified_facts: [fact] })), /fact evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { verified_facts: [fact] })), /requires evidence|fact evidence/);
   state = applyEphemeralReasoningResult(state, ep, result(ep, "UNSOLVED", { evidence_refs: ["ev:fact"], verified_facts: [fact] }));
   assert.deepEqual(state.verified_facts, [fact]);
 });
