@@ -129,7 +129,7 @@ function validateGoal(value) {
 
 const STATE_KEYS = [
   "schema", "schema_version", "mission_id", "goal_id", "goal", "constraints", "verified_facts",
-  "approved_context_refs", "pending_context_request_refs", "current_problem", "solved_problem_ids",
+  "evidence_authority_refs", "approved_context_refs", "pending_context_request_refs", "current_problem", "solved_problem_ids",
   "attempts", "episode_seq", "next_role", "terminal", "last_result",
 ];
 const LAST_RESULT_KEYS = ["episode_id", "role", "outcome", "summary", "evidence_refs"];
@@ -140,12 +140,22 @@ export function validateEphemeralReasoningState(state) {
   if (state.schema !== EPHEMERAL_REASONING_STATE_SCHEMA || state.schema_version !== 1) throw new Error("unsupported ephemeral reasoning state schema");
   id(state.mission_id, "mission_id"); id(state.goal_id, "goal_id"); validateGoal(state.goal);
   itemList(state.constraints, "constraints"); facts(state.verified_facts);
+  uniqueStrings(state.evidence_authority_refs, "evidence_authority_refs");
+  const evidenceAuthority = new Set(state.evidence_authority_refs);
+  for (const evidenceRef of state.goal.required_evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("goal required evidence is outside parent evidence authority");
+  for (const entry of state.verified_facts) if (!evidenceAuthority.has(entry.evidence_ref)) throw new Error("verified fact is outside parent evidence authority");
   uniqueStrings(state.approved_context_refs, "approved_context_refs");
   uniqueStrings(state.pending_context_request_refs, "pending_context_request_refs");
-  if (state.current_problem !== null) problem(state.current_problem, "current_problem");
+  if (state.current_problem !== null) {
+    problem(state.current_problem, "current_problem");
+    for (const evidenceRef of state.current_problem.required_evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("problem required evidence is outside parent evidence authority");
+  }
   uniqueStrings(state.solved_problem_ids, "solved_problem_ids", id);
   if (!Array.isArray(state.attempts) || state.attempts.length > LIMITS.attempts) throw new Error("attempts invalid");
-  state.attempts.forEach((entry, index) => attempt(entry, `attempts[${index}]`));
+  state.attempts.forEach((entry, index) => {
+    attempt(entry, `attempts[${index}]`);
+    for (const evidenceRef of entry.evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("attempt evidence is outside parent evidence authority");
+  });
   if (!Number.isInteger(state.episode_seq) || state.episode_seq < 0 || state.episode_seq > 1_000_000) throw new Error("episode_seq invalid");
   if (!NEXT_ROLES.has(state.next_role)) throw new Error("next_role invalid");
   if (state.terminal !== null && !["COMPLETE", "BLOCKED"].includes(state.terminal)) throw new Error("terminal invalid");
@@ -160,12 +170,35 @@ export function validateEphemeralReasoningState(state) {
     if (!OUTCOMES[state.last_result.role].has(state.last_result.outcome)) throw new Error("last_result.outcome invalid");
     text(state.last_result.summary, "last_result.summary", LIMITS.summary);
     uniqueStrings(state.last_result.evidence_refs, "last_result.evidence_refs");
+    for (const evidenceRef of state.last_result.evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("last_result evidence is outside parent evidence authority");
+  }
+  if (state.episode_seq === 0 && state.last_result !== null) throw new Error("initial state cannot have last_result");
+  if (state.episode_seq > 0 && state.last_result === null) throw new Error("advanced state requires last_result");
+  if (state.last_result !== null && !state.last_result.episode_id.startsWith(`E${String(state.episode_seq).padStart(6, "0")}-`)) throw new Error("last_result does not match episode_seq");
+  const currentProblemId = state.current_problem?.problem_id || null;
+  const solved = new Set(state.solved_problem_ids);
+  if (state.next_role === "FIND" && state.current_problem !== null) throw new Error("FIND requires no current_problem");
+  if (["SOLVE", "VERIFY"].includes(state.next_role) && solved.has(currentProblemId)) throw new Error(`${state.next_role} cannot target solved current_problem`);
+  if (state.next_role === "GOAL_CHECK" && (state.current_problem === null || !solved.has(currentProblemId))) throw new Error("GOAL_CHECK requires solved current_problem");
+  if (state.terminal === "COMPLETE" && (state.current_problem === null || !solved.has(currentProblemId))) throw new Error("COMPLETE requires solved current_problem");
+  if (state.pending_context_request_refs.length && state.next_role !== "SOLVE") throw new Error("pending context request requires SOLVE next_role");
+  const validAttemptProblems = new Set(state.solved_problem_ids);
+  if (currentProblemId) validAttemptProblems.add(currentProblemId);
+  const attemptEpisodes = new Set();
+  for (const entry of state.attempts) {
+    if (!validAttemptProblems.has(entry.problem_id)) throw new Error("attempt references unknown problem");
+    if (attemptEpisodes.has(entry.episode_id)) throw new Error("attempt episode ids must be unique");
+    attemptEpisodes.add(entry.episode_id);
+  }
+  if (state.next_role === "VERIFY") {
+    const latest = latestAttemptFor(state, currentProblemId);
+    if (!latest || latest.outcome !== "ATTEMPTED") throw new Error("VERIFY requires latest ATTEMPTED solve record");
   }
   assertBytes(state, LIMITS.durable_state_bytes, "durable reasoning state");
   return state;
 }
 
-export function createEphemeralReasoningState({ mission_id, goal_id, goal, constraints = [], verified_facts = [], approved_context_refs = [] } = {}) {
+export function createEphemeralReasoningState({ mission_id, goal_id, goal, constraints = [], verified_facts = [], evidence_authority_refs = [], approved_context_refs = [] } = {}) {
   const state = {
     schema: EPHEMERAL_REASONING_STATE_SCHEMA,
     schema_version: 1,
@@ -174,6 +207,7 @@ export function createEphemeralReasoningState({ mission_id, goal_id, goal, const
     goal: validateGoal(goal),
     constraints: itemList(constraints, "constraints"),
     verified_facts: facts(verified_facts),
+    evidence_authority_refs: uniqueStrings(evidence_authority_refs, "evidence_authority_refs"),
     approved_context_refs: uniqueStrings(approved_context_refs, "approved_context_refs"),
     pending_context_request_refs: [],
     current_problem: null,
@@ -275,7 +309,7 @@ function validateEpisodeAgainstState(episode, state) {
 }
 
 const RESULT_KEYS = ["schema", "schema_version", "episode_id", "role", "outcome", "summary", "evidence_refs", "problem", "context_request_refs", "verified_facts"];
-function validateResult(result, episode) {
+function validateResult(result, episode, state) {
   rejectForbiddenKeys(result, "result");
   exact(result, RESULT_KEYS, "ephemeral reasoning result");
   if (result.schema !== EPHEMERAL_REASONING_RESULT_SCHEMA || result.schema_version !== 1) throw new Error("unsupported ephemeral reasoning result schema");
@@ -283,6 +317,8 @@ function validateResult(result, episode) {
   if (!OUTCOMES[episode.role].has(result.outcome)) throw new Error(`outcome invalid for ${episode.role}`);
   text(result.summary, "result.summary", LIMITS.summary);
   uniqueStrings(result.evidence_refs, "result.evidence_refs");
+  const evidenceAuthority = new Set(state.evidence_authority_refs);
+  for (const evidenceRef of result.evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("result evidence is outside parent evidence authority");
   uniqueStrings(result.context_request_refs, "result.context_request_refs");
   facts(result.verified_facts, "result.verified_facts");
   if (result.problem !== null) problem(result.problem, "result.problem");
@@ -291,6 +327,8 @@ function validateResult(result, episode) {
   if (!(episode.role === "SOLVE" && result.outcome === "NEEDS_CONTEXT") && result.context_request_refs.length) throw new Error("context_request_refs only valid for SOLVE/NEEDS_CONTEXT");
   if (episode.role === "SOLVE" && result.outcome === "NEEDS_CONTEXT" && !result.context_request_refs.length) throw new Error("NEEDS_CONTEXT requires requested refs");
   if (["FIND", "SOLVE"].includes(episode.role) && result.verified_facts.length) throw new Error(`${episode.role} cannot promote verified facts`);
+  if (episode.role === "VERIFY" && ["SOLVED", "UNSOLVED"].includes(result.outcome) && !result.evidence_refs.length) throw new Error(`VERIFY/${result.outcome} requires evidence`);
+  if (episode.role === "GOAL_CHECK" && ["COMPLETE", "INCOMPLETE"].includes(result.outcome) && !result.evidence_refs.length) throw new Error(`GOAL_CHECK/${result.outcome} requires evidence`);
   for (const entry of result.verified_facts) if (!result.evidence_refs.includes(entry.evidence_ref)) throw new Error("verified fact evidence must be present in result evidence_refs");
   assertBytes(result, episode.budgets.max_output_bytes, "episode result");
   return result;
@@ -312,7 +350,7 @@ function mergeFacts(existing, incoming) {
 export function applyEphemeralReasoningResult(state, episode, result) {
   validateEphemeralReasoningState(state);
   validateEpisodeAgainstState(episode, state);
-  validateResult(result, episode);
+  validateResult(result, episode, state);
   const next = clone(state);
   next.episode_seq = episode.sequence;
   next.last_result = { episode_id: result.episode_id, role: result.role, outcome: result.outcome, summary: result.summary, evidence_refs: clone(result.evidence_refs) };
@@ -322,6 +360,8 @@ export function applyEphemeralReasoningResult(state, episode, result) {
     if (result.outcome === "BLOCKED") { next.terminal = "BLOCKED"; next.next_role = "ESCALATE"; }
     else {
       const found = problem(result.problem, "result.problem");
+      const evidenceAuthority = new Set(next.evidence_authority_refs);
+      for (const evidenceRef of found.required_evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("FIND problem evidence is outside parent evidence authority");
       if (next.solved_problem_ids.includes(found.problem_id)) throw new Error("FIND cannot reopen solved problem id");
       next.current_problem = found; next.next_role = "SOLVE";
     }
@@ -352,6 +392,15 @@ export function applyEphemeralReasoningResult(state, episode, result) {
       next.terminal = "COMPLETE"; next.next_role = "STOP";
     }
   }
+  validateEphemeralReasoningState(next);
+  return next;
+}
+
+export function registerEphemeralEvidenceRefs(state, { evidence_refs = [] } = {}) {
+  validateEphemeralReasoningState(state);
+  const registered = uniqueStrings(evidence_refs, "evidence_refs");
+  const next = clone(state);
+  next.evidence_authority_refs = [...new Set([...next.evidence_authority_refs, ...registered])];
   validateEphemeralReasoningState(next);
   return next;
 }
