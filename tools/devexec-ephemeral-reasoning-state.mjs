@@ -194,6 +194,7 @@ export function validateEphemeralReasoningState(state) {
     const latest = latestAttemptFor(state, currentProblemId);
     if (!latest || latest.outcome !== "ATTEMPTED") throw new Error("VERIFY requires latest ATTEMPTED solve record");
   }
+  validateTransitionCoherence(state);
   assertBytes(state, LIMITS.durable_state_bytes, "durable reasoning state");
   return state;
 }
@@ -227,6 +228,136 @@ function latestAttemptFor(state, problemId) {
     if (state.attempts[index].problem_id === problemId) return clone(state.attempts[index]);
   }
   return null;
+}
+function episodeSequenceFromId(episodeId, name) {
+  const match = /^E(\d+)-/.exec(episodeId);
+  if (!match) throw new Error(`${name} does not encode an episode sequence`);
+  const sequence = Number.parseInt(match[1], 10);
+  if (!Number.isInteger(sequence) || sequence < 1 || sequence > 1_000_001) throw new Error(`${name} episode sequence invalid`);
+  return sequence;
+}
+function sameStringList(left, right) { return canonical(left) === canonical(right); }
+function requireLatestAttempt(state, { problemId, outcome, expectedSequence = null, lastResult = null } = {}) {
+  const latest = state.attempts.length ? state.attempts[state.attempts.length - 1] : null;
+  if (!latest) throw new Error("transition coherence requires a latest solve attempt");
+  if (problemId !== undefined && latest.problem_id !== problemId) throw new Error("transition coherence latest attempt problem mismatch");
+  if (outcome !== undefined && latest.outcome !== outcome) throw new Error("transition coherence latest attempt outcome mismatch");
+  const sequence = episodeSequenceFromId(latest.episode_id, "latest attempt episode_id");
+  if (expectedSequence !== null && sequence !== expectedSequence) throw new Error("transition coherence latest attempt episode ordering mismatch");
+  if (lastResult) {
+    if (latest.episode_id !== lastResult.episode_id || latest.outcome !== lastResult.outcome || latest.summary !== lastResult.summary || !sameStringList(latest.evidence_refs, lastResult.evidence_refs)) {
+      throw new Error("transition coherence last_result does not match durable solve attempt");
+    }
+  }
+  return latest;
+}
+function validateTransitionCoherence(state) {
+  let previousAttemptSequence = 0;
+  for (const [index, entry] of state.attempts.entries()) {
+    const sequence = episodeSequenceFromId(entry.episode_id, `attempts[${index}].episode_id`);
+    if (sequence <= previousAttemptSequence || sequence > state.episode_seq) throw new Error("attempt episode ordering is impossible");
+    previousAttemptSequence = sequence;
+  }
+
+  if (state.episode_seq === 0) {
+    if (state.next_role !== "FIND" || state.terminal !== null || state.current_problem !== null || state.solved_problem_ids.length || state.attempts.length || state.pending_context_request_refs.length) {
+      throw new Error("initial transition state is impossible");
+    }
+    return;
+  }
+
+  const last = state.last_result;
+  const currentProblemId = state.current_problem?.problem_id || null;
+  const solved = new Set(state.solved_problem_ids);
+  const requireNonTerminal = () => {
+    if (state.terminal !== null) throw new Error("transition coherence expected non-terminal state");
+  };
+  const requireBlocked = () => {
+    if (state.terminal !== "BLOCKED" || state.next_role !== "ESCALATE") throw new Error("BLOCKED result must transition to BLOCKED/ESCALATE");
+  };
+  const requireNoPending = () => {
+    if (state.pending_context_request_refs.length) throw new Error("transition coherence forbids pending context here");
+  };
+
+  if (last.outcome === "BLOCKED") {
+    requireBlocked();
+    if (last.role === "FIND" && state.current_problem !== null) throw new Error("FIND/BLOCKED cannot retain current_problem");
+    if (last.role === "SOLVE" && (state.current_problem === null || solved.has(currentProblemId))) throw new Error("SOLVE/BLOCKED requires unsolved current_problem");
+    if (last.role === "VERIFY") {
+      if (state.current_problem === null || solved.has(currentProblemId)) throw new Error("VERIFY/BLOCKED requires unsolved current_problem");
+      requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 1 });
+    }
+    if (last.role === "GOAL_CHECK") {
+      if (state.current_problem === null || !solved.has(currentProblemId)) throw new Error("GOAL_CHECK/BLOCKED requires solved current_problem");
+      requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
+    }
+    return;
+  }
+  if (state.terminal !== null) throw new Error("non-BLOCKED transition cannot carry terminal state unless COMPLETE");
+
+  if (last.role === "FIND") {
+    if (last.outcome !== "FOUND") throw new Error("transition coherence invalid FIND outcome");
+    requireNonTerminal(); requireNoPending();
+    if (state.next_role !== "SOLVE" || state.current_problem === null || solved.has(currentProblemId)) throw new Error("FIND/FOUND must transition to SOLVE with one unsolved current_problem");
+    return;
+  }
+
+  if (last.role === "SOLVE") {
+    requireNonTerminal();
+    if (state.current_problem === null || solved.has(currentProblemId) || state.next_role === "GOAL_CHECK" || state.next_role === "FIND") throw new Error("SOLVE result requires unsolved current_problem");
+    if (last.outcome === "ATTEMPTED") {
+      requireNoPending();
+      if (state.next_role !== "VERIFY") throw new Error("SOLVE/ATTEMPTED must transition to VERIFY");
+      const latest = requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq, lastResult: last });
+      if (latest.requested_context_refs.length) throw new Error("SOLVE/ATTEMPTED cannot retain requested context refs");
+      return;
+    }
+    if (last.outcome === "NEEDS_CONTEXT") {
+      if (state.next_role !== "SOLVE") throw new Error("SOLVE/NEEDS_CONTEXT must transition to SOLVE");
+      const latest = requireLatestAttempt(state, { problemId: currentProblemId, outcome: "NEEDS_CONTEXT", expectedSequence: state.episode_seq, lastResult: last });
+      if (!latest.requested_context_refs.length) throw new Error("SOLVE/NEEDS_CONTEXT requires durable requested context refs");
+      if (state.pending_context_request_refs.length && !sameStringList(state.pending_context_request_refs, latest.requested_context_refs)) {
+        throw new Error("SOLVE/NEEDS_CONTEXT pending refs must match latest attempt");
+      }
+      return;
+    }
+    throw new Error("transition coherence invalid SOLVE outcome");
+  }
+
+  if (last.role === "VERIFY") {
+    requireNonTerminal(); requireNoPending();
+    if (state.current_problem === null) throw new Error("VERIFY result requires current_problem");
+    requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 1 });
+    if (last.outcome === "UNSOLVED") {
+      if (state.next_role !== "SOLVE" || solved.has(currentProblemId)) throw new Error("VERIFY/UNSOLVED must transition to SOLVE with unsolved current_problem");
+      return;
+    }
+    if (last.outcome === "SOLVED") {
+      if (state.next_role !== "GOAL_CHECK" || !solved.has(currentProblemId)) throw new Error("VERIFY/SOLVED must transition to GOAL_CHECK with solved current_problem");
+      return;
+    }
+    throw new Error("transition coherence invalid VERIFY outcome");
+  }
+
+  if (last.role === "GOAL_CHECK") {
+    requireNoPending();
+    if (last.outcome === "INCOMPLETE") {
+      requireNonTerminal();
+      if (state.next_role !== "FIND" || state.current_problem !== null) throw new Error("GOAL_CHECK/INCOMPLETE must clear current_problem and transition to FIND");
+      const latest = requireLatestAttempt(state, { outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
+      if (!solved.has(latest.problem_id)) throw new Error("GOAL_CHECK/INCOMPLETE requires the preceding problem to remain solved");
+      return;
+    }
+    if (last.outcome === "COMPLETE") {
+      if (state.terminal !== "COMPLETE" || state.next_role !== "STOP" || state.current_problem === null || !solved.has(currentProblemId)) {
+        throw new Error("GOAL_CHECK/COMPLETE must transition to COMPLETE/STOP with solved current_problem");
+      }
+      requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
+      return;
+    }
+    throw new Error("transition coherence invalid GOAL_CHECK outcome");
+  }
+  throw new Error("transition coherence could not classify last_result");
 }
 function roleProjection(state) {
   if (state.next_role === "FIND") return {
