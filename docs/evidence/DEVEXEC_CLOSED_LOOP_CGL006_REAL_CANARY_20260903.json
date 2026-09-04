@@ -1,0 +1,66 @@
+{
+  "protocol": "devexec.closed-loop-cgl006-real-canary-evidence",
+  "schema_version": 1,
+  "mission_id": "DEV-CGL-006-REAL-E2E-20260903",
+  "task_id": "DEV-CGL-006-REAL-E2E-20260903",
+  "admission_id": "dev-cgl-006-real-e2e-20260903-retry1",
+  "source_revision_before_commit": "72068ebdfddf487c7b006d5ac0ebfcba1ed81bed",
+  "thread_id": "01a0653b-003b-7b12-b131-7fd02f037473",
+  "initial_turn_id": "01a06545-eee8-7093-81f3-e02bdc62ba6c",
+  "initial_turn_sha256": "sha256:d5e3a33c2303a1c53664cdd780503cdbf8d1aeb9bf24c08a8c9a30cf6856a35f",
+  "execution_mode": "completion-driven",
+  "supervisor_url_included": false,
+  "rounds": [
+    {
+      "round_index": 0,
+      "relay_request_id": "sha256:2b1d07fd3f44bd19f1c156176a701ec539c54125356965a3456cc8bf356f8f64",
+      "report_sha256": "sha256:0c197916d33da7ecde6f5698a8a144c91c8cbc356e5cefd7e922e28080a9d0de",
+      "supervisor_response_sha256": "sha256:1e9b77514995a3d2a10cdb30cce597f391afbffa31c41c5d893da55884f15744",
+      "decision": "CONTINUE",
+      "return_codex_prompt_sha256": "sha256:1929d6139a61337382259609fdb2bf785fc24b816bc2eaf0395888a874313f08",
+      "codex_return_id": "sha256:8a6af04367957219bcad0c78f25a43a5bdfab9101d70386968070de92d63bfbc",
+      "submission_id": "01a06550-74e4-7660-9037-307f3319704c",
+      "resulting_turn_id": "01a06550-8e82-7790-b4dd-54cca51c50a5",
+      "resulting_turn_sha256": null,
+      "resulting_turn_hash_status": "not_exposed_by_accepted_runtime_record",
+      "queued_thread_id": "01a0653b-003b-7b12-b131-7fd02f037473",
+      "same_thread_proof": "exact_bound_thread",
+      "local_relay_actions": ["FORWARD_REPORT", "RETURN_CODEX_PROMPT"],
+      "queue_performed": true
+    }
+  ],
+  "runtime_safety": {
+    "observer_state_after_timeout": "DELIVERY_UNKNOWN",
+    "recovery_fail_closed": true,
+    "automatic_resend": false,
+    "automatic_reinject": false,
+    "ambiguous_delivery_retried": false
+  },
+  "verification": {
+    "focused_command": "node --test tools/devexec-completion-driven.test.mjs tools/devexec-closed-loop.test.mjs tools/devexec-full-relay.test.mjs tools/devexec-closed-loop-facade.test.mjs",
+    "focused_result": "64/64 PASS",
+    "all_devexec_command": "node --test tools/*.test.mjs",
+    "all_devexec_result": "294/294 PASS",
+    "build_command": "npm run build",
+    "build_result": "PASS",
+    "environment": "fresh isolated LOCALAPPDATA",
+    "tracked_supervisor_url_matches": 0,
+    "diff_check": "PASS"
+  },
+  "changed_paths": [
+    "README.md",
+    "docs/DEVEXEC_CLOSED_LOOP_RUNBOOK.md",
+    "docs/README.md",
+    "docs/tasks/DEV-CGL-006-COMPLETION-DRIVEN.md",
+    "docs/evidence/DEVEXEC_CLOSED_LOOP_CGL006_REAL_CANARY_20260903.json",
+    "tools/devexec-closed-loop-cli.mjs",
+    "tools/devexec-closed-loop-facade.mjs",
+    "tools/devexec-closed-loop-facade.test.mjs",
+    "tools/devexec-closed-loop.mjs",
+    "tools/devexec-closed-loop.test.mjs",
+    "tools/devexec-completion-driven.test.mjs",
+    "tools/devexec-full-relay.mjs",
+    "tools/devexec-full-relay.test.mjs",
+    "tools/devexec.mjs"
+  ]
+}

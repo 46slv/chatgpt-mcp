@@ -11,6 +11,7 @@ import {
   DEVEXEC_PROVIDER,
 } from "./devexec-runtime-selector.mjs";
 import { createTaskContract, runTestCommand } from "./local-worker-runtime.mjs";
+import { createRecoveryJournal, scanRecoveryState } from "./local-runtime-recovery-journal.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-selector-"));
@@ -71,4 +72,62 @@ test("malformed provider response is fail-closed", async () => {
   const outcome = await entry.run(task, { runTest: async () => ({ status: "PASS" }) });
   assert.equal(outcome.result.status, "FAILED");
   assert.match(outcome.result.blocker, /malformed/i);
+});
+
+test("leased local runs block a concurrent key, release after cleanup, and leave a terminal journal", async () => {
+  const task = fixture();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-runtime-lease-integration-"));
+  const recoveryA = path.join(root, "recovery-a"); const recoveryB = path.join(root, "recovery-b");
+  let held = false; let releaseFirst; let acquired = 0; let released = 0;
+  const leaseManagerFactory = () => ({
+    acquire() { if (held) return { status: "LEASE_HELD" }; held = true; acquired += 1; return { status: "ACQUIRED", lease: Object.freeze({}) }; },
+    release() { held = false; released += 1; return { status: "RELEASED" }; },
+  });
+  const provider = {
+    identity: { runtime: "local", provider: "freetoken", model: "fake", device_index: 0 },
+    config: { idleStopMs: 0, deviceIndex: 0, model: "fake", serveUrl: "http://127.0.0.1:1919" },
+    async gpuGate() { return { status: "CLEAR" }; },
+    async run() { await new Promise((resolve) => { releaseFirst = resolve; }); fs.mkdirSync(path.join(task.worktree, "src"), { recursive: true }); fs.writeFileSync(path.join(task.worktree, "src", "value.txt"), "ok\n"); return { status: "PASS" }; },
+  };
+  const one = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: provider }, recoveryStateDir: recoveryA, leaseStateDir: path.join(root, "lease"), leaseManagerFactory });
+  const two = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: { ...provider, async run() { throw new Error("must not invoke"); } } }, recoveryStateDir: recoveryB, leaseStateDir: path.join(root, "lease"), leaseManagerFactory });
+  const first = one.run(task, { runTest: runTestCommand });
+  while (!releaseFirst) await new Promise((resolve) => setTimeout(resolve, 5));
+  await assert.rejects(() => two.run(task, { runTest: runTestCommand }), (error) => error.code === "LEASE_HELD");
+  releaseFirst();
+  assert.equal((await first).result.status, "DONE");
+  assert.equal(acquired, 1); assert.equal(released, 1); assert.equal(scanRecoveryState(recoveryA).status, "CLEAN");
+  assert.equal(scanRecoveryState(recoveryA).runs[0].terminal_state, "TERMINAL");
+});
+
+test("stale or malformed lease evidence blocks before provider invocation", async () => {
+  const task = fixture(); const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-runtime-lease-block-")); let invoked = false;
+  const entry = createDevExecEntrypoint({
+    selection: { runtime: "local", provider: "freetoken", enabled: true },
+    adapters: { freetoken: { identity: { runtime: "local", provider: "freetoken" }, config: { idleStopMs: 0 }, async gpuGate() { return { status: "CLEAR" }; }, async run() { invoked = true; return { status: "PASS" }; } } },
+    recoveryStateDir: path.join(root, "recovery"), leaseStateDir: path.join(root, "lease"),
+    leaseManagerFactory: () => ({ acquire() { return { status: "STALE_CANDIDATE" }; }, release() { throw new Error("not acquired"); } }),
+  });
+  await assert.rejects(() => entry.run(task, { runTest: runTestCommand }), (error) => error.code === "STALE_CANDIDATE");
+  assert.equal(invoked, false);
+  assert.equal(scanRecoveryState(path.join(root, "recovery")).runs[0].terminal_state, "TERMINAL");
+});
+
+test("nonterminal recovery evidence blocks without auto-resume or provider use", async () => {
+  const task = fixture(); const root = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-runtime-recovery-block-")); const recovery = path.join(root, "recovery");
+  createRecoveryJournal({ stateDir: recovery, runId: "interrupted" }).append("PREFLIGHT");
+  let invoked = false;
+  const entry = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: { identity: { runtime: "local", provider: "freetoken" }, config: { idleStopMs: 0 }, async run() { invoked = true; return { status: "PASS" }; } } }, recoveryStateDir: recovery, leaseStateDir: path.join(root, "lease") });
+  await assert.rejects(() => entry.run(task, { runTest: runTestCommand }), (error) => error.code === "RECOVERY_NEEDS_ATTENTION");
+  assert.equal(invoked, false);
+  assert.equal(scanRecoveryState(recovery).runs[0].classification, "NONTERMINAL");
+});
+
+test("parent-owned recovery and lease state cannot be placed inside the task worktree", async () => {
+  const task = fixture(); let invoked = false;
+  const provider = { identity: { runtime: "local", provider: "freetoken" }, config: { idleStopMs: 0 }, async run() { invoked = true; return { status: "PASS" }; } };
+  const entry = createDevExecEntrypoint({ selection: { runtime: "local", provider: "freetoken", enabled: true }, adapters: { freetoken: provider }, recoveryStateDir: path.join(task.worktree, "runtime-state"), leaseStateDir: path.join(task.worktree, "lease-state") });
+  await assert.rejects(() => entry.run(task, { runTest: runTestCommand }), (error) => error.code === "RUNTIME_STATE_INSIDE_WORKTREE");
+  assert.equal(invoked, false);
+  assert.equal(fs.existsSync(path.join(task.worktree, "runtime-state")), false);
 });

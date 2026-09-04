@@ -161,6 +161,14 @@ function defaultLedgerDir() {
   const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   return path.join(base, "ChatGPTMCPProbe", "devexec-local-run-ledger");
 }
+function defaultRecoveryStateDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-recovery");
+}
+function defaultLeaseStateDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-lease");
+}
 
 function flagValue(args, names) {
   const wanted = new Set(names);
@@ -182,10 +190,12 @@ async function runTask(args) {
   let outputPath = null;
   let adapterModule = null;
   let ledgerDir = null;
+  let recoveryStateDir = null;
+  let leaseStateDir = null;
   const freetoken = {};
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir"].includes(arg)) {
+    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir", "--recovery-dir", "--lease-dir"].includes(arg)) {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === "--runtime" || arg === "--provider") selection[arg.slice(2)] = value;
@@ -194,6 +204,8 @@ async function runTask(args) {
       else if (arg === "--output") outputPath = value;
       else if (arg === "--adapter-module") adapterModule = value;
       else if (arg === "--ledger-dir") ledgerDir = value;
+      else if (arg === "--recovery-dir") recoveryStateDir = value;
+      else if (arg === "--lease-dir") leaseStateDir = value;
       else if (arg === "--model") freetoken.model = value;
       else if (arg === "--model-path") freetoken.modelPath = value;
       else if (arg === "--control-url") freetoken.controlUrl = value;
@@ -238,7 +250,7 @@ async function runTask(args) {
     process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
     return exitCodeForResult(publicValue);
   }
-  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters: { freetoken: adapter }, freetoken });
+  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters: { freetoken: adapter }, freetoken, recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(), leaseStateDir: leaseStateDir || defaultLeaseStateDir() });
   const abort = new AbortController();
   const onSignal = () => abort.abort(new Error("cancelled by caller"));
   process.once("SIGINT", onSignal);
@@ -256,7 +268,7 @@ async function runTask(args) {
 
 function usage() {
  process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
- process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--evidence <path>] [--output <path>]\n");
+ process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--recovery-dir <path>] [--lease-dir <path>] [--evidence <path>] [--output <path>]\n");
  process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
  process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir>\n");
 }

@@ -65,6 +65,33 @@ function allowedWrite(relative, task) {
   return task.allowed_paths.some((prefix) => relative === prefix || relative.startsWith(`${prefix}/`));
 }
 
+function runGitText(root, argv, { allowDiffExit = false } = {}) {
+  try { return execFileSync("git", ["-C", root, ...argv], { encoding: "utf8", windowsHide: true, timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }); }
+  catch (error) {
+    // `git diff --no-index` deliberately exits 1 when it found a diff.
+    if (allowDiffExit && Number(error?.status) === 1 && typeof error?.stdout === "string") return error.stdout;
+    throw error;
+  }
+}
+
+function untrackedRegularDiff(root, relative) {
+  const { candidate } = safeRelative(root, relative);
+  assertNoReparse(root, relative);
+  if (!fs.existsSync(candidate)) return "";
+  const stat = fs.lstatSync(candidate);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("untracked diff path is not a regular file");
+  assertNoHardLink(candidate);
+  try {
+    runGitText(root, ["ls-files", "--error-unmatch", "--", relative]);
+    return "";
+  } catch (error) {
+    // A nonzero ls-files result is exactly the untracked case.  Any other
+    // failure remains fail-closed rather than exposing arbitrary content.
+    if (Number(error?.status) !== 1) throw error;
+  }
+  return runGitText(root, ["diff", "--no-index", "--no-ext-diff", "--no-color", "--", "/dev/null", relative], { allowDiffExit: true });
+}
+
 function clampArgs(args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("tool arguments must be an object");
   return args;
@@ -221,11 +248,21 @@ async function executeTool(name, rawArgs, task, context) {
   }
   if (name === "git_diff") {
     const relative = args.path ? safeRelative(root, args.path).relative : null;
-    if (relative) assertNoReparse(root, relative);
-    const argv = ["-C", root, "diff", "--no-ext-diff", "--no-color", "--", ...(relative ? [relative] : task.allowed_paths)];
-    let diff;
-    try { diff = execFileSync("git", argv, { encoding: "utf8", windowsHide: true, timeout: 10000 }); } catch (error) { throw new Error(`git diff failed: ${String(error?.message || error)}`); }
-    return { path: relative, diff: bounded(diff, Number.isInteger(args.max_chars) ? Math.min(16000, Math.max(1, args.max_chars)) : 12000) };
+    if (relative && !allowedWrite(relative, task)) { const error = new Error(`git diff path is outside allowed_paths: ${relative}`); error.code = "SCOPE_VIOLATION"; throw error; }
+    const paths = relative ? [relative] : task.allowed_paths;
+    for (const item of paths) { safeRelative(root, item); assertNoReparse(root, item); }
+    let tracked = "";
+    try { tracked = runGitText(root, ["diff", "--no-ext-diff", "--no-color", "--", ...paths]); } catch (error) { throw new Error(`git diff failed: ${String(error?.message || error)}`); }
+    // Git's normal diff intentionally omits untracked files.  Add only a
+    // no-index diff for an explicitly selected/allowed regular file; never
+    // enumerate allowed directories or unrelated untracked entries.
+    const additions = [];
+    for (const item of paths) {
+      try { const extra = untrackedRegularDiff(root, item); if (extra) additions.push(extra); }
+      catch (error) { if (relative) throw error; /* an allowed directory/non-file has no standalone untracked diff */ }
+    }
+    const max = Number.isInteger(args.max_chars) ? Math.min(16000, Math.max(1, args.max_chars)) : 12000;
+    return { path: relative, diff: bounded([tracked, ...additions].filter(Boolean).join("\n"), max) };
   }
   const error = new Error(`unsupported harness tool: ${name}`);
   error.code = "TOOL_DENIED";

@@ -3,14 +3,48 @@
   "$id": "devexec.harness-outer.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "outer_run_id", "status", "created_at", "updated_at", "harness_binding", "cycles"],
+  "required": ["schema", "outer_run_id", "goal_identity", "task_identity", "project_adapter", "max_cycles", "status", "created_at", "updated_at", "harness_binding", "cycles"],
   "properties": {
     "schema": {"const": "devexec.harness-outer.v1"},
     "outer_run_id": {"type": "string", "minLength": 1},
+    "goal_identity": {"type": "string", "minLength": 1},
+    "task_identity": {"type": "string", "minLength": 1},
+    "project_adapter": {"type": "string", "minLength": 1},
+    "max_cycles": {"type": "integer", "minimum": 1, "maximum": 64},
     "status": {"enum": ["RUNNING", "COMPLETE", "NEEDS_HUMAN"]},
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},
-    "harness_binding": {"type": "object", "additionalProperties": false, "required": ["harness_repository", "harness_commit_sha", "target_repository", "target_ref", "working_directory", "evidence_root"], "properties": {"harness_repository": {"type": "string"}, "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "target_repository": {"type": "string"}, "target_ref": {"type": "string"}, "working_directory": {"type": "string"}, "evidence_root": {"type": "string"}}},
-    "cycles": {"type": "array", "items": {"type": "object", "required": ["cycle_index", "child_run_id", "harness_commit_sha", "input_state_hash", "resulting_state_hash", "ephemeral", "transcripts_forwarded"], "properties": {"cycle_index": {"type": "integer", "minimum": 0}, "child_run_id": {"type": "string"}, "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "input_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "resulting_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "ephemeral": {"const": true}, "transcripts_forwarded": {"const": false}}}
+    "harness_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harness_repository", "harness_commit_sha", "target_repository", "target_ref", "target_base_sha", "working_directory", "evidence_root"],
+      "properties": {
+        "harness_repository": {"type": "string", "minLength": 1},
+        "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "target_repository": {"type": "string", "minLength": 1},
+        "target_ref": {"type": "string", "minLength": 1},
+        "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "working_directory": {"type": "string", "minLength": 1},
+        "evidence_root": {"type": "string", "minLength": 1}
+      }
+    },
+    "cycles": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["cycle_index", "child_run_id", "harness_commit_sha", "target_base_sha", "input_state_hash", "resulting_state_hash", "ephemeral", "transcripts_forwarded"],
+        "properties": {
+          "cycle_index": {"type": "integer", "minimum": 0, "maximum": 63},
+          "child_run_id": {"type": "string", "minLength": 1},
+          "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "input_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "resulting_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "ephemeral": {"const": true},
+          "transcripts_forwarded": {"const": false}
+        }
+      }
+    }
   }
 }

@@ -42,6 +42,34 @@ test("fixture A: model patch, regression test, and diff through the generic loop
   assert.equal(result.observations.some((x) => x.name === "git_diff" && x.ok), true);
 });
 
+test("new allowed untracked file has bounded no-index diff evidence and completes", async () => {
+  const f = fixture();
+  const task = createTaskContract({ ...f.task, task_id: "untracked-diff", goal: "create answer", allowed_paths: ["answer.txt"], test_command: [process.execPath, "-e", "process.exit(require('fs').readFileSync('answer.txt','utf8')==='ok\\n'?0:1)"] });
+  const queue = [
+    response(["patch", { path: "answer.txt", content: "ok\n" }]),
+    response(["run_test", {}], ["git_diff", { path: "answer.txt" }]),
+  ];
+  const result = await runMinimalHarness(task, { infer: async () => queue.shift(), runTest: runTestCommand, maxToolCalls: 3 });
+  const diff = result.observations.find((entry) => entry.name === "git_diff");
+  assert.equal(result.status, "PASS");
+  assert.equal(diff?.ok, true);
+  assert.match(diff.diff.diff, /answer\.txt/);
+  assert.match(diff.diff.diff, /\+ok/);
+});
+
+test("git_diff denies outside or sensitive paths and refuses truncated untracked evidence", async () => {
+  const f = fixture();
+  const outside = await runMinimalHarness(f.task, { infer: async () => response(["git_diff", { path: "README.md" }]) });
+  assert.equal(outside.status, "BLOCKED"); assert.equal(outside.code, "SCOPE_VIOLATION");
+  const sensitive = await runMinimalHarness(f.task, { infer: async () => response(["git_diff", { path: ".env" }]) });
+  assert.equal(sensitive.observations.length, 1); assert.equal(sensitive.observations[0].ok, false);
+  const task = createTaskContract({ ...f.task, task_id: "untracked-truncated", allowed_paths: ["answer.txt"], test_command: [process.execPath, "-e", "process.exit(0)"] });
+  const queue = [response(["patch", { path: "answer.txt", content: "x".repeat(2000) }]), response(["run_test", {}], ["git_diff", { path: "answer.txt", max_chars: 40 }])];
+  const truncated = await runMinimalHarness(task, { infer: async () => queue.shift(), runTest: runTestCommand, maxToolCalls: 3 });
+  assert.equal(truncated.status, "PARTIAL");
+  assert.equal(truncated.observations.find((entry) => entry.name === "git_diff")?.ok, false);
+});
+
 test("benchmark-compatible apply_patch old/new arguments are accepted", async () => {
   const f = fixture();
   const queue = [

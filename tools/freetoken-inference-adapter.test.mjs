@@ -11,6 +11,9 @@ test("explicit configuration defaults disabled and enabled requires model", () =
   assert.equal(createFreeTokenConfig({}, {}).enabled, false);
   assert.throws(() => createFreeTokenConfig({ enabled: true }, {}), /model/);
   assert.equal(createFreeTokenConfig({ enabled: true, model: "m" }).enabled, true);
+  assert.equal(createFreeTokenConfig({ enabled: true, model: "m" }, {}).readyTimeoutMs, 75000);
+  assert.equal(createFreeTokenConfig({ enabled: true, model: "m" }, { FREETOKEN_READY_TIMEOUT_MS: "80000" }).readyTimeoutMs, 80000);
+  assert.equal(createFreeTokenConfig({ enabled: true, model: "m" }, { FREETOKEN_READY_TIMEOUT_MS: "999999" }).readyTimeoutMs, 120000);
 });
 
 test("start plan is explicit and provider-neutral", () => {
