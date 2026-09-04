@@ -198,3 +198,63 @@ test("fresh child evidence rejects empty next_action instead of silently authori
     /cycle\.next_action required/,
   );
 });
+
+test("fresh child evidence rejects non-boolean fast_path_eligible before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    { fast_path_eligible: "true", next_action: "CONTINUE" },
+    /OUTER_CYCLE_FAST_PATH_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects an array evidence container before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    [],
+    /HARNESS_EVIDENCE_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects a null evidence container instead of falling back to the result", async () => {
+  await assertFreshEvidenceRejected(
+    null,
+    /HARNESS_EVIDENCE_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects a present malformed resulting_state_hash before durable write", async () => {
+  await assertFreshEvidenceRejected(
+    { resulting_state_hash: "", next_action: "CONTINUE" },
+    /RESULTING_STATE_HASH_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects a malformed nested runner container before durable write", async () => {
+  await assertFreshEvidenceRejected(
+    { runner: "PASS", next_action: "CONTINUE" },
+    /HARNESS_RUNNER_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects a present non-NOT_RUN second_cycle marker before durable write", async () => {
+  await assertFreshEvidenceRejected(
+    { second_cycle: false, next_action: "CONTINUE" },
+    /HARNESS_SECOND_CYCLE_BOUNDARY_VIOLATION/,
+  );
+});
+
+test("fresh child result rejects an array container before durable write or second launch", async () => {
+  const f = fixture();
+  let calls = 0;
+  await assert.rejects(
+    () => runOuterCycles(common(f, {
+      launchCycle: async () => {
+        calls += 1;
+        return [];
+      },
+    })),
+    /HARNESS_RESULT_INVALID/,
+  );
+  assert.equal(calls, 1);
+  const persisted = JSON.parse(fs.readFileSync(f.file, "utf8"));
+  assert.equal(persisted.cycles.length, 0);
+  assert.equal(persisted.status, "RUNNING");
+});

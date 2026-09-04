@@ -123,7 +123,7 @@ test("outer cycle bound is explicit and mechanically capped", async () => {
 });
 
 test("durable receipt schema formally excludes raw contexts and unknown cycle fields", () => {
-  const schema = JSON.parse(fs.readFileSync(new URL("./devexec-harness-outer.v1.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/devexec-harness-outer.v1.schema.json", import.meta.url), "utf8"));
   const item = schema.properties.cycles.items;
   assert.equal(item.additionalProperties, false);
   assert.equal(Object.hasOwn(item.properties, "role_contexts"), false);

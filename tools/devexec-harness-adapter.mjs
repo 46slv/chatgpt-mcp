@@ -219,7 +219,7 @@ export function createOuterReceipt({ outer_run_id, binding, file, goal_identity,
 }
 
 function hashCycleEvidence(evidencePath, evidence, evidenceRoot) {
-  if (!evidencePath) return { path: null, hash: sha(evidence) };
+  if (evidencePath === undefined || evidencePath === null) return { path: null, hash: sha(evidence) };
   if (typeof evidencePath !== "string" || !evidencePath) throw new Error("EVIDENCE_PATH_INVALID");
   const lexicalRoot = path.resolve(evidenceRoot);
   const lexicalResolved = path.resolve(lexicalRoot, evidencePath);
@@ -280,18 +280,22 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
       expected_previous_state_hash: input_state_hash,
       evidence_root: verifiedBinding.evidence_root,
     });
-    if (!result || typeof result !== "object") throw new Error("HARNESS_RESULT_INVALID");
+    requireObject(result, "HARNESS_RESULT");
     if (Object.hasOwn(result, "exit_code") && result.exit_code !== 0) throw new Error(`HARNESS_EXIT_NONZERO:${result.exit_code}`);
     if (sourceDriftCheck()) {
       receipt.status = "NEEDS_HUMAN"; receipt.updated_at = now(); atomic(receiptFile, receipt);
       return { receipt, decision: { action: "STOP", reason: "SOURCE_DRIFT_AFTER_CYCLE" } };
     }
-    const evidence = result.evidence || result;
-    if (evidence.second_cycle && evidence.second_cycle !== "NOT_RUN") throw new Error("HARNESS_SECOND_CYCLE_BOUNDARY_VIOLATION");
-    if (evidence.input_state_hash && evidence.input_state_hash !== input_state_hash) throw new Error("INPUT_STATE_HASH_MISMATCH");
-    const resulting_state_hash = evidence.resulting_state_hash || sha({ input_state_hash, status: result.status || evidence.status, child_run_id });
-    if (!SHA64.test(resulting_state_hash)) throw new Error("RESULTING_STATE_HASH_INVALID");
-    const cycleEvidence = hashCycleEvidence(result.evidence_path, evidence, verifiedBinding.evidence_root);
+    const evidence = Object.hasOwn(result, "evidence") ? requireObject(result.evidence, "HARNESS_EVIDENCE") : result;
+    if (Object.hasOwn(evidence, "second_cycle") && evidence.second_cycle !== "NOT_RUN") throw new Error("HARNESS_SECOND_CYCLE_BOUNDARY_VIOLATION");
+    if (Object.hasOwn(evidence, "input_state_hash") && evidence.input_state_hash !== input_state_hash) throw new Error("INPUT_STATE_HASH_MISMATCH");
+    const resulting_state_hash = Object.hasOwn(evidence, "resulting_state_hash")
+      ? evidence.resulting_state_hash
+      : sha({ input_state_hash, status: result.status || evidence.status, child_run_id });
+    if (typeof resulting_state_hash !== "string" || !SHA64.test(resulting_state_hash)) throw new Error("RESULTING_STATE_HASH_INVALID");
+    if (Object.hasOwn(evidence, "runner")) requireObject(evidence.runner, "HARNESS_RUNNER");
+    if (Object.hasOwn(evidence, "verifier")) requireObject(evidence.verifier, "HARNESS_VERIFIER");
+    const cycleEvidence = hashCycleEvidence(Object.hasOwn(result, "evidence_path") ? result.evidence_path : undefined, evidence, verifiedBinding.evidence_root);
     const cycle = {
       cycle_index: index,
       child_run_id,
@@ -303,11 +307,11 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
       cycle_evidence_hash: cycleEvidence.hash,
       task_id: task_identity,
       goal_id: goal_identity,
-      fast_path_eligible: evidence.fast_path_eligible === true,
+      fast_path_eligible: Object.hasOwn(evidence, "fast_path_eligible") ? evidence.fast_path_eligible : false,
       skipped_roles: Object.hasOwn(evidence, "skipped_roles") ? evidence.skipped_roles : [],
       launched_roles: Object.hasOwn(evidence, "launched_roles") ? evidence.launched_roles : [],
-      runner_status: evidence.runner && Object.hasOwn(evidence.runner, "status") ? evidence.runner.status : (Object.hasOwn(evidence, "runner_status") ? evidence.runner_status : null),
-      verifier_status: evidence.verifier && Object.hasOwn(evidence.verifier, "status") ? evidence.verifier.status : (Object.hasOwn(evidence, "verifier_status") ? evidence.verifier_status : null),
+      runner_status: Object.hasOwn(evidence, "runner") && Object.hasOwn(evidence.runner, "status") ? evidence.runner.status : (Object.hasOwn(evidence, "runner_status") ? evidence.runner_status : null),
+      verifier_status: Object.hasOwn(evidence, "verifier") && Object.hasOwn(evidence.verifier, "status") ? evidence.verifier.status : (Object.hasOwn(evidence, "verifier_status") ? evidence.verifier_status : null),
       next_action: Object.hasOwn(evidence, "next_action") ? evidence.next_action : (index + 1 < maxCycles ? "localized_retry" : "STOP"),
       started_at,
       completed_at: now(),
