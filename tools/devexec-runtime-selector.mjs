@@ -1,11 +1,9 @@
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
-import crypto from "node:crypto";
-import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { runLocalWorkerTask, validateTaskContract, validateTaskBoundary } from "./local-worker-runtime.mjs";
 import { logicalModelId } from "./freetoken-inference-adapter.mjs";
-import { createRecoveryJournal, scanRecoveryState } from "./local-runtime-recovery-journal.mjs";
-import { createProviderLeaseManager } from "./local-provider-lease.mjs";
+import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
 
 export const DEVEXEC_RUNTIME = Object.freeze({ DEFAULT: "default", CLOUD: "cloud", LOCAL: "local" });
 export const DEVEXEC_PROVIDER = Object.freeze({ EXISTING: "existing", CHATGPT: "chatgpt", LM_STUDIO: "lmstudio", FREETOKEN: "freetoken" });
@@ -81,38 +79,28 @@ function adapterFor(selection, adapters = {}, options = {}) {
   fail(`unsupported provider: ${selection.provider}`, "UNSUPPORTED_PROVIDER");
 }
 
-/**
- * Small facade seam used by DevExec callers. Provider lifecycle remains owned
- * by the selected adapter; this object only validates/dispatches and then
- * returns the parent-reverified local result.
- */
-function safeJournalAppend(journal, state, data = {}) {
-  if (!journal) return;
-  journal.append(state, data);
+function defaultRuntimeStateBase(env = process.env) {
+  const base = env?.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.resolve(base, "ChatGPTMCPProbe", "ephemera-system-runtime");
 }
 
-function finishJournal(journal, resultStatus = "FAILED", releaseStatus = "NOT_ATTEMPTED") {
-  if (!journal) return;
-  const last = journal.readEvents().at(-1)?.state;
-  if (last === "INFERENCE") { safeJournalAppend(journal, "POSTFLIGHT"); safeJournalAppend(journal, "TEST"); }
-  else if (["PREFLIGHT", "LEASE_ACQUIRED", "PROVIDER_STARTED"].includes(last)) safeJournalAppend(journal, "CLEANUP");
-  const current = journal.readEvents().at(-1)?.state;
-  if (current === "TEST") safeJournalAppend(journal, "CLEANUP");
-  if (journal.readEvents().at(-1)?.state === "CLEANUP" || journal.readEvents().at(-1)?.state === "RUN_CREATED") {
-    safeJournalAppend(journal, "TERMINAL", { result_status: resultStatus, reason_code: releaseStatus });
-  }
+function defaultRecoveryStateDir(env = process.env) {
+  return path.join(defaultRuntimeStateBase(env), "recovery");
 }
 
-function providerLeaseRequest(adapter, runId) {
+function defaultLeaseStateDir(env = process.env) {
+  return path.join(defaultRuntimeStateBase(env), "provider-lease");
+}
+
+function providerLeaseRequest(adapter, provider = "freetoken") {
   const config = adapter?.config || {};
   let servePort = 1919;
   try { servePort = Number(new URL(config.serveUrl || "http://127.0.0.1:1919").port || 1919); } catch { /* use fixed default */ }
   return {
-    provider: "freetoken",
+    provider: String(adapter?.identity?.provider || provider || "freetoken"),
     deviceIndex: Number.isInteger(config.deviceIndex) ? config.deviceIndex : 0,
     servePort,
     modelId: logicalModelId(String(config.model || adapter?.identity?.model || "unconfigured"), "unconfigured"),
-    runId,
   };
 }
 
@@ -125,11 +113,20 @@ function assertExternalRuntimeStateDir(stateDir, worktree, label) {
 }
 
 /**
- * Explicit FreeToken runs have a small parent-owned lifecycle envelope.  It
+ * Explicit local runs have a System-owned lifecycle envelope.  It
  * intentionally has no routing, takeover, resume, or process-kill behavior:
  * a non-clean recovery record or lease simply blocks this one local run.
  */
-export function createDevExecEntrypoint({ selection, env = process.env, adapters = {}, freetoken = {}, recoveryStateDir = null, leaseStateDir = null, leaseManagerFactory = createProviderLeaseManager } = {}) {
+export function createDevExecEntrypoint({
+  selection,
+  env = process.env,
+  adapters = {},
+  freetoken = {},
+  recoveryStateDir = null,
+  leaseStateDir = null,
+  admissionStateDir = null,
+  runtimeCacheDir = null,
+} = {}) {
   const resolved = resolveDevExecRuntimeSelection(selection || {}, env);
   const adapter = adapterFor(resolved, adapters, { freetoken });
   const local = resolved.runtime === DEVEXEC_RUNTIME.LOCAL;
@@ -143,67 +140,78 @@ export function createDevExecEntrypoint({ selection, env = process.env, adapters
       // recomputation of changes before exposing the result.
       validateTaskContract(task, { verifyGit: false });
       if (adapter?.config?.idleStopMs > 0) throw new DevExecRuntimeSelectionError("idleStopMs must be 0 for the leased local runtime", "IDLE_STOP_UNSUPPORTED");
-      // Journal/lease artifacts belong to the parent, not the worker's
-      // worktree. Otherwise their own terminal event becomes an untrusted
-      // worker diff during parent postflight.
-      assertExternalRuntimeStateDir(recoveryStateDir, task.worktree, "recovery state directory");
-      assertExternalRuntimeStateDir(leaseStateDir, task.worktree, "lease state directory");
-      const runId = context.runId || crypto.randomUUID();
-      let journal = null;
-      let manager = null;
-      let lease = null;
-      let leaseStatus = "NOT_ACQUIRED";
-      let journalResult = "FAILED";
-      try {
-        // This scan is read-only.  Absence is a new state directory; any
-        // nonterminal/malformed evidence is an explicit stop rather than an
-        // automatic recovery attempt.
-        if (recoveryStateDir && fs.existsSync(recoveryStateDir)) {
-          const scan = scanRecoveryState(recoveryStateDir);
-          if (scan.status !== "CLEAN") throw new DevExecRuntimeSelectionError("recovery state needs attention; local run was not started", "RECOVERY_NEEDS_ATTENTION");
-        }
-        if (recoveryStateDir) journal = createRecoveryJournal({ stateDir: recoveryStateDir, runId });
-        // Parent boundary validation happens before the GPU gate/lease. The
-        // worker repeats this immediately before execution to catch drift.
-        validateTaskBoundary(task);
-        safeJournalAppend(journal, "PREFLIGHT");
-        if (typeof adapter.gpuGate === "function") {
-          const gpu = await adapter.gpuGate(context.signal);
-          if (!gpu || gpu.status !== "CLEAR") throw new DevExecRuntimeSelectionError("target GPU is unavailable; existing workload was not changed", "GPU_UNAVAILABLE");
-        }
-        if (leaseStateDir) {
-          manager = leaseManagerFactory({ stateDir: leaseStateDir });
-          const acquired = manager.acquire(providerLeaseRequest(adapter, runId));
-          if (acquired.status !== "ACQUIRED") throw new DevExecRuntimeSelectionError("local provider lease is held or needs attention", acquired.status);
-          lease = acquired.lease;
-          leaseStatus = "ACQUIRED";
-          safeJournalAppend(journal, "LEASE_ACQUIRED");
-        }
-        const journalAdapter = {
-          ...adapter,
-          async run(input, runtimeContext = {}) {
-            const parentLifecycle = runtimeContext.onLifecycle;
-            const onLifecycle = (event) => {
-              if (event === "start_start") safeJournalAppend(journal, "PROVIDER_STARTED");
-              if (event === "inference_start") safeJournalAppend(journal, "INFERENCE");
-              parentLifecycle?.(event);
-            };
-            return adapter.run(input, { ...runtimeContext, onLifecycle });
-          },
-        };
-        const outcome = await runLocalWorkerTask(task, { adapter: journalAdapter, runTest: context.runTest, now: context.now, failureGuard: context.failureGuard, signal: context.signal, runLedgerDir: context.runLedgerDir, runId, selection: resolved, ledgerWriter: context.ledgerWriter, cleanupTimeoutMs: context.cleanupTimeoutMs });
-        journalResult = outcome?.result?.status || "FAILED";
-        return outcome;
-      } finally {
-        if (lease && manager) {
-          const released = manager.release(lease);
-          leaseStatus = released.status;
-        }
-        // Journal completion is compact lifecycle evidence only.  A failure
-        // here must not make the worker result look successful; callers still
-        // receive the parent-recomputed result above.
-        try { finishJournal(journal, journalResult, leaseStatus); } catch { /* preserve the durable nonterminal record for scan */ }
+      // Journal, admission, and provider lease artifacts belong to the System
+      // package and remain outside the worker's worktree. A missing package is
+      // an explicit BLOCKED condition; the legacy source lifecycle is never a
+      // fallback.
+      const recoveryDir = path.resolve(recoveryStateDir || defaultRecoveryStateDir(env));
+      const leaseDir = path.resolve(leaseStateDir || defaultLeaseStateDir(env));
+      const admissionDir = admissionStateDir ? path.resolve(admissionStateDir) : null;
+      assertExternalRuntimeStateDir(recoveryDir, task.worktree, "recovery state directory");
+      assertExternalRuntimeStateDir(leaseDir, task.worktree, "lease state directory");
+      if (admissionDir) assertExternalRuntimeStateDir(admissionDir, task.worktree, "admission state directory");
+
+      // The exact-pinned System facade is the only local lifecycle authority.
+      // There is deliberately no runtime/factory/options injection here: a
+      // caller cannot bypass materialization or re-introduce source-owned
+      // recovery, admission, or lease implementations.
+      const runtime = await loadEphemeraRuntimePackage({ cacheDir: runtimeCacheDir || env?.EPHEMERA_RUNTIME_CACHE_DIR || undefined, worktree: task.worktree });
+      if (!runtime || typeof runtime.createSystemLocalRuntimeLifecycle !== "function") {
+        fail("materialized EPHEMERA runtime package is missing its lifecycle facade", "EPHEMERA_EXPORTS_MISMATCH");
       }
+      const lifecycle = runtime.createSystemLocalRuntimeLifecycle({
+        recoveryStateDir: recoveryDir,
+        leaseStateDir: leaseDir,
+        ...(admissionDir ? { admissionStateDir: admissionDir } : {}),
+        beforeProviderLease: async ({ signal }) => {
+          // This hook is the source-owned ordering seam: boundary validation
+          // and GPU policy run after System PREFLIGHT but before lease acquire.
+          validateTaskBoundary(task);
+          if (typeof adapter.gpuGate === "function") {
+            const gpu = await adapter.gpuGate(signal);
+            if (!gpu || gpu.status !== "CLEAR") {
+              throw new DevExecRuntimeSelectionError("target GPU is unavailable; existing workload was not changed", "GPU_UNAVAILABLE");
+            }
+          }
+        },
+      });
+      if (!lifecycle || typeof lifecycle.run !== "function") fail("materialized EPHEMERA runtime lifecycle is invalid", "EPHEMERA_EXPORTS_MISMATCH");
+
+      const lifecycleOutcome = await lifecycle.run({
+        runId: context.runId,
+        worktree: task.worktree,
+        leaseRequest: providerLeaseRequest(adapter, resolved.provider),
+        signal: context.signal || null,
+        onLifecycle: context.onLifecycle || null,
+        execute: async ({ runId, signal, onLifecycle }) => {
+          const lifecycleAdapter = {
+            ...adapter,
+            async run(input, runtimeContext = {}) {
+              const workerLifecycle = runtimeContext.onLifecycle;
+              return adapter.run(input, {
+                ...runtimeContext,
+                onLifecycle: (event) => {
+                  workerLifecycle?.(event);
+                  onLifecycle?.(event);
+                },
+              });
+            },
+          };
+          return runLocalWorkerTask(task, {
+            adapter: lifecycleAdapter,
+            runTest: context.runTest,
+            now: context.now,
+            failureGuard: context.failureGuard,
+            signal,
+            runLedgerDir: context.runLedgerDir,
+            runId,
+            selection: resolved,
+            ledgerWriter: context.ledgerWriter,
+            cleanupTimeoutMs: context.cleanupTimeoutMs,
+          });
+        },
+      });
+      return lifecycleOutcome;
     },
     health: typeof adapter.health === "function" ? adapter.health.bind(adapter) : async () => ({ status: "UNKNOWN" }),
     stop: typeof adapter.stop === "function" ? adapter.stop.bind(adapter) : async () => ({ status: "STOPPED" }),
