@@ -8,7 +8,7 @@ import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.m
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
 import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog, sanitizeRuntimeProviderIdentity } from "./local-worker-runtime.mjs";
 import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
-import { scanRecoveryState } from "./local-runtime-recovery-journal.mjs";
+import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -170,6 +170,11 @@ function defaultLeaseStateDir() {
   return path.join(base, "ChatGPTMCPProbe", "devexec-local-lease");
 }
 
+function errorText(error) {
+  const code = typeof error?.code === "string" && error.code.trim() ? `${error.code}: ` : "";
+  return `${code}${error?.message || error}`;
+}
+
 function flagValue(args, names) {
   const wanted = new Set(names);
   for (let i = 0; i < args.length - 1; i += 1) if (wanted.has(args[i])) return args[i + 1];
@@ -192,10 +197,11 @@ async function runTask(args) {
   let ledgerDir = null;
   let recoveryStateDir = null;
   let leaseStateDir = null;
+  let runtimeCacheDir = null;
   const freetoken = {};
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir", "--recovery-dir", "--lease-dir"].includes(arg)) {
+    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir", "--recovery-dir", "--lease-dir", "--ephemera-cache-dir"].includes(arg)) {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === "--runtime" || arg === "--provider") selection[arg.slice(2)] = value;
@@ -206,6 +212,7 @@ async function runTask(args) {
       else if (arg === "--ledger-dir") ledgerDir = value;
       else if (arg === "--recovery-dir") recoveryStateDir = value;
       else if (arg === "--lease-dir") leaseStateDir = value;
+      else if (arg === "--ephemera-cache-dir") runtimeCacheDir = value;
       else if (arg === "--model") freetoken.model = value;
       else if (arg === "--model-path") freetoken.modelPath = value;
       else if (arg === "--control-url") freetoken.controlUrl = value;
@@ -250,7 +257,7 @@ async function runTask(args) {
     process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
     return exitCodeForResult(publicValue);
   }
-  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters: { freetoken: adapter }, freetoken, recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(), leaseStateDir: leaseStateDir || defaultLeaseStateDir() });
+  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters: { freetoken: adapter }, freetoken, recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(), leaseStateDir: leaseStateDir || defaultLeaseStateDir(), runtimeCacheDir: runtimeCacheDir || undefined });
   const abort = new AbortController();
   const onSignal = () => abort.abort(new Error("cancelled by caller"));
   process.once("SIGINT", onSignal);
@@ -268,9 +275,9 @@ async function runTask(args) {
 
 function usage() {
  process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
- process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--recovery-dir <path>] [--lease-dir <path>] [--evidence <path>] [--output <path>]\n");
+ process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--recovery-dir <path>] [--lease-dir <path>] [--ephemera-cache-dir <path>] [--evidence <path>] [--output <path>]\n");
  process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
- process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir>\n");
+ process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir> [--ephemera-cache-dir <path>]\n");
 }
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -292,7 +299,7 @@ if (command === "select") {
 else if (command === "run") {
   try { process.exitCode = await runTask(args); }
   catch (error) {
-    const result = publicResult(blockedResult("unknown", error?.message || error));
+    const result = publicResult(blockedResult("unknown", errorText(error)));
     const evidencePath = flagValue(args, ["--evidence", "--log"]);
     const outputPath = flagValue(args, ["--output"]);
     try { atomicWrite(evidencePath || defaultEvidencePath("unknown"), { protocol: "devexec.runtime.evidence", schema_version: 1, result, log: { event: "runtime_input_blocked", task_id: result.task_id, status: result.status, blocker: result.blocker } }); } catch { /* keep stdout truthful even when the requested evidence path is unavailable */ }
@@ -314,12 +321,19 @@ else if (command === "recovery") {
   if (subcommand !== "scan") { usage(); process.exitCode = 2; }
   else {
     let stateDir = null;
+    let runtimeCacheDir = null;
     for (let i = 0; i < args.length; i += 1) {
-      if (args[i] !== "--state-dir" || !args[i + 1]) throw new Error("recovery scan requires --state-dir <state-dir>");
-      stateDir = args[++i];
+      if ((args[i] !== "--state-dir" && args[i] !== "--ephemera-cache-dir") || !args[i + 1]) throw new Error("recovery scan requires --state-dir <state-dir>");
+      if (args[i] === "--state-dir") stateDir = args[++i];
+      else runtimeCacheDir = args[++i];
     }
-    try { process.stdout.write(`${JSON.stringify(scanRecoveryState(stateDir), null, 2)}\n`); process.exitCode = 0; }
-    catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; }
+    try {
+      const runtime = await loadEphemeraRuntimePackage({ cacheDir: runtimeCacheDir || process.env.EPHEMERA_RUNTIME_CACHE_DIR || undefined, worktree: process.cwd() });
+      if (typeof runtime.scanRecoveryState !== "function") throw new Error("EPHEMERA_EXPORTS_MISMATCH: scanRecoveryState is unavailable");
+      process.stdout.write(`${JSON.stringify(runtime.scanRecoveryState(stateDir), null, 2)}\n`);
+      process.exitCode = 0;
+    }
+    catch (error) { process.stderr.write(`${safeText(errorText(error), 1000)}\n`); process.exitCode = 2; }
   }
 }
 else { usage(); process.exitCode = 2; }
