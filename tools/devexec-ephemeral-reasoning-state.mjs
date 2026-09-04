@@ -293,7 +293,9 @@ function validateTransitionCoherence(state) {
     }
     return;
   }
-  if (state.terminal !== null) throw new Error("non-BLOCKED transition cannot carry terminal state unless COMPLETE");
+  if (state.terminal !== null && !(last.role === "GOAL_CHECK" && last.outcome === "COMPLETE")) {
+    throw new Error("non-BLOCKED transition cannot carry terminal state unless COMPLETE");
+  }
 
   if (last.role === "FIND") {
     if (last.outcome !== "FOUND") throw new Error("transition coherence invalid FIND outcome");
