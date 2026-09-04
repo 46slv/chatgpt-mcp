@@ -330,11 +330,13 @@ function validateTransitionCoherence(state) {
     requireNonTerminal(); requireNoPending();
     if (state.current_problem === null) throw new Error("VERIFY result requires current_problem");
     requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 1 });
+    if (["SOLVED", "UNSOLVED"].includes(last.outcome)) requireEvidence([], last.evidence_refs, `restart VERIFY/${last.outcome}`);
     if (last.outcome === "UNSOLVED") {
       if (state.next_role !== "SOLVE" || solved.has(currentProblemId)) throw new Error("VERIFY/UNSOLVED must transition to SOLVE with unsolved current_problem");
       return;
     }
     if (last.outcome === "SOLVED") {
+      requireEvidence(state.current_problem.required_evidence_refs, last.evidence_refs, "restart SOLVED");
       if (state.next_role !== "GOAL_CHECK" || !solved.has(currentProblemId)) throw new Error("VERIFY/SOLVED must transition to GOAL_CHECK with solved current_problem");
       return;
     }
@@ -343,6 +345,7 @@ function validateTransitionCoherence(state) {
 
   if (last.role === "GOAL_CHECK") {
     requireNoPending();
+    if (["COMPLETE", "INCOMPLETE"].includes(last.outcome)) requireEvidence([], last.evidence_refs, `restart GOAL_CHECK/${last.outcome}`);
     if (last.outcome === "INCOMPLETE") {
       requireNonTerminal();
       if (state.next_role !== "FIND" || state.current_problem !== null) throw new Error("GOAL_CHECK/INCOMPLETE must clear current_problem and transition to FIND");
@@ -351,6 +354,7 @@ function validateTransitionCoherence(state) {
       return;
     }
     if (last.outcome === "COMPLETE") {
+      requireEvidence(state.goal.required_evidence_refs, last.evidence_refs, "restart COMPLETE");
       if (state.terminal !== "COMPLETE" || state.next_role !== "STOP" || state.current_problem === null || !solved.has(currentProblemId)) {
         throw new Error("GOAL_CHECK/COMPLETE must transition to COMPLETE/STOP with solved current_problem");
       }

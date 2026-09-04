@@ -122,3 +122,53 @@ test("canonical reducer states remain valid across VERIFY/SOLVED, GOAL_CHECK/INC
   assert.equal(state.next_role, "STOP");
   assert.doesNotThrow(() => validateEphemeralReasoningState(state));
 });
+
+test("restart rejects VERIFY/SOLVED when required problem evidence was stripped or substituted", () => {
+  let state = findProblem(base(), "P-solved-evidence");
+  state = solveAttempt(state);
+  state = verify(state, "SOLVED");
+  assert.doesNotThrow(() => validateEphemeralReasoningState(state));
+
+  const empty = structuredClone(state);
+  empty.last_result.evidence_refs = [];
+  assert.throws(() => validateEphemeralReasoningState(empty), /restart VERIFY\/SOLVED|restart SOLVED|requires deterministic evidence/);
+
+  const substituted = structuredClone(state);
+  substituted.last_result.evidence_refs = ["ev:verify"];
+  assert.throws(() => validateEphemeralReasoningState(substituted), /restart SOLVED missing required deterministic evidence/);
+});
+
+test("restart rejects GOAL_CHECK/COMPLETE when required goal evidence was stripped or substituted", () => {
+  let state = findProblem(base(), "P-complete-evidence");
+  state = solveAttempt(state);
+  state = verify(state, "SOLVED");
+  const goalEpisode = open(state);
+  state = applyEphemeralReasoningResult(state, goalEpisode, result(goalEpisode, "COMPLETE", { evidence_refs: ["ev:goal"] }));
+  assert.doesNotThrow(() => validateEphemeralReasoningState(state));
+
+  const empty = structuredClone(state);
+  empty.last_result.evidence_refs = [];
+  assert.throws(() => validateEphemeralReasoningState(empty), /restart GOAL_CHECK\/COMPLETE|restart COMPLETE|requires deterministic evidence/);
+
+  const substituted = structuredClone(state);
+  substituted.last_result.evidence_refs = ["ev:verify"];
+  assert.throws(() => validateEphemeralReasoningState(substituted), /restart COMPLETE missing required deterministic evidence/);
+});
+
+test("restart preserves canonical non-empty evidence gates for VERIFY/UNSOLVED and GOAL_CHECK/INCOMPLETE", () => {
+  let unsolved = findProblem(base(), "P-unsolved-evidence");
+  unsolved = solveAttempt(unsolved);
+  unsolved = verify(unsolved, "UNSOLVED");
+  const strippedUnsolved = structuredClone(unsolved);
+  strippedUnsolved.last_result.evidence_refs = [];
+  assert.throws(() => validateEphemeralReasoningState(strippedUnsolved), /restart VERIFY\/UNSOLVED requires deterministic evidence/);
+
+  let incomplete = findProblem(base(), "P-incomplete-evidence");
+  incomplete = solveAttempt(incomplete);
+  incomplete = verify(incomplete, "SOLVED");
+  const goalEpisode = open(incomplete);
+  incomplete = applyEphemeralReasoningResult(incomplete, goalEpisode, result(goalEpisode, "INCOMPLETE", { evidence_refs: ["ev:goal"] }));
+  const strippedIncomplete = structuredClone(incomplete);
+  strippedIncomplete.last_result.evidence_refs = [];
+  assert.throws(() => validateEphemeralReasoningState(strippedIncomplete), /restart GOAL_CHECK\/INCOMPLETE requires deterministic evidence/);
+});
