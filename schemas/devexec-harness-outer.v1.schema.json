@@ -3,7 +3,7 @@
   "$id": "devexec.harness-outer.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "outer_run_id", "goal_identity", "task_identity", "project_adapter", "max_cycles", "status", "created_at", "updated_at", "harness_binding", "cycles"],
+  "required": ["schema", "outer_run_id", "goal_identity", "task_identity", "project_adapter", "max_cycles", "status", "created_at", "updated_at", "harness_binding", "pending_cycle", "cycles"],
   "properties": {
     "schema": {"const": "devexec.harness-outer.v1"},
     "outer_run_id": {"type": "string", "minLength": 1},
@@ -27,6 +27,32 @@
         "working_directory": {"type": "string", "minLength": 1},
         "evidence_root": {"type": "string", "minLength": 1}
       }
+    },
+    "pending_cycle": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cycle_index", "child_run_id", "harness_repository", "harness_commit_sha", "target_repository", "target_ref", "target_base_sha", "working_directory", "evidence_root", "project_adapter", "input_state_hash", "task_id", "goal_id", "started_at"],
+          "properties": {
+            "cycle_index": {"type": "integer", "minimum": 0, "maximum": 63},
+            "child_run_id": {"type": "string", "minLength": 1},
+            "harness_repository": {"type": "string", "minLength": 1},
+            "harness_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "target_repository": {"type": "string", "minLength": 1},
+            "target_ref": {"type": "string", "minLength": 1},
+            "target_base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "working_directory": {"type": "string", "minLength": 1},
+            "evidence_root": {"type": "string", "minLength": 1},
+            "project_adapter": {"type": "string", "minLength": 1},
+            "input_state_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "task_id": {"type": "string", "minLength": 1},
+            "goal_id": {"type": "string", "minLength": 1},
+            "started_at": {"type": "string", "format": "date-time"}
+          }
+        }
+      ]
     },
     "cycles": {
       "type": "array",

@@ -27,7 +27,24 @@ const RECEIPT_KEYS = [
   "created_at",
   "updated_at",
   "harness_binding",
+  "pending_cycle",
   "cycles",
+];
+const PENDING_CYCLE_KEYS = [
+  "cycle_index",
+  "child_run_id",
+  "harness_repository",
+  "harness_commit_sha",
+  "target_repository",
+  "target_ref",
+  "target_base_sha",
+  "working_directory",
+  "evidence_root",
+  "project_adapter",
+  "input_state_hash",
+  "task_id",
+  "goal_id",
+  "started_at",
 ];
 const CYCLE_KEYS = [
   "cycle_index",
@@ -113,6 +130,28 @@ function validateOuterIdentity({ outer_run_id, goal_identity, task_identity, pro
   if (!Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > 64) throw new Error("maxCycles must be an integer in [1,64]");
 }
 
+function validatePendingCycle(pending, index, expected) {
+  requireObject(pending, "OUTER_PENDING_CYCLE");
+  rejectUnknown(pending, PENDING_CYCLE_KEYS, "OUTER_PENDING_CYCLE");
+  requireFields(pending, PENDING_CYCLE_KEYS, "OUTER_PENDING_CYCLE");
+  if (!Number.isInteger(pending.cycle_index) || pending.cycle_index < 0 || pending.cycle_index > 63 || pending.cycle_index !== index) {
+    throw new Error("OUTER_PENDING_CYCLE_SEQUENCE_INVALID");
+  }
+  requiredString(pending.child_run_id, "pending_cycle.child_run_id");
+  if (pending.child_run_id !== `${expected.outer_run_id}-cycle-${index}`) throw new Error("OUTER_PENDING_CHILD_RUN_ID_MISMATCH");
+  for (const key of BINDING_KEYS) {
+    requiredString(pending[key], `pending_cycle.${key}`);
+    if (pending[key] !== expected.binding[key]) throw new Error(`OUTER_PENDING_BINDING_MISMATCH:${key}`);
+  }
+  if (!SHA40.test(pending.harness_commit_sha || "")) throw new Error("OUTER_PENDING_HARNESS_SHA_INVALID");
+  if (!SHA40.test(pending.target_base_sha || "")) throw new Error("OUTER_PENDING_TARGET_SHA_INVALID");
+  if (pending.project_adapter !== expected.project_adapter) throw new Error("OUTER_PENDING_PROJECT_ADAPTER_MISMATCH");
+  if (!SHA64.test(pending.input_state_hash || "")) throw new Error("OUTER_PENDING_STATE_HASH_INVALID");
+  if (pending.task_id !== expected.task_identity) throw new Error("OUTER_PENDING_TASK_ID_MISMATCH");
+  if (pending.goal_id !== expected.goal_identity) throw new Error("OUTER_PENDING_GOAL_ID_MISMATCH");
+  requireDateTime(pending.started_at, "OUTER_PENDING_STARTED_AT");
+}
+
 function validateCycle(cycle, index, expected) {
   requireObject(cycle, "OUTER_CYCLE");
   rejectUnknown(cycle, CYCLE_KEYS, "OUTER_CYCLE");
@@ -170,6 +209,11 @@ function validateReceipt(receipt, expected) {
   if (!Array.isArray(receipt.cycles)) throw new Error("OUTER_CYCLES_INVALID");
   if (receipt.cycles.length > receipt.max_cycles || receipt.cycles.length > 64) throw new Error("OUTER_CYCLE_COUNT_EXCEEDS_MAX");
   for (let index = 0; index < receipt.cycles.length; index += 1) validateCycle(receipt.cycles[index], index, expected);
+  if (receipt.pending_cycle !== null) {
+    if (receipt.status === "COMPLETE") throw new Error("OUTER_PENDING_CYCLE_COMPLETE_RECEIPT_INVALID");
+    if (receipt.cycles.length >= receipt.max_cycles) throw new Error("OUTER_PENDING_CYCLE_EXCEEDS_MAX");
+    validatePendingCycle(receipt.pending_cycle, receipt.cycles.length, expected);
+  }
   return receipt;
 }
 
@@ -212,6 +256,7 @@ export function createOuterReceipt({ outer_run_id, binding, file, goal_identity,
     created_at: now(),
     updated_at: now(),
     harness_binding: verifiedBinding,
+    pending_cycle: null,
     cycles: [],
   };
   if (file) atomic(file, receipt);
@@ -252,6 +297,15 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
   let receipt = fs.existsSync(receiptFile)
     ? validateReceipt(readJson(receiptFile), expected)
     : createOuterReceipt({ outer_run_id, binding: verifiedBinding, file: receiptFile, goal_identity, task_identity, project_adapter, maxCycles });
+  if (receipt.pending_cycle !== null) {
+    if (receipt.status !== "NEEDS_HUMAN") {
+      const ambiguousReceipt = { ...receipt, status: "NEEDS_HUMAN", updated_at: now() };
+      validateReceipt(ambiguousReceipt, expected);
+      receipt = ambiguousReceipt;
+      atomic(receiptFile, receipt);
+    }
+    return { receipt, decision: { action: "STOP", reason: "AMBIGUOUS_IN_FLIGHT_CHILD" } };
+  }
   if (TERMINAL.has(receipt.status)) return { receipt, decision: { action: "STOP", reason: "TERMINAL_RECEIPT" } };
   const launch = launchCycle || createHarnessLauncher({ harnessRoot });
   for (let index = receipt.cycles.length; index < maxCycles; index += 1) {
@@ -264,6 +318,28 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
     const input_state_hash = previous?.resulting_state_hash || sha({ schema: OUTER_SCHEMA, outer_run_id, goal_identity, task_identity, project_adapter, binding: verifiedBinding });
     const child_run_id = `${outer_run_id}-cycle-${index}`;
     const started_at = now();
+    const pending_cycle = {
+      cycle_index: index,
+      child_run_id,
+      harness_repository: verifiedBinding.harness_repository,
+      harness_commit_sha: verifiedBinding.harness_commit_sha,
+      target_repository: verifiedBinding.target_repository,
+      target_ref: verifiedBinding.target_ref,
+      target_base_sha: verifiedBinding.target_base_sha,
+      working_directory: verifiedBinding.working_directory,
+      evidence_root: verifiedBinding.evidence_root,
+      project_adapter,
+      input_state_hash,
+      task_id: task_identity,
+      goal_id: goal_identity,
+      started_at,
+    };
+    validatePendingCycle(pending_cycle, index, expected);
+    const pendingReceipt = { ...receipt, pending_cycle, status: "RUNNING", updated_at: now() };
+    validateReceipt(pendingReceipt, expected);
+    receipt = pendingReceipt;
+    atomic(receiptFile, receipt);
+
     const result = await launch({
       outer_run_id,
       cycle_index: index,
@@ -283,7 +359,7 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
     requireObject(result, "HARNESS_RESULT");
     if (Object.hasOwn(result, "exit_code") && result.exit_code !== 0) throw new Error(`HARNESS_EXIT_NONZERO:${result.exit_code}`);
     if (sourceDriftCheck()) {
-      receipt.status = "NEEDS_HUMAN"; receipt.updated_at = now(); atomic(receiptFile, receipt);
+      receipt.status = "NEEDS_HUMAN"; receipt.updated_at = now(); validateReceipt(receipt, expected); atomic(receiptFile, receipt);
       return { receipt, decision: { action: "STOP", reason: "SOURCE_DRIFT_AFTER_CYCLE" } };
     }
     const evidence = Object.hasOwn(result, "evidence") ? requireObject(result.evidence, "HARNESS_EVIDENCE") : result;
@@ -321,6 +397,7 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
     validateCycle(cycle, index, expected);
     const nextReceipt = {
       ...receipt,
+      pending_cycle: null,
       cycles: [...receipt.cycles, cycle],
       updated_at: now(),
       status: "RUNNING",
