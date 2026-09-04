@@ -16,13 +16,70 @@ const BINDING_KEYS = [
   "working_directory",
   "evidence_root",
 ];
+const RECEIPT_KEYS = [
+  "schema",
+  "outer_run_id",
+  "goal_identity",
+  "task_identity",
+  "project_adapter",
+  "max_cycles",
+  "status",
+  "created_at",
+  "updated_at",
+  "harness_binding",
+  "cycles",
+];
+const CYCLE_KEYS = [
+  "cycle_index",
+  "child_run_id",
+  "harness_commit_sha",
+  "target_base_sha",
+  "input_state_hash",
+  "resulting_state_hash",
+  "cycle_evidence_path",
+  "cycle_evidence_hash",
+  "task_id",
+  "goal_id",
+  "fast_path_eligible",
+  "skipped_roles",
+  "launched_roles",
+  "runner_status",
+  "verifier_status",
+  "next_action",
+  "started_at",
+  "completed_at",
+  "ephemeral",
+  "transcripts_forwarded",
+];
 const TERMINAL = new Set(["COMPLETE", "NEEDS_HUMAN"]);
+const STATUS_VALUES = new Set(["RUNNING", "COMPLETE", "NEEDS_HUMAN"]);
 
 const sha = (value) => crypto.createHash("sha256").update(Buffer.isBuffer(value) ? value : (typeof value === "string" ? value : JSON.stringify(value)), "utf8").digest("hex");
 const now = () => new Date().toISOString();
 const atomic = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8"); fs.renameSync(tmp, file); };
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const requiredString = (value, label) => { if (typeof value !== "string" || !value) throw new Error(`${label} required`); return value; };
+const requireObject = (value, label) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}_INVALID`);
+  return value;
+};
+const rejectUnknown = (value, allowed, label) => {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length) throw new Error(`${label}_UNKNOWN_FIELD:${unknown[0]}`);
+};
+const requireFields = (value, required, label) => {
+  for (const key of required) if (!Object.hasOwn(value, key)) throw new Error(`${label}_REQUIRED_FIELD_MISSING:${key}`);
+};
+const requireDateTime = (value, label) => {
+  requiredString(value, label);
+  if (Number.isNaN(Date.parse(value))) throw new Error(`${label}_INVALID`);
+};
+const requireStringArray = (value, label) => {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${label}_INVALID`);
+};
+const requireNullableString = (value, label) => {
+  if (value !== null && typeof value !== "string") throw new Error(`${label}_INVALID`);
+};
 
 export function verifyHarnessBinding(binding, { execFile = null } = {}) {
   if (!binding || typeof binding !== "object" || Array.isArray(binding)) throw new Error("binding object required");
@@ -56,28 +113,63 @@ function validateOuterIdentity({ outer_run_id, goal_identity, task_identity, pro
   if (!Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > 64) throw new Error("maxCycles must be an integer in [1,64]");
 }
 
+function validateCycle(cycle, index, expected) {
+  requireObject(cycle, "OUTER_CYCLE");
+  rejectUnknown(cycle, CYCLE_KEYS, "OUTER_CYCLE");
+  requireFields(cycle, CYCLE_KEYS, "OUTER_CYCLE");
+
+  if (!Number.isInteger(cycle.cycle_index) || cycle.cycle_index < 0 || cycle.cycle_index > 63 || cycle.cycle_index !== index) {
+    throw new Error("OUTER_CYCLE_SEQUENCE_INVALID");
+  }
+  requiredString(cycle.child_run_id, "cycle.child_run_id");
+  if (cycle.child_run_id !== `${expected.outer_run_id}-cycle-${index}`) throw new Error("OUTER_CHILD_RUN_ID_MISMATCH");
+  if (!SHA40.test(cycle.harness_commit_sha || "") || cycle.harness_commit_sha !== expected.binding.harness_commit_sha) {
+    throw new Error("OUTER_CYCLE_HARNESS_MISMATCH");
+  }
+  if (!SHA40.test(cycle.target_base_sha || "") || cycle.target_base_sha !== expected.binding.target_base_sha) {
+    throw new Error("OUTER_CYCLE_TARGET_MISMATCH");
+  }
+  if (!SHA64.test(cycle.input_state_hash || "") || !SHA64.test(cycle.resulting_state_hash || "")) throw new Error("OUTER_CYCLE_STATE_HASH_INVALID");
+  if (cycle.cycle_evidence_path !== null && typeof cycle.cycle_evidence_path !== "string") throw new Error("OUTER_CYCLE_EVIDENCE_PATH_INVALID");
+  if (!SHA64.test(cycle.cycle_evidence_hash || "")) throw new Error("OUTER_CYCLE_EVIDENCE_HASH_INVALID");
+  requiredString(cycle.task_id, "cycle.task_id");
+  requiredString(cycle.goal_id, "cycle.goal_id");
+  if (cycle.task_id !== expected.task_identity) throw new Error("OUTER_CYCLE_TASK_ID_MISMATCH");
+  if (cycle.goal_id !== expected.goal_identity) throw new Error("OUTER_CYCLE_GOAL_ID_MISMATCH");
+  if (typeof cycle.fast_path_eligible !== "boolean") throw new Error("OUTER_CYCLE_FAST_PATH_INVALID");
+  requireStringArray(cycle.skipped_roles, "OUTER_CYCLE_SKIPPED_ROLES");
+  requireStringArray(cycle.launched_roles, "OUTER_CYCLE_LAUNCHED_ROLES");
+  requireNullableString(cycle.runner_status, "OUTER_CYCLE_RUNNER_STATUS");
+  requireNullableString(cycle.verifier_status, "OUTER_CYCLE_VERIFIER_STATUS");
+  requiredString(cycle.next_action, "cycle.next_action");
+  requireDateTime(cycle.started_at, "OUTER_CYCLE_STARTED_AT");
+  requireDateTime(cycle.completed_at, "OUTER_CYCLE_COMPLETED_AT");
+  if (cycle.ephemeral !== true || cycle.transcripts_forwarded !== false) throw new Error("OUTER_CYCLE_EPHEMERAL_INVARIANT_VIOLATION");
+}
+
 function validateReceipt(receipt, expected) {
-  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) throw new Error("OUTER_RECEIPT_INVALID");
+  requireObject(receipt, "OUTER_RECEIPT");
+  rejectUnknown(receipt, RECEIPT_KEYS, "OUTER_RECEIPT");
+  requireFields(receipt, RECEIPT_KEYS, "OUTER_RECEIPT");
+
   if (receipt.schema !== OUTER_SCHEMA) throw new Error("OUTER_SCHEMA_MISMATCH");
+  requiredString(receipt.outer_run_id, "outer_run_id");
   if (receipt.outer_run_id !== expected.outer_run_id) throw new Error("OUTER_RUN_ID_MISMATCH");
   for (const key of ["goal_identity", "task_identity", "project_adapter"]) {
+    requiredString(receipt[key], key);
     if (receipt[key] !== expected[key]) throw new Error(`OUTER_IDENTITY_MISMATCH:${key}`);
   }
+  if (!Number.isInteger(receipt.max_cycles) || receipt.max_cycles < 1 || receipt.max_cycles > 64) throw new Error("OUTER_MAX_CYCLES_INVALID");
   if (receipt.max_cycles !== expected.maxCycles) throw new Error("OUTER_IDENTITY_MISMATCH:max_cycles");
+  if (!STATUS_VALUES.has(receipt.status)) throw new Error("OUTER_STATUS_INVALID");
+  requireDateTime(receipt.created_at, "OUTER_CREATED_AT");
+  requireDateTime(receipt.updated_at, "OUTER_UPDATED_AT");
+
   const persistedBinding = verifyHarnessBinding(receipt.harness_binding);
   if (!sameBinding(persistedBinding, expected.binding)) throw new Error("OUTER_BINDING_MISMATCH");
   if (!Array.isArray(receipt.cycles)) throw new Error("OUTER_CYCLES_INVALID");
-  if (!new Set(["RUNNING", "COMPLETE", "NEEDS_HUMAN"]).has(receipt.status)) throw new Error("OUTER_STATUS_INVALID");
-  for (let index = 0; index < receipt.cycles.length; index += 1) {
-    const cycle = receipt.cycles[index];
-    if (!cycle || typeof cycle !== "object" || cycle.cycle_index !== index) throw new Error("OUTER_CYCLE_SEQUENCE_INVALID");
-    if (cycle.child_run_id !== `${expected.outer_run_id}-cycle-${index}`) throw new Error("OUTER_CHILD_RUN_ID_MISMATCH");
-    if (cycle.harness_commit_sha !== expected.binding.harness_commit_sha) throw new Error("OUTER_CYCLE_HARNESS_MISMATCH");
-    if (cycle.target_base_sha !== expected.binding.target_base_sha) throw new Error("OUTER_CYCLE_TARGET_MISMATCH");
-    if (!SHA64.test(cycle.input_state_hash || "") || !SHA64.test(cycle.resulting_state_hash || "")) throw new Error("OUTER_CYCLE_STATE_HASH_INVALID");
-    if (cycle.ephemeral !== true || cycle.transcripts_forwarded !== false) throw new Error("OUTER_CYCLE_EPHEMERAL_INVARIANT_VIOLATION");
-    if (Object.hasOwn(cycle, "role_contexts") || Object.hasOwn(cycle, "transcripts")) throw new Error("OUTER_DURABLE_CONTEXT_FORBIDDEN");
-  }
+  if (receipt.cycles.length > receipt.max_cycles || receipt.cycles.length > 64) throw new Error("OUTER_CYCLE_COUNT_EXCEEDS_MAX");
+  for (let index = 0; index < receipt.cycles.length; index += 1) validateCycle(receipt.cycles[index], index, expected);
   return receipt;
 }
 
@@ -147,7 +239,7 @@ function gate(previous, { sourceDrift = false, budgetAvailable = true } = {}) {
   if (sourceDrift) return { action: "STOP", reason: "SOURCE_DRIFT" };
   if (!budgetAvailable) return { action: "STOP", reason: "BUDGET_EXHAUSTED" };
   if (!previous) return { action: "CONTINUE", reason: "first_cycle" };
-  const next = previous.next_action || previous.project_next_action;
+  const next = previous.next_action;
   return next === "CONTINUE" || next === "localized_retry" ? { action: "CONTINUE", reason: next } : { action: "STOP", reason: next || "NO_NEXT_BOUNDED_WORK" };
 }
 
