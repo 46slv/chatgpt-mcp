@@ -61,7 +61,7 @@ test("bounded 12-episode mission has distinct fresh episode identities and separ
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "INCOMPLETE"));
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "FOUND", { problem: { problem_id: "P2", statement: "solve p2", required_evidence_refs: [] } }));
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "ATTEMPTED"));
-  ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "SOLVED"));
+  ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "SOLVED", { evidence_refs: ["ev:p2-observed"] }));
   assert.equal(state.terminal, null); assert.equal(state.next_role, "GOAL_CHECK");
   ep = open(state); capture(ep); state = applyEphemeralReasoningResult(state, ep, result(ep, "COMPLETE", { evidence_refs: ["ev:goal"] }));
 
@@ -117,10 +117,15 @@ test("SOLVED and COMPLETE fail closed without their deterministic evidence", () 
   let state = findProblem(base(), "P-evidence", ["ev:problem"]);
   [state] = solveAttempt(state);
   const verifyEp = open(state);
-  assert.throws(() => applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED")), /missing required deterministic evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED")), /requires deterministic evidence|missing required deterministic evidence/);
   state = applyEphemeralReasoningResult(state, verifyEp, result(verifyEp, "SOLVED", { evidence_refs: ["ev:problem"] }));
   const goalEp = open(state);
-  assert.throws(() => applyEphemeralReasoningResult(state, goalEp, result(goalEp, "COMPLETE")), /missing required deterministic evidence/);
+  assert.throws(() => applyEphemeralReasoningResult(state, goalEp, result(goalEp, "COMPLETE")), /requires deterministic evidence|missing required deterministic evidence/);
+
+  let emptyRequired = findProblem(base(), "P-empty", []);
+  [emptyRequired] = solveAttempt(emptyRequired);
+  const emptyVerify = open(emptyRequired);
+  assert.throws(() => applyEphemeralReasoningResult(emptyRequired, emptyVerify, result(emptyVerify, "SOLVED")), /requires deterministic evidence/);
 });
 
 test("Solver cannot self-certify SOLVED and stale episode results cannot advance state", () => {
@@ -160,6 +165,21 @@ test("JSON restart reconstructs the next episode from durable state without conv
   assert.equal(after.episode_id, before.episode_id);
   assert.equal(after.role, "VERIFY");
   assert.equal(JSON.stringify(restored).includes("conversation"), false);
+});
+
+test("apply validates the full episode envelope so callers cannot forge budget or identity authority", () => {
+  let state = findProblem(base(), "P-forge");
+  const ep = open(state);
+  assert.throws(() => applyEphemeralReasoningResult(state, { ...ep, episode_id: "E999999-forged" }, result(ep, "ATTEMPTED")), /stale or mismatched episode/);
+  assert.throws(() => applyEphemeralReasoningResult(state, { ...ep, budgets: { ...ep.budgets, max_output_bytes: 999999 } }, result(ep, "ATTEMPTED")), /max_output_bytes invalid/);
+  assert.throws(() => applyEphemeralReasoningResult(state, { ...ep, forward_transcript: true }, result(ep, "ATTEMPTED")), /freshness policy invalid/);
+});
+
+test("FIND and SOLVE cannot promote verified facts into parent-owned durable truth", () => {
+  let state = findProblem(base(), "P-no-self-fact");
+  const ep = open(state);
+  const claimed = { key: "solver.claim", value: "trust me", evidence_ref: "ev:solver" };
+  assert.throws(() => applyEphemeralReasoningResult(state, ep, result(ep, "ATTEMPTED", { evidence_refs: ["ev:solver"], verified_facts: [claimed] })), /cannot promote verified facts/);
 });
 
 test("verified facts require evidence carried by the same independent result", () => {

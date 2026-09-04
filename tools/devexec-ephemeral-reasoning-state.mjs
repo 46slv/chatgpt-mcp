@@ -232,7 +232,7 @@ export function openEphemeralReasoningEpisode(state, { working_set = [], max_inp
   if (!Number.isInteger(max_input_bytes) || max_input_bytes < 256 || max_input_bytes > LIMITS.episode_input_bytes) throw new Error("max_input_bytes invalid");
   if (!Number.isInteger(max_output_bytes) || max_output_bytes < 128 || max_output_bytes > LIMITS.episode_output_bytes) throw new Error("max_output_bytes invalid");
   const state_digest = sha256(state);
-  const episode_id = `E${String(state.episode_seq + 1).padStart(6, "0")}-${sha256(`${state.mission_id}:${state.goal_id}:${state.episode_seq}:${state.next_role}:${state_digest}`).slice(0, 16)}`;
+  const episode_id = expectedEpisodeId(state, state_digest);
   const episode = {
     schema: EPHEMERAL_REASONING_EPISODE_SCHEMA,
     schema_version: 1,
@@ -251,6 +251,29 @@ export function openEphemeralReasoningEpisode(state, { working_set = [], max_inp
   return { ...episode, input_bytes };
 }
 
+const EPISODE_KEYS = ["schema", "schema_version", "episode_id", "sequence", "role", "state_digest", "session_policy", "forward_transcript", "input", "working_set", "budgets", "input_bytes"];
+function expectedEpisodeId(state, stateDigest = sha256(state)) {
+  return `E${String(state.episode_seq + 1).padStart(6, "0")}-${sha256(`${state.mission_id}:${state.goal_id}:${state.episode_seq}:${state.next_role}:${stateDigest}`).slice(0, 16)}`;
+}
+function validateEpisodeAgainstState(episode, state) {
+  rejectForbiddenKeys(episode, "episode");
+  exact(episode, EPISODE_KEYS, "ephemeral reasoning episode");
+  if (episode.schema !== EPHEMERAL_REASONING_EPISODE_SCHEMA || episode.schema_version !== 1) throw new Error("unsupported ephemeral reasoning episode schema");
+  const stateDigest = sha256(state);
+  if (episode.state_digest !== stateDigest || episode.sequence !== state.episode_seq + 1 || episode.role !== state.next_role || episode.episode_id !== expectedEpisodeId(state, stateDigest)) throw new Error("stale or mismatched episode");
+  if (episode.session_policy !== "FRESH_CONTEXT_REQUIRED" || episode.forward_transcript !== false) throw new Error("episode freshness policy invalid");
+  exact(episode.budgets, ["max_input_bytes", "max_output_bytes"], "episode.budgets");
+  const { max_input_bytes, max_output_bytes } = episode.budgets;
+  if (!Number.isInteger(max_input_bytes) || max_input_bytes < 256 || max_input_bytes > LIMITS.episode_input_bytes) throw new Error("episode max_input_bytes invalid");
+  if (!Number.isInteger(max_output_bytes) || max_output_bytes < 128 || max_output_bytes > LIMITS.episode_output_bytes) throw new Error("episode max_output_bytes invalid");
+  if (canonical(episode.input) !== canonical(roleProjection(state))) throw new Error("episode role projection mismatch");
+  const checkedWorkingSet = workingSet(episode.working_set, state.approved_context_refs);
+  if (canonical(checkedWorkingSet) !== canonical(episode.working_set)) throw new Error("episode working set mismatch");
+  const inputBytes = assertBytes({ input: episode.input, working_set: checkedWorkingSet }, max_input_bytes, "episode input");
+  if (!Number.isInteger(episode.input_bytes) || episode.input_bytes !== inputBytes) throw new Error("episode input_bytes mismatch");
+  return episode;
+}
+
 const RESULT_KEYS = ["schema", "schema_version", "episode_id", "role", "outcome", "summary", "evidence_refs", "problem", "context_request_refs", "verified_facts"];
 function validateResult(result, episode) {
   rejectForbiddenKeys(result, "result");
@@ -267,11 +290,13 @@ function validateResult(result, episode) {
   if (!(episode.role === "FIND" && result.outcome === "FOUND") && result.problem !== null) throw new Error("problem is only valid for FIND/FOUND");
   if (!(episode.role === "SOLVE" && result.outcome === "NEEDS_CONTEXT") && result.context_request_refs.length) throw new Error("context_request_refs only valid for SOLVE/NEEDS_CONTEXT");
   if (episode.role === "SOLVE" && result.outcome === "NEEDS_CONTEXT" && !result.context_request_refs.length) throw new Error("NEEDS_CONTEXT requires requested refs");
+  if (["FIND", "SOLVE"].includes(episode.role) && result.verified_facts.length) throw new Error(`${episode.role} cannot promote verified facts`);
   for (const entry of result.verified_facts) if (!result.evidence_refs.includes(entry.evidence_ref)) throw new Error("verified fact evidence must be present in result evidence_refs");
   assertBytes(result, episode.budgets.max_output_bytes, "episode result");
   return result;
 }
 function requireEvidence(required, supplied, name) {
+  if (!supplied.length) throw new Error(`${name} requires deterministic evidence`);
   const set = new Set(supplied);
   const missing = required.filter((item) => !set.has(item));
   if (missing.length) throw new Error(`${name} missing required deterministic evidence: ${missing.join(",")}`);
@@ -286,9 +311,7 @@ function mergeFacts(existing, incoming) {
 
 export function applyEphemeralReasoningResult(state, episode, result) {
   validateEphemeralReasoningState(state);
-  if (!isObject(episode) || episode.state_digest !== sha256(state) || episode.sequence !== state.episode_seq + 1 || episode.role !== state.next_role) {
-    throw new Error("stale or mismatched episode");
-  }
+  validateEpisodeAgainstState(episode, state);
   validateResult(result, episode);
   const next = clone(state);
   next.episode_seq = episode.sequence;
