@@ -1,0 +1,160 @@
+{
+  "schema": "ephemera.consumer-switch-evidence/v1",
+  "migration_id": "EPHEMERA-CP-MIG-008",
+  "responsibility": "chatgpt-mcp local runtime consumer integration candidate",
+  "ownership_class": "chatgpt-mcp",
+  "status": "CONSUMER_SWITCH_CANDIDATE",
+  "status_definition": "The explicit local consumer path delegates recovery admission, journal lifecycle, provider lease authority, and terminal evidence to the exact-pinned private EPHEMERA-System package. The default/cloud path and the canonical main consumer remain unchanged; this branch is not accepted canonical state.",
+  "consumer": {
+    "repository": "46slv/chatgpt-mcp",
+    "candidate_ref": "codex/ephemera-cp-mig-008-20260904",
+    "base_ref": "main",
+    "source_main_sha": "7b65b1311b064414d5340337a0fe896e2d8f4fb6",
+    "switch_state": "candidate only; main consumer authority unchanged"
+  },
+  "system_binding": {
+    "repository": "46slv/EPHEMERA-System",
+    "target_commit_sha": "06595be5bcb75275313f988d53901a6948b65db0",
+    "package_name": "@46slv/ephemera-system-local-runtime",
+    "package_version": "0.1.0",
+    "private": true,
+    "module_type": "module",
+    "exports": {
+      ".": "./tools/system-local-runtime-public.mjs"
+    },
+    "artifact": {
+      "filename": "46slv-ephemera-system-local-runtime-0.1.0.tgz",
+      "size_bytes": 22699,
+      "sha256": "28b10e0be02f90fa71646a9ea1cfced012bcd492a1719833ca4a8ca47b260ceb",
+      "deterministic_repack": {
+        "pack_count": 2,
+        "sha256_values": [
+          "28b10e0be02f90fa71646a9ea1cfced012bcd492a1719833ca4a8ca47b260ceb",
+          "28b10e0be02f90fa71646a9ea1cfced012bcd492a1719833ca4a8ca47b260ceb"
+        ],
+        "result": "PASS",
+        "procedure": "fresh git init/fetch exact commit with core.autocrlf=false and core.eol=lf; npm pack --ignore-scripts --json --pack-destination <source>"
+      }
+    },
+    "package_files": {
+      "package.json": "5760a995cb54b0dea06b8fc5aec003bdd45af113c79ebd922ed7ac10c8d2ff91",
+      "README.md": "8c0b713fd911c02b989555853d4ff1a66cab01f9e777274894dbe514ab99c6ba",
+      "tools/devexec-local-provider-lease-release.ps1": "a26ec4e0f36d26114776419c6961f5c44aa09fb6a14efdfdd2589ea9bf9d3c75",
+      "tools/local-provider-lease.mjs": "a98c4cc4e21c1069e7add8597d289e6c41caacd9375d677655910c00e437796c",
+      "tools/local-runtime-admission-lease.mjs": "3fd66c1d5b1cf27f6241b1ebd75eb4a2103f9e30b3c036d8a9508d1cfb92d6fd",
+      "tools/local-runtime-admission-release.ps1": "7271aa07e8ac7067af9317fdfe52b03e9256a72851d4e995a8f7f1866064caa1",
+      "tools/local-runtime-lifecycle.mjs": "d9cf6f0202558ff9ad6dd7cec1a70b318d34e0282790de53598d8b335090d210",
+      "tools/local-runtime-recovery-consumer.mjs": "e4e501926aa9a8b56e7650dc28ebb73c383bdbfc63b306a983bb6ad21365ecf6",
+      "tools/local-runtime-recovery-journal.mjs": "50e4f3407ec9ac7e814ed30ded26f5a99e91c3c9cc31c52be743c006a932b07f",
+      "tools/system-local-runtime-public.mjs": "d0779b2c274928c1c779f6d3d4ac966cbba55b5e392c8d89877ac6cb8ebe05a7"
+    }
+  },
+  "public_api": {
+    "export_allowlist": [
+      "RECOVERY_JOURNAL_SCHEMA",
+      "RECOVERY_JOURNAL_VERSION",
+      "SystemLocalRuntimeLifecycleError",
+      "SystemRecoveryConsumerError",
+      "createLocalRuntimeRecoveryConsumer",
+      "createSystemLocalRuntimeLifecycle",
+      "scanRecoveryState",
+      "validateLocalRuntimeLeaseRequest"
+    ],
+    "internal_only": [
+      "createProviderLeaseManager",
+      "createRuntimeAdmissionManager",
+      "createRecoveryJournal",
+      "RecoveryJournal",
+      "raw journal append/create APIs"
+    ],
+    "import_boundary": "package root only; no repo-relative deep import"
+  },
+  "integration_seam": {
+    "lifecycle_order": [
+      "recovery/PREFLIGHT",
+      "beforeProviderLease: validateTaskBoundary",
+      "beforeProviderLease: adapter.gpuGate",
+      "provider lease manager construction/acquire",
+      "worker execution via existing runLocalWorkerTask"
+    ],
+    "hook_contract": {
+      "name": "beforeProviderLease",
+      "invocation": "exactly once after System PREFLIGHT and before provider lease manager construction/acquire",
+      "dirty_recovery": "not invoked",
+      "failure": "hook error code preserved; provider lease acquire 0; worker execution 0; admission release required",
+      "authority": "hook receives only runId/worktree/leaseRequest/signal; System owns lifecycle evidence and terminal reason"
+    },
+    "delegated_to_system": [
+      "recovery admission",
+      "recovery journal lifecycle",
+      "recovery-root admission",
+      "provider lease acquire/release",
+      "crash/no-replay lifecycle",
+      "terminal evidence"
+    ],
+    "retained_in_consumer": [
+      "runtime/provider selection",
+      "FreeToken/LM Studio adapter selection",
+      "provider-specific lease request derivation",
+      "TaskContract/TaskBoundary validation",
+      "GPU gate policy",
+      "local worker execution",
+      "result/public CLI formatting",
+      "transport"
+    ]
+  },
+  "materialization": {
+    "command": "node tools/ephemera-runtime-materialize.mjs --cache-dir <external-cache> --worktree <consumer-worktree>",
+    "cache_scope": "machine-local and outside repository/worktree",
+    "checks": [
+      "exact System commit",
+      "package name/version/private ESM metadata",
+      "root exports",
+      "packed artifact SHA-256",
+      "complete installed package content manifest",
+      "cache loader SHA-256",
+      "Windows helper files"
+    ],
+    "missing_access_or_mismatch": "BLOCKED",
+    "silent_legacy_fallback": false,
+    "normal_install_build_cloud_transport_private_network": "not used"
+  },
+  "behavior_matrix": {
+    "cases": {
+      "clean_success": "PASS",
+      "execution_failure": "PASS",
+      "dirty_recovery": "PASS; RECOVERY_NEEDS_ATTENTION",
+      "gpu_unavailable": "PASS; provider lease acquire 0, worker execution 0",
+      "task_boundary_failure": "PASS; provider lease acquire 0, worker execution 0",
+      "lease_held": "PASS; LEASE_HELD",
+      "stale_lease": "PASS; STALE_CANDIDATE",
+      "malformed_lease": "PASS; LEASE_NEEDS_ATTENTION",
+      "provider_release_ambiguity": "PASS; LEASE_RELEASE_NEEDS_ATTENTION",
+      "same_recovery_root_concurrency": "PASS; ADMISSION_HELD loser",
+      "hard_exit_restart": "PASS; exit 17 then BLOCKED with no replay",
+      "state_dir_inside_worktree": "PASS; RUNTIME_STATE_INSIDE_WORKTREE"
+    },
+    "unexplained_delta": 0,
+    "legacy_lifecycle_invocations": 0,
+    "legacy_proof_method": "switched selector import graph excludes source recovery journal/provider lease modules and runtime matrix exercises only the materialized package; old files remain present but unused by this candidate"
+  },
+  "verification": {
+    "build": "PASS",
+    "focused_selector_materializer": "12/12 PASS",
+    "packed_real_integration": "3/3 PASS",
+    "packed_consumer_matrix": "3/3 PASS",
+    "broad_devexec_baseline_with_materialized_cache": "302/302 PASS",
+    "portability": "3/3 PASS",
+    "preflight": "PASS",
+    "windows_helper_resolution": "PASS; both packed sibling .ps1 helpers resolved from installed package root",
+    "git_diff_check": "PASS"
+  },
+  "canonical_boundary": {
+    "status": "candidate only",
+    "main_consumer_switched": false,
+    "accepted_canonical": false,
+    "registry_publish_or_release": false,
+    "main_merge": false
+  },
+  "recorded_at": "2026-09-04T13:35:00+09:00"
+}

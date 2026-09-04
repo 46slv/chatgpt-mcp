@@ -56,19 +56,18 @@ function invoke(args) {
   return { ...result, parsed };
 }
 
-test("public runtime run accepts a versioned task and injected adapter", () => {
+test("public runtime run refuses an explicit local task until the EPHEMERA package is materialized", () => {
   const f = fixture();
   const task = taskFile(f);
   const adapter = adapterFile(f, `import fs from "node:fs"; export function createAdapter() { return { identity: { runtime: "local", provider: "freetoken", model: "fake" }, async run(task) { fs.mkdirSync(task.worktree + "/src", { recursive: true }); fs.writeFileSync(task.worktree + "/src/value.txt", "ok\\n"); return { status: "PASS", metrics: { first_tool: "apply_patch", tool_calls: 1 } }; } }; }`);
   const evidence = path.join(os.tmpdir(), `devexec-cli-evidence-${process.pid}.json`);
   const result = invoke(["--task", task, "--runtime", "local", "--provider", "freetoken", "--adapter-module", adapter, "--evidence", evidence]);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 2, result.stderr);
   assert.equal(result.parsed.version, 1);
-  assert.equal(result.parsed.status, "DONE");
-  assert.deepEqual(result.parsed.changed_files, ["src/value.txt"]);
-  assert.equal(result.parsed.runtime_provider_identity.model, "fake");
+  assert.equal(result.parsed.status, "BLOCKED");
+  assert.match(result.parsed.blocker, /EPHEMERA_RUNTIME_NOT_MATERIALIZED/i);
   const saved = JSON.parse(fs.readFileSync(evidence, "utf8"));
-  assert.equal(saved.result.status, "DONE");
+  assert.equal(saved.result.status, "BLOCKED");
   assert.equal(JSON.stringify(saved).includes("source body"), false);
 });
 
@@ -95,14 +94,14 @@ test("malformed and unknown-field task files fail closed with truthful input evi
   assert.equal(JSON.parse(fs.readFileSync(evidence, "utf8")).result.status, "BLOCKED");
 });
 
-test("provider unavailable is reported as BLOCKED without a fake success", () => {
+test("provider input is never reached when the explicit EPHEMERA package is unavailable", () => {
   const f = fixture();
   const task = taskFile(f);
   const adapter = adapterFile(f, `export default { identity: { runtime: "local", provider: "freetoken", model: "unavailable" }, async run() { return { status: "BLOCKED", code: "UNAVAILABLE" }; } };`);
   const result = invoke(["--task", task, "--runtime", "local", "--provider", "freetoken", "--adapter-module", adapter]);
   assert.equal(result.status, 2);
   assert.equal(result.parsed.status, "BLOCKED");
-  assert.match(result.parsed.blocker, /provider blocked/i);
+  assert.match(result.parsed.blocker, /EPHEMERA_RUNTIME_NOT_MATERIALIZED/i);
 });
 
 test("read-only metrics summary is exposed through the public dispatcher", () => {
@@ -114,13 +113,13 @@ test("read-only metrics summary is exposed through the public dispatcher", () =>
   assert.equal(parsed.count, 0);
 });
 
-test("recovery scan is read-only and exposed through the public dispatcher", () => {
+test("recovery scan requires the materialized EPHEMERA public package and does not use the source journal", () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-recovery-scan-"));
   const journal = createRecoveryJournal({ stateDir, runId: "cli-scan" }); journal.append("PREFLIGHT");
   const before = fs.readdirSync(path.join(stateDir, "cli-scan")).sort();
-  const result = spawnSync(process.execPath, [CLI, "runtime", "recovery", "scan", "--state-dir", stateDir], { encoding: "utf8", windowsHide: true });
-  assert.equal(result.status, 0, result.stderr);
-  const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.runs[0].classification, "NONTERMINAL");
+  const missingCache = path.join(os.tmpdir(), `ephemera-missing-cache-${process.pid}-${Math.random().toString(16).slice(2)}`);
+  const result = spawnSync(process.execPath, [CLI, "runtime", "recovery", "scan", "--state-dir", stateDir], { encoding: "utf8", windowsHide: true, env: { ...process.env, EPHEMERA_RUNTIME_CACHE_DIR: missingCache } });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /EPHEMERA_RUNTIME_NOT_MATERIALIZED/i);
   assert.deepEqual(fs.readdirSync(path.join(stateDir, "cli-scan")).sort(), before);
 });
