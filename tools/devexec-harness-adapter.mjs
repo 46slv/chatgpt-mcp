@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 export const OUTER_SCHEMA = "devexec.harness-outer.v1";
 
@@ -81,9 +81,13 @@ function validateReceipt(receipt, expected) {
   return receipt;
 }
 
-export function createHarnessLauncher({ python = process.env.PYTHON || "python", harnessRoot, launch = null } = {}) {
+export function createHarnessLauncher({ python = process.env.PYTHON || "python", harnessRoot, launch = null, resolveHarnessCommit = null } = {}) {
   if (!harnessRoot) throw new Error("harnessRoot required");
+  const resolveCommit = resolveHarnessCommit || ((root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }));
   return async (request) => {
+    if (path.resolve(harnessRoot) !== path.resolve(request.harness_repository)) throw new Error("HARNESS_REPOSITORY_PATH_MISMATCH");
+    const actualCommit = String(resolveCommit(harnessRoot)).trim();
+    if (actualCommit !== request.harness_commit_sha) throw new Error("HARNESS_COMMIT_MISMATCH");
     if (launch) return launch(request);
     const args = ["-m", "codex_ephemeral_harness.cli", "cycle", "--repo", request.target_repository, "--adapter", request.project_adapter, "--mode", "production", "--run-id", request.child_run_id, "--evidence-root", request.evidence_root];
     const env = { ...process.env, PYTHONPATH: path.join(harnessRoot, "src") };
@@ -120,6 +124,23 @@ export function createOuterReceipt({ outer_run_id, binding, file, goal_identity,
   };
   if (file) atomic(file, receipt);
   return receipt;
+}
+
+function hashCycleEvidence(evidencePath, evidence, evidenceRoot) {
+  if (!evidencePath) return { path: null, hash: sha(evidence) };
+  if (typeof evidencePath !== "string" || !evidencePath) throw new Error("EVIDENCE_PATH_INVALID");
+  const lexicalRoot = path.resolve(evidenceRoot);
+  const lexicalResolved = path.resolve(lexicalRoot, evidencePath);
+  const lexicalRelative = path.relative(lexicalRoot, lexicalResolved);
+  if (lexicalRelative === "" || lexicalRelative.startsWith(`..${path.sep}`) || lexicalRelative === ".." || path.isAbsolute(lexicalRelative)) throw new Error("EVIDENCE_PATH_OUTSIDE_ROOT");
+  const root = fs.realpathSync(lexicalRoot);
+  const resolved = fs.realpathSync(lexicalResolved);
+  const relative = path.relative(root, resolved);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) throw new Error("EVIDENCE_PATH_OUTSIDE_ROOT");
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) throw new Error("EVIDENCE_PATH_NOT_FILE");
+  if (stat.size > 8 * 1024 * 1024) throw new Error("EVIDENCE_FILE_TOO_LARGE");
+  return { path: relative.split(path.sep).join("/"), hash: sha(fs.readFileSync(resolved)) };
 }
 
 function gate(previous, { sourceDrift = false, budgetAvailable = true } = {}) {
@@ -168,7 +189,7 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
       evidence_root: verifiedBinding.evidence_root,
     });
     if (!result || typeof result !== "object") throw new Error("HARNESS_RESULT_INVALID");
-    if (Number.isInteger(result.exit_code) && result.exit_code !== 0) throw new Error(`HARNESS_EXIT_NONZERO:${result.exit_code}`);
+    if (Object.hasOwn(result, "exit_code") && result.exit_code !== 0) throw new Error(`HARNESS_EXIT_NONZERO:${result.exit_code}`);
     if (sourceDriftCheck()) {
       receipt.status = "NEEDS_HUMAN"; receipt.updated_at = now(); atomic(receiptFile, receipt);
       return { receipt, decision: { action: "STOP", reason: "SOURCE_DRIFT_AFTER_CYCLE" } };
@@ -178,6 +199,7 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
     if (evidence.input_state_hash && evidence.input_state_hash !== input_state_hash) throw new Error("INPUT_STATE_HASH_MISMATCH");
     const resulting_state_hash = evidence.resulting_state_hash || sha({ input_state_hash, status: result.status || evidence.status, child_run_id });
     if (!SHA64.test(resulting_state_hash)) throw new Error("RESULTING_STATE_HASH_INVALID");
+    const cycleEvidence = hashCycleEvidence(result.evidence_path, evidence, verifiedBinding.evidence_root);
     const cycle = {
       cycle_index: index,
       child_run_id,
@@ -185,8 +207,8 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
       target_base_sha: verifiedBinding.target_base_sha,
       input_state_hash,
       resulting_state_hash,
-      cycle_evidence_path: result.evidence_path || null,
-      cycle_evidence_hash: result.evidence_path && fs.existsSync(result.evidence_path) ? sha(fs.readFileSync(result.evidence_path)) : sha(evidence),
+      cycle_evidence_path: cycleEvidence.path,
+      cycle_evidence_hash: cycleEvidence.hash,
       task_id: task_identity,
       goal_id: goal_identity,
       fast_path_eligible: evidence.fast_path_eligible === true,

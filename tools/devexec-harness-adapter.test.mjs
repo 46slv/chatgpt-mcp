@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createOuterReceipt, dedupeOuterCycle, runOuterCycles, verifyHarnessBinding } from "./devexec-harness-adapter.mjs";
+import { createHarnessLauncher, createOuterReceipt, dedupeOuterCycle, runOuterCycles, verifyHarnessBinding } from "./devexec-harness-adapter.mjs";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA2 = "89abcdef0123456789abcdef0123456789abcdef";
@@ -90,6 +90,25 @@ test("source drift stops before a child and dedupe helper remains idempotent", a
   assert.ok(dedupeOuterCycle(r, { cycle_index: 1, input_state_hash: "a", harness_commit_sha: SHA }));
 });
 
+test("real launcher boundary verifies the exact harness checkout before launch", async () => {
+  const f = fixture(); let calls = 0;
+  const mismatch = createHarnessLauncher({ harnessRoot: f.root, resolveHarnessCommit: () => SHA2, launch: async () => { calls += 1; return {}; } });
+  await assert.rejects(() => mismatch({ harness_repository: f.root, harness_commit_sha: SHA }), /HARNESS_COMMIT_MISMATCH/);
+  assert.equal(calls, 0);
+  const exact = createHarnessLauncher({ harnessRoot: f.root, resolveHarnessCommit: () => SHA, launch: async () => { calls += 1; return { status: "DONE" }; } });
+  await exact({ harness_repository: f.root, harness_commit_sha: SHA });
+  assert.equal(calls, 1);
+});
+
+test("cycle evidence files are confined to the recorded evidence root", async () => {
+  const f = fixture();
+  const outside = path.join(f.root, "outside.json");
+  fs.writeFileSync(outside, "{}", "utf8");
+  await assert.rejects(() => runOuterCycles(common(f, { launchCycle: async () => ({ status: "DONE", evidence_path: outside, evidence: { next_action: "STOP" } }) })), /EVIDENCE_PATH_OUTSIDE_ROOT/);
+  const persisted = JSON.parse(fs.readFileSync(f.file, "utf8"));
+  assert.equal(persisted.cycles.length, 0);
+});
+
 test("binding requires exact harness and target SHAs and rejects unknown authority fields", () => {
   const f = fixture();
   assert.throws(() => verifyHarnessBinding({ ...f.binding, harness_commit_sha: "short" }), /full SHA/);
@@ -101,4 +120,13 @@ test("outer cycle bound is explicit and mechanically capped", async () => {
   const f = fixture();
   await assert.rejects(() => runOuterCycles(common(f, { maxCycles: 0 })), /maxCycles/);
   await assert.rejects(() => runOuterCycles(common(f, { maxCycles: 65 })), /maxCycles/);
+});
+
+test("durable receipt schema formally excludes raw contexts and unknown cycle fields", () => {
+  const schema = JSON.parse(fs.readFileSync(new URL("./devexec-harness-outer.v1.schema.json", import.meta.url), "utf8"));
+  const item = schema.properties.cycles.items;
+  assert.equal(item.additionalProperties, false);
+  assert.equal(Object.hasOwn(item.properties, "role_contexts"), false);
+  assert.equal(Object.hasOwn(item.properties, "transcripts"), false);
+  for (const key of ["cycle_evidence_hash", "task_id", "goal_id", "started_at", "completed_at"]) assert.ok(item.required.includes(key));
 });
