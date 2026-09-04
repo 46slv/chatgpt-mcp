@@ -51,6 +51,24 @@ function writeReceipt(f, receipt) {
   fs.writeFileSync(f.file, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 }
 
+async function assertFreshEvidenceRejected(evidence, pattern) {
+  const f = fixture();
+  let calls = 0;
+  await assert.rejects(
+    () => runOuterCycles(common(f, {
+      launchCycle: async () => {
+        calls += 1;
+        return { status: "DONE", evidence };
+      },
+    })),
+    pattern,
+  );
+  assert.equal(calls, 1);
+  const persisted = JSON.parse(fs.readFileSync(f.file, "utf8"));
+  assert.equal(persisted.cycles.length, 0);
+  assert.equal(persisted.status, "RUNNING");
+}
+
 test("persisted receipt rejects schema-forbidden project_next_action before resume launch", async () => {
   const f = fixture();
   const receipt = await seedRunningReceipt(f);
@@ -144,4 +162,39 @@ test("valid strict persisted receipt resumes exactly once and remains bounded", 
   assert.equal(calls, 1);
   assert.equal(resumed.receipt.cycles.length, 2);
   assert.equal(resumed.receipt.status, "COMPLETE");
+});
+
+test("fresh child evidence rejects non-array skipped_roles before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    { skipped_roles: "manager-plan", next_action: "CONTINUE" },
+    /OUTER_CYCLE_SKIPPED_ROLES_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects non-string launched_roles members before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    { launched_roles: ["worker", 42], next_action: "CONTINUE" },
+    /OUTER_CYCLE_LAUNCHED_ROLES_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects invalid nullable status before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    { runner_status: { state: "PASS" }, next_action: "CONTINUE" },
+    /OUTER_CYCLE_RUNNER_STATUS_INVALID/,
+  );
+});
+
+test("fresh child evidence rejects non-string next_action before durable write or second launch", async () => {
+  await assertFreshEvidenceRejected(
+    { next_action: 1 },
+    /cycle\.next_action required/,
+  );
+});
+
+test("fresh child evidence rejects empty next_action instead of silently authorizing fallback continuation", async () => {
+  await assertFreshEvidenceRejected(
+    { next_action: "" },
+    /cycle\.next_action required/,
+  );
 });

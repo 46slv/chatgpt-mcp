@@ -304,17 +304,26 @@ export async function runOuterCycles({ receiptFile, outer_run_id, binding, proje
       task_id: task_identity,
       goal_id: goal_identity,
       fast_path_eligible: evidence.fast_path_eligible === true,
-      skipped_roles: evidence.skipped_roles || [],
-      launched_roles: evidence.launched_roles || [],
-      runner_status: evidence.runner?.status || evidence.runner_status || null,
-      verifier_status: evidence.verifier?.status || evidence.verifier_status || null,
-      next_action: evidence.next_action || (index + 1 < maxCycles ? "localized_retry" : "STOP"),
+      skipped_roles: Object.hasOwn(evidence, "skipped_roles") ? evidence.skipped_roles : [],
+      launched_roles: Object.hasOwn(evidence, "launched_roles") ? evidence.launched_roles : [],
+      runner_status: evidence.runner && Object.hasOwn(evidence.runner, "status") ? evidence.runner.status : (Object.hasOwn(evidence, "runner_status") ? evidence.runner_status : null),
+      verifier_status: evidence.verifier && Object.hasOwn(evidence.verifier, "status") ? evidence.verifier.status : (Object.hasOwn(evidence, "verifier_status") ? evidence.verifier_status : null),
+      next_action: Object.hasOwn(evidence, "next_action") ? evidence.next_action : (index + 1 < maxCycles ? "localized_retry" : "STOP"),
       started_at,
       completed_at: now(),
       ephemeral: true,
       transcripts_forwarded: false,
     };
-    receipt.cycles.push(cycle); receipt.updated_at = now(); receipt.status = "RUNNING"; atomic(receiptFile, receipt);
+    validateCycle(cycle, index, expected);
+    const nextReceipt = {
+      ...receipt,
+      cycles: [...receipt.cycles, cycle],
+      updated_at: now(),
+      status: "RUNNING",
+    };
+    validateReceipt(nextReceipt, expected);
+    receipt = nextReceipt;
+    atomic(receiptFile, receipt);
     if (crashAfterCycle === index) throw new Error("SIMULATED_CRASH_AFTER_DURABLE_RECEIPT");
   }
   receipt.status = "COMPLETE"; receipt.updated_at = now(); atomic(receiptFile, receipt);
