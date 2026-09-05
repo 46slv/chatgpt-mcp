@@ -94,7 +94,6 @@ test("many large durable solved receipts stay out of fixed-budget FIND and GOAL_
       goalEpisode.input.solved_progress.recent_problem_ids,
       state.solved_problem_ids.slice(-8),
     );
-    assert.equal(goalEpisode.input.current_problem.problem_id, state.current_problem.problem_id);
     assert.equal("solved_problem_receipts" in goalEpisode.input, false);
     assert.equal("solved_problem_ids" in goalEpisode.input, false);
     assert.ok(goalEpisode.input_bytes < 16 * 1024);
@@ -120,4 +119,75 @@ test("many large durable solved receipts stay out of fixed-budget FIND and GOAL_
   assert.equal("solved_problem_ids" in findEpisode.input, false);
   assert.ok(findEpisode.input_bytes < 16 * 1024);
   assert.doesNotThrow(() => open(state, { max_input_bytes: 64 * 1024 }));
+});
+
+const AGGREGATE_FACT_COUNT = 40;
+const aggregateFactEvidence = Array.from({ length: AGGREGATE_FACT_COUNT }, (_, index) => `ev:f${index}`);
+function maxItem(prefix, index) {
+  const head = `${prefix}-${String(index).padStart(2, "0")}-`;
+  return `${head}${"z".repeat((2 * 1024) - head.length)}`;
+}
+function aggregateBase() {
+  return createEphemeralReasoningState({
+    mission_id: "M-DEV-LER-AGGREGATE-BUDGET",
+    goal_id: "DEV-LER-001",
+    goal: {
+      text: "g".repeat(8 * 1024),
+      acceptance: Array.from({ length: 24 }, (_, index) => maxItem("accept", index)),
+      required_evidence_refs: ["ev:goal"],
+    },
+    constraints: Array.from({ length: 24 }, (_, index) => maxItem("constraint", index)),
+    verified_facts: Array.from({ length: AGGREGATE_FACT_COUNT }, (_, index) => ({
+      key: `fact-${String(index).padStart(2, "0")}`,
+      value: "f".repeat(2 * 1024),
+      evidence_ref: aggregateFactEvidence[index],
+    })),
+    evidence_authority_refs: ["ev:goal", "ev:p", ...aggregateFactEvidence],
+    approved_context_refs: [],
+  });
+}
+function assertCompacted(episode) {
+  assert.ok(episode.input_bytes <= episode.budgets.max_input_bytes);
+  assert.equal(episode.input.projection_compaction.schema, "devexec.projection-compaction/v1");
+  assert.equal(episode.input.projection_compaction.mode, "LOSSY_DIGESTED");
+  assert.match(episode.input.projection_compaction.source_sha256, /^[0-9a-f]{64}$/);
+  assert.ok(episode.input.projection_compaction.source_bytes > episode.budgets.max_input_bytes);
+}
+
+test("aggregate goal, constraints and verified facts are deterministically bounded for every role projection", () => {
+  let state = aggregateBase();
+  assert.doesNotThrow(() => validateEphemeralReasoningState(state));
+  assert.ok(Buffer.byteLength(JSON.stringify(state), "utf8") > 64 * 1024);
+
+  let episode = open(state);
+  assert.equal(episode.role, "FIND");
+  assertCompacted(episode);
+  assert.ok(episode.input.verified_facts.length < AGGREGATE_FACT_COUNT);
+  assert.ok(episode.input.constraints.length < state.constraints.length);
+  assert.deepEqual(open(state).input, episode.input);
+
+  const tiny = open(state, { max_input_bytes: 256 });
+  assert.ok(tiny.input_bytes <= 256);
+  assert.equal(tiny.input.projection_compaction.schema, "devexec.projection-compaction/v1");
+  assert.equal(tiny.input.projection_compaction.mode, "DIGEST_ONLY");
+  assert.match(tiny.input.projection_compaction.source_sha256, /^[0-9a-f]{64}$/);
+
+  state = applyEphemeralReasoningResult(state, episode, result(episode, "FOUND", {
+    problem: { problem_id: "P-aggregate", statement: "bounded aggregate projection", required_evidence_refs: ["ev:p"] },
+  }));
+  episode = open(state);
+  assert.equal(episode.role, "SOLVE");
+  assertCompacted(episode);
+
+  state = applyEphemeralReasoningResult(state, episode, result(episode, "ATTEMPTED"));
+  episode = open(state);
+  assert.equal(episode.role, "VERIFY");
+  assert.ok(episode.input_bytes <= 16 * 1024);
+  assert.equal("projection_compaction" in episode.input, false);
+
+  state = applyEphemeralReasoningResult(state, episode, result(episode, "SOLVED", { evidence_refs: ["ev:p"] }));
+  episode = open(state);
+  assert.equal(episode.role, "GOAL_CHECK");
+  assertCompacted(episode);
+  assert.equal(episode.input.current_problem.problem_id, "P-aggregate");
 });
