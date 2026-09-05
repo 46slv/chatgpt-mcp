@@ -445,7 +445,7 @@ function boundedRoleProjection(state, checkedWorkingSet, maxInputBytes) {
   const projection = roleProjection(state);
   const bytes = canonicalBytes({ input: projection, working_set: checkedWorkingSet });
   if (bytes > maxInputBytes) {
-    throw new Error(`mandatory ${state.next_role} semantic core exceeds episode input budget`);
+    throw new Error(`mandatory ${state.next_role} semantic core exceeds episode input budget; exceeds byte budget`);
   }
   return projection;
 }
