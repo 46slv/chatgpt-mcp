@@ -13,6 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const closedLoopCli = path.join(here, "devexec-closed-loop-cli.mjs");
 const MAX_LOG_LINES = 500;
 const processes = new Map();
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function parseArgs(argv) {
   const options = {
@@ -46,6 +47,32 @@ function sendJson(res, status, value) {
   const body = JSON.stringify(value, null, 2);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   res.end(body);
+}
+
+function normalizeHostname(hostname) {
+  const value = String(hostname || "").trim().toLowerCase();
+  return value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+}
+
+export function isLoopbackHostHeader(value) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try {
+    const url = new URL(`http://${value.trim()}`);
+    return LOOPBACK_HOSTNAMES.has(normalizeHostname(url.hostname));
+  } catch {
+    return false;
+  }
+}
+
+export function isAllowedMutatingOrigin(value) {
+  if (value === undefined) return true;
+  if (typeof value !== "string" || !value.trim() || value === "null") return false;
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && LOOPBACK_HOSTNAMES.has(normalizeHostname(url.hostname));
+  } catch {
+    return false;
+  }
 }
 
 function readBody(req) {
@@ -185,6 +212,8 @@ export function createConsoleServer({ admissionRoot }) {
   return http.createServer(async (req, res) => {
     try {
       if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress || "")) return sendJson(res, 403, { error: "loopback only" });
+      if (!isLoopbackHostHeader(req.headers.host)) return sendJson(res, 403, { error: "loopback Host required" });
+      if (req.method === "POST" && !isAllowedMutatingOrigin(req.headers.origin)) return sendJson(res, 403, { error: "loopback Origin required for browser mutation" });
       const url = new URL(req.url || "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "x-content-type-options": "nosniff" });
