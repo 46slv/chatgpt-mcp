@@ -418,9 +418,16 @@ function validateTransitionCoherence(state) {
   }
   throw new Error("transition coherence could not classify last_result");
 }
+function solvedProgressProjection(state) {
+  return {
+    count: state.solved_problem_receipts.length,
+    digest: sha256(state.solved_problem_receipts),
+    recent_problem_ids: clone(state.solved_problem_ids.slice(-8)),
+  };
+}
 function roleProjection(state) {
   if (state.next_role === "FIND") return {
-    goal: clone(state.goal), constraints: clone(state.constraints), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids), solved_problem_receipts: clone(state.solved_problem_receipts),
+    goal: clone(state.goal), constraints: clone(state.constraints), verified_facts: clone(state.verified_facts), solved_progress: solvedProgressProjection(state),
   };
   if (state.next_role === "SOLVE") return {
     problem: clone(state.current_problem), constraints: clone(state.constraints), prior_attempt: latestAttemptFor(state, state.current_problem.problem_id),
@@ -429,7 +436,7 @@ function roleProjection(state) {
     problem: clone(state.current_problem), attempt: latestAttemptFor(state, state.current_problem.problem_id),
   };
   if (state.next_role === "GOAL_CHECK") return {
-    goal: clone(state.goal), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids), solved_problem_receipts: clone(state.solved_problem_receipts), last_result: clone(state.last_result),
+    goal: clone(state.goal), verified_facts: clone(state.verified_facts), current_problem: clone(state.current_problem), solved_progress: solvedProgressProjection(state), last_result: clone(state.last_result),
   };
   throw new Error("terminal state cannot open reasoning episode");
 }
