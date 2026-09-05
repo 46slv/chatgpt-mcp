@@ -7,6 +7,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { continueRun, createConsoleServer, createControlStore, isValidRunId, listRuns, listTargets, readStepFile, runDetail, runRecovery, startRun, stopRun } from "./devexec-native-console.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -207,6 +208,26 @@ test("server serves UI and JSON, guards foreign Host and Origin", async () => {
     assert.equal(unknown.status, 404);
   } finally {
     await stopServer(child);
+  }
+});
+
+test("served inline script parses without SyntaxError (escaped newline)", async () => {
+  const { env } = setupFixtures();
+  const server = createConsoleServer({ env });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    const match = html.match(/<script>([\s\S]*?)<\/script>/);
+    assert.ok(match, "inline script found");
+    const code = match[1];
+    assert.ok(code.includes('.join("\\n")'), "served script keeps literal backslash-n");
+    assert.ok(!code.includes('.join("\n")'), "served script has no raw-newline join");
+    new vm.Script(code);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 
