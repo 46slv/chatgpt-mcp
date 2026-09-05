@@ -192,8 +192,11 @@ test("durable solved receipts bind retained solved ids to problem, solve attempt
   assert.match(receipt.problem_sha256, /^[0-9a-f]{64}$/);
   assert.doesNotThrow(() => validateEphemeralReasoningState(JSON.parse(JSON.stringify(state))));
   const findEpisode = open(state);
-  assert.deepEqual(findEpisode.input.solved_problem_ids, ["P-receipt"]);
-  assert.deepEqual(findEpisode.input.solved_problem_receipts, state.solved_problem_receipts);
+  assert.equal(findEpisode.input.solved_progress.count, 1);
+  assert.match(findEpisode.input.solved_progress.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(findEpisode.input.solved_progress.recent_problem_ids, ["P-receipt"]);
+  assert.equal("solved_problem_ids" in findEpisode.input, false);
+  assert.equal("solved_problem_receipts" in findEpisode.input, false);
 });
 
 test("restart rejects forged, stripped or mutated historical solved authority after GOAL_CHECK/INCOMPLETE", () => {
