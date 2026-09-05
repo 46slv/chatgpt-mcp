@@ -25,6 +25,15 @@ import { loadClosedLoopAdmission, validateClosedLoopAdmission } from "./devexec-
 // - EPHEMERA_ADMISSION_CANARY_FRESH=1: bootstrap a brand-new Codex thread
 //   inside this test (one extra bounded model call).
 //
+// Live host boundaries observed 2026-09-05 (Windows, codex 0.153.1): the
+// app-server read-only proof is refused by this build (thread/items/list is
+// not supported yet, -32601), so the exact initial-turn message from the
+// cross-checked evidence is supplied and re-hashed source-owned instead.
+// Bundled 0.153.1 exec is sqlite-backed and emits no rollout JSONL, and it
+// stalls on piped stdin in automation; FRESH=1 may therefore run to its
+// timeout without producing evidence. Reuse mode below is the supported
+// live path: pinned fresh-thread evidence plus fully live runtime probe,
+// admit, reload, and replay.
 // The synthetic ChatGPT URL is shape-validated only (source-owned
 // parseChatGPTTargetUrl performs no existence check and no fetch); a global
 // fetch guard fails the test loudly if anything attempts an HTTP send.
@@ -68,7 +77,7 @@ function runCodexFresh(workdir) {
       CODEX_EXE,
       ["exec", "--json", "--skip-git-repo-check", "-C", workdir, "-s", "read-only",
         "Reply with exactly the single line EPHEMERA-ADMISSION-CANARY-OK and take no other action. Do not read, write, or list files."],
-      { timeout: 300000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      { timeout: 300000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, input: "" },
       (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
