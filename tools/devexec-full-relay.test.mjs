@@ -514,3 +514,18 @@ test("runFullRelayRound performs one bounded round only", async () => {
   assert.equal(chat, 1);
   assert.equal(codex, 0);
 });
+test("ChatGPT delivery ambiguity releases the conversation slot", async () => {
+  const f = fixture({ label: "chat-ambiguous", conversation: "chat-ambiguous-slot" });
+  const o = orchestrator(f, relayAdapters({ chat: async () => { throw new Error("bridge down"); } }));
+  const result = await o.run();
+  assert.equal(result.status, FULL_RELAY_STATES.DELIVERY_UNKNOWN);
+  assert.equal(o.conversationArbitrator.inspect(f.chat.conversation_id), null);
+});
+test("Codex delivery ambiguity releases the conversation slot", async () => {
+  const f = fixture({ label: "codex-ambiguous", conversation: "chat-codex-ambiguous-slot", task_id: "task-codex-ambiguous" });
+  const failingSender = { send: async () => { throw Object.assign(new Error("queue ambiguous"), { code: CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN }); } };
+  const o = orchestrator(f, { ...relayAdapters({}), codexSender: failingSender });
+  const result = await o.run();
+  assert.equal(result.status, FULL_RELAY_STATES.DELIVERY_UNKNOWN);
+  assert.equal(o.conversationArbitrator.inspect(f.chat.conversation_id), null);
+});
