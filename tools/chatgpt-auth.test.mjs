@@ -97,3 +97,85 @@ test("legacy login retries retain the no-target call contract", async () => {
   assert.equal(result, true);
   assert.deepEqual(seen, [undefined, undefined]);
 });
+
+class FakeDomElement {
+  constructor(options = {}) {
+    this.attrs = options.attrs ?? {};
+    this.style = options.style ?? { display: "block", visibility: "visible", opacity: "1" };
+    this.rect = options.rect ?? { width: 100, height: 40 };
+    this.textContent = options.text ?? "";
+  }
+  getAttribute(name) { return this.attrs[name] ?? null; }
+  matches(selector) {
+    if (selector === '[contenteditable="false"]') return this.attrs.contenteditable === "false";
+    if (selector === '[contenteditable="true"]') return this.attrs.contenteditable === "true";
+    return false;
+  }
+  getBoundingClientRect() { return this.rect; }
+}
+
+function installFakeDom() {
+  const previous = { html: globalThis.HTMLElement, window: globalThis.window, document: globalThis.document };
+  globalThis.HTMLElement = FakeDomElement;
+  globalThis.window = { getComputedStyle: (element) => element.style };
+  return previous;
+}
+
+function restoreFakeDom(previous) {
+  if (previous.html === undefined) delete globalThis.HTMLElement;
+  else globalThis.HTMLElement = previous.html;
+  if (previous.window === undefined) delete globalThis.window;
+  else globalThis.window = previous.window;
+  if (previous.document === undefined) delete globalThis.document;
+  else globalThis.document = previous.document;
+}
+
+function domGatePage({ composer = [], auth = [], url = TARGET } = {}) {
+  return {
+    url: () => url,
+    evaluate: async (fn, arg) => {
+      const previous = installFakeDom();
+      globalThis.document = {
+        querySelectorAll: (selector) => (selector.indexOf("button, a, input") === 0 ? auth : composer),
+      };
+      try {
+        return await fn(arg);
+      } finally {
+        restoreFakeDom(previous);
+      }
+    },
+  };
+}
+
+function operableComposer() {
+  return new FakeDomElement({
+    attrs: { id: "prompt-textarea", "aria-hidden": "true", "aria-label": "ChatGPT", contenteditable: "true" },
+    style: { display: "block", visibility: "visible", opacity: "1" },
+    rect: { width: 462, height: 47 },
+    text: "",
+  });
+}
+
+test("aria-hidden operable composer counts as login readiness", async () => {
+  assert.equal(await checkLoginStatusOnPage(domGatePage({ composer: [operableComposer()] }), target), true);
+});
+
+test("display-none composer stays fail-closed", async () => {
+  const hidden = new FakeDomElement({
+    attrs: { id: "prompt-textarea", contenteditable: "true" },
+    style: { display: "none", visibility: "visible", opacity: "1" },
+    rect: { width: 0, height: 0 },
+    text: "",
+  });
+  assert.equal(await checkLoginStatusOnPage(domGatePage({ composer: [hidden] }), target), false);
+});
+
+test("visible login challenge still fails readiness with operable composer", async () => {
+  const loginButton = new FakeDomElement({
+    attrs: { "aria-label": "Log in" },
+    style: { display: "block", visibility: "visible", opacity: "1" },
+    rect: { width: 80, height: 32 },
+    text: "Log in",
+  });
+  assert.equal(await checkLoginStatusOnPage(domGatePage({ composer: [operableComposer()], auth: [loginButton] }), target), false);
+});

@@ -15,7 +15,6 @@ import {
   navigateTo,
   findElement,
   typeText,
-  clickElement,
   wait,
   saveStorageState,
   isBrowserRunning,
@@ -23,6 +22,7 @@ import {
   launchBrowser,
 } from './browser.js';
 import { fibonacciBackoff, sleep } from './utils/backoff.js';
+import { appendStageEvent } from './utils/stage-sidecar.js';
 
 // ============================================
 // Global state
@@ -298,8 +298,23 @@ export async function checkLoginStatusOnPage(
           return [];
         }
       });
-      const composerVisible = composerElements.some((element) => isVisible(element));
-      const composerEnabled = composerElements.some((element) => isVisible(element) && isEnabled(element));
+      // The shipped composer editor carries aria-hidden while remaining the
+      // operable input: it accepts focus and real key events and has a live
+      // layout box. Rejecting it on aria-hidden alone wedges every send
+      // behind a failed readiness gate, so an aria-hidden contenteditable
+      // composer with a real layout box still counts when it is enabled.
+      // Fully hidden elements (display/visibility/opacity/zero rect) never count.
+      const isOperableComposer = (element: Element): boolean => {
+        if (!(element instanceof HTMLElement)) return false;
+        if (!element.matches('[contenteditable="true"]')) return false;
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+        const rect = element.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) return false;
+        return isEnabled(element);
+      };
+      const composerVisible = composerElements.some((element) => isVisible(element) || isOperableComposer(element));
+      const composerEnabled = composerElements.some((element) => (isVisible(element) || isOperableComposer(element)) && isEnabled(element));
 
       // Text is restricted to interactive/auth containers so a conversation
       // that merely mentions “log in” cannot masquerade as an auth challenge.
@@ -352,180 +367,115 @@ async function checkLoginStatus(target?: ChatGPTTargetIdentity): Promise<boolean
  * Strategy: get the last conversation turn's innerText via the browser's
  * HTMLElement.innerText (which respects visibility), then clean UI phrases.
  */
-async function getLatestResponseText(): Promise<string | null> {
-  try {
-    const page = await getPage();
-
-    const text = await page.evaluate(() => {
-      // UI chrome phrases that appear in turn elements but aren't part of the response
-      const phrasesToRemove = [
-        'ChatGPT said:',
-        'ChatGPT said',
-        'Pro thinking',
-        'Answer now',
-        'Extended thinking',
-        'Show thinking',
-        'Hide thinking',
-        'Reasoning',
-        'Thinking...',
-        'Thinking\u2026',
-        '\u2022 ',
-      ];
-
-      const cleanText = (text: string): string => {
-        let cleaned = text;
-        for (const phrase of phrasesToRemove) {
-          while (cleaned.includes(phrase)) {
-            cleaned = cleaned.replace(phrase, '');
-          }
-        }
-        // Remove "Thinking" only as a standalone word at the start
-        cleaned = cleaned.replace(/^Thinking\s*/i, '');
-        cleaned = cleaned.replace(/Pro\s+thinking\s*\u2022?\s*/gi, '');
-        // Remove timing indicators like "15 seconds" but be careful not to strip legitimate numbers
-        cleaned = cleaned.replace(/^\d+\s*(seconds?|secs?)\s*/i, '');
-        cleaned = cleaned.replace(/\s+/g, ' ').trim();
-        return cleaned;
-      };
-
-      // Get all conversation turns
-      const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
-      if (turns.length < 2) return null;
-
-      const lastTurn = turns[turns.length - 1] as HTMLElement;
-
-      // Strategy 1: Use innerText of the turn element (respects visibility, skips hidden elements)
-      // This is the most reliable because it gets exactly what the user sees
-      const innerText = lastTurn.innerText?.trim();
-      if (innerText) {
-        const cleaned = cleanText(innerText);
-        if (cleaned.length > 0) return cleaned;
-      }
-
-      // Strategy 2: Clone, strip chrome elements, get textContent
-      const clone = lastTurn.cloneNode(true) as Element;
-      const chromeSelectors = [
-        'button', '[role="button"]',
-        '[class*="actions"]', '[class*="toolbar"]',
-        'nav', 'header', 'footer',
-        '[class*="thinking"]', '[class*="reasoning"]',
-        '[data-testid*="thinking"]',
-      ];
-      for (const sel of chromeSelectors) {
-        clone.querySelectorAll(sel).forEach(e => e.remove());
-      }
-      const stripped = clone.textContent?.trim();
-      if (stripped) {
-        const cleaned = cleanText(stripped);
-        if (cleaned.length > 0) return cleaned;
-      }
-
-      // Strategy 3: Look for markdown/prose inside the turn
-      const markdown = lastTurn.querySelector('.markdown, .prose, [class*="markdown"]');
-      if (markdown) {
-        const mdText = markdown.textContent?.trim();
-        if (mdText) return cleanText(mdText);
-      }
-
-      // Strategy 4: data-message-author-role="assistant" anywhere on page
-      const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-      if (assistantMsgs.length > 0) {
-        const lastMsg = assistantMsgs[assistantMsgs.length - 1] as HTMLElement;
-        const msgText = lastMsg.innerText?.trim();
-        if (msgText) return cleanText(msgText);
-      }
-
-      return null;
-    });
-
-    return text;
-  } catch (error) {
-    console.error('Failed to get response text:', error);
-    return null;
-  }
+/**
+ * Fresh-turn observation for the response poll. freshAssistantTexts holds
+ * assistant-side texts strictly after the acked user turn, in document
+ * order. Turns at or before the anchor are never consulted, so a stale
+ * pre-send assistant message (with its copy button) cannot be mistaken
+ * for the current response.
+ */
+export interface FreshTurnSnapshot {
+  turnCount: number;
+  freshAssistantTexts: string[];
+  lastFreshHasCopy: boolean;
+  thinking: boolean;
 }
 
-// ============================================
-// Generation completion detection
-// ============================================
+/** Anchor for the response poll: only turns after this user turn qualify. */
+export interface PollAnchor {
+  afterUserTurnIndex: number;
+}
 
-/**
- * Check if generation is complete.
- *
- * ChatGPT DOM learnings (2026-02):
- * - data-testid="stop-button" persists permanently — UNRELIABLE
- * - data-testid="copy-turn-action-button" inside last turn = response done — RELIABLE
- * - [class*="streaming"] matches unrelated elements — UNRELIABLE
- * - data-is-streaming rarely set — UNRELIABLE
- *
- * Strategy: check if the LAST conversation turn has a copy button inside it,
- * combined with content stability.
- */
-async function isGenerationComplete(
-  lastContentLength: number,
-  stableCount: number,
-): Promise<{ complete: boolean; contentLength: number; newStableCount: number }> {
-  const page = await getPage();
+export interface PollProgress {
+  contentLength: number;
+  stableCount: number;
+}
 
-  const indicators = await page.evaluate(() => {
-    const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
-    const turnCount = turns.length;
-
-    // Check if the LAST turn has a copy button inside it
-    // This is the key signal — copy button appears only when that turn is complete
-    let lastTurnHasCopy = false;
-    // Check if the turn appears to be in a thinking state
-    let isThinking = false;
-    if (turns.length >= 2) {
-      const lastTurn = turns[turns.length - 1];
-      lastTurnHasCopy = !!lastTurn.querySelector('[data-testid="copy-turn-action-button"]');
-
-      // Detect thinking state: look for thinking indicators in the turn
-      const turnText = (lastTurn as HTMLElement).innerText || '';
-      const thinkingPatterns = /\b(thinking|reasoning)\b/i;
-      const hasThinkingUI = !!lastTurn.querySelector(
-        '[class*="thinking"], [class*="reasoning"], [data-testid*="thinking"]'
-      );
-      // "Thinking" as a standalone label at the start of the turn content
-      isThinking = hasThinkingUI || (thinkingPatterns.test(turnText) && turnText.length < 200);
+export interface PollDecision extends PollProgress {
+  complete: boolean;
+  response: string | null;
+}
+/** UI chrome phrases that appear in turn elements but are not response text. */
+export function cleanResponseText(value: unknown): string {
+  let cleaned = String(value ?? '');
+  const phrasesToRemove = [
+    'ChatGPT said:',
+    'ChatGPT said',
+    'Pro thinking',
+    'Answer now',
+    'Extended thinking',
+    'Show thinking',
+    'Hide thinking',
+    'Reasoning',
+    'Thinking...',
+    'Thinking\u2026',
+    '\u2022 ',
+  ];
+  for (const phrase of phrasesToRemove) {
+    while (cleaned.includes(phrase)) {
+      cleaned = cleaned.replace(phrase, '');
     }
-
-    return { turnCount, lastTurnHasCopy, isThinking };
-  });
-
-  const currentText = await getLatestResponseText();
-  const currentLength = currentText?.length ?? 0;
-
-  console.error(`[poll] turns=${indicators.turnCount} lastTurnCopy=${indicators.lastTurnHasCopy} thinking=${indicators.isThinking} contentLen=${currentLength} stable=${stableCount}`);
-
-  // Check content stability
-  let newStableCount = stableCount;
-  if (currentLength > 0 && currentLength === lastContentLength) {
-    newStableCount++;
-  } else {
-    newStableCount = 0;
   }
+  cleaned = cleaned.replace(/^Thinking\s*/i, '');
+  cleaned = cleaned.replace(/Pro\s+thinking\s*\u2022?\s*/gi, '');
+  cleaned = cleaned.replace(/^\d+\s*(seconds?|secs?)\s*/i, '');
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  return cleaned;
+}
+/**
+ * Read one bounded snapshot of the turns that follow the acked user turn.
+ * The evaluate closure is self-contained: every selector it needs is
+ * inlined because only the anchor travels into the page.
+ */
+export async function observeFreshTurns(page: { evaluate<R>(fn: (anchor: number) => R, arg: number): Promise<R> }, afterUserTurnIndex: number): Promise<FreshTurnSnapshot> {
+  return page.evaluate((anchor: number) => {
+    const turns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+    const start = Math.max(0, anchor + 1);
+    const fresh = turns.slice(start);
+    const texts: string[] = [];
+    const seen = new Set<string>();
+    const take = (element: Element | null): void => {
+      if (!element) return;
+      const text = (element as HTMLElement).innerText?.trim() ?? '';
+      if (text.length === 0 || seen.has(text)) return;
+      seen.add(text);
+      texts.push(text);
+    };
+    for (const turn of fresh) {
+      const role = turn.getAttribute('data-message-author-role');
+      if (role !== null && role !== 'assistant') continue;
+      take(turn);
+    }
+    const assistants = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    for (const message of assistants) {
+      const host = message.closest('[data-testid^="conversation-turn-"]');
+      if (host !== null && turns.indexOf(host) < start) continue;
+      take(message);
+    }
+    const last = fresh.length > 0 ? fresh[fresh.length - 1] : null;
+    const lastFreshHasCopy = last === null ? false : !!last.querySelector('[data-testid="copy-turn-action-button"]');
+    let thinking = false;
+    if (last !== null) {
+      const turnText = (last as HTMLElement).innerText || '';
+      thinking = !!last.querySelector('[class*="thinking"], [class*="reasoning"], [data-testid*="thinking"]')
+        || (/\b(thinking|reasoning)\b/i.test(turnText) && turnText.length < 200);
+    }
+    return { turnCount: turns.length, freshAssistantTexts: texts, lastFreshHasCopy, thinking };
+  }, afterUserTurnIndex);
+}
 
-  // Complete if:
-  // 1. Last turn has copy button AND we have content AND it's been stable for 1 check
-  //    (copy button is the authoritative signal — it only appears when generation is truly done)
-  // 2. Fallback: content stable for 10+ checks (~3+ minutes) AND not in thinking state
-  //    (very conservative — only for edge cases where copy button never appears)
-  //
-  // BUG FIX: Previously stableThreshold=3 caused false positives during GPT-5.2 Pro's
-  // thinking phase, where a thinking summary label would appear stable and trigger completion.
+/** Pure poll step over one fresh-turn snapshot. Unit-testable without a browser. */
+export function decidePollCompletion(prev: PollProgress, obs: FreshTurnSnapshot): PollDecision {
+  const raw = obs.freshAssistantTexts.length > 0 ? obs.freshAssistantTexts[obs.freshAssistantTexts.length - 1] : '';
+  const cleaned = cleanResponseText(raw);
+  const currentLength = cleaned.length;
+  let stableCount = prev.stableCount;
+  if (currentLength > 0 && currentLength === prev.contentLength) stableCount += 1;
+  else stableCount = 0;
   const FALLBACK_STABLE_THRESHOLD = 10;
-  const highConfidence =
-    (indicators.lastTurnHasCopy && currentLength > 0 && newStableCount >= 1) ||
-    (!indicators.isThinking && currentLength > 0 && newStableCount >= FALLBACK_STABLE_THRESHOLD);
-
-  console.error(`[poll] → complete=${highConfidence}`);
-
-  return {
-    complete: highConfidence,
-    contentLength: currentLength,
-    newStableCount,
-  };
+  const complete = (obs.lastFreshHasCopy && currentLength > 0 && stableCount >= 1)
+    || (!obs.thinking && currentLength > 0 && stableCount >= FALLBACK_STABLE_THRESHOLD);
+  return { complete, contentLength: currentLength, stableCount, response: complete ? cleaned : null };
 }
 
 // ============================================
@@ -533,9 +483,164 @@ async function isGenerationComplete(
 // ============================================
 
 /**
- * Send a prompt to ChatGPT by typing into textarea and clicking send
+ * Minimal structural surface used to submit and observe the composer.
+ * Playwright pages satisfy it; tests inject fakes.
  */
-async function sendPromptText(prompt: string): Promise<void> {
+export interface ComposerSubmitPage {
+  url(): string;
+  locator(selector: string): {
+    first(): { focus(): Promise<void>; innerText(): Promise<string>; click(options?: unknown): Promise<void> };
+    nth(index: number): {
+      click(options?: unknown): Promise<void>;
+      isVisible(): Promise<boolean>;
+      innerText(): Promise<string>;
+      getAttribute(name: string): Promise<string | null>;
+    };
+    count(): Promise<number>;
+  };
+  keyboard: { press(key: string): Promise<void> };
+}
+
+/** Pre-send observation. Nothing here proves a send happened. */
+export interface SendBaseline {
+  url: string;
+  turnCount: number;
+  lastTurnTestId: string | null;
+}
+
+/**
+ * Delivery acknowledgment. The new user turn sits at userTurnIndex; every
+ * assistant turn answering this send comes strictly after it.
+ */
+export interface SendAcknowledgment {
+  url: string;
+  userTurnIndex: number;
+  ackTurnCount: number;
+  userTurnText: string | null;
+}
+
+const COMPOSER_TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
+
+export function normalizeComposedText(value: unknown): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+export async function captureSendBaseline(page: ComposerSubmitPage): Promise<SendBaseline> {
+  const url = page.url();
+  const turnCount = await page.locator(COMPOSER_TURN_SELECTOR).count();
+  let lastTurnTestId: string | null = null;
+  if (turnCount > 0) {
+    try {
+      lastTurnTestId = await page.locator(COMPOSER_TURN_SELECTOR).nth(turnCount - 1).getAttribute('data-testid');
+    } catch {
+      lastTurnTestId = null;
+    }
+  }
+  return { url, turnCount, lastTurnTestId };
+}
+
+export async function readComposerText(page: ComposerSubmitPage): Promise<string> {
+  try {
+    return await page.locator(SELECTORS.promptTextarea[0]).first().innerText();
+  } catch {
+    return '';
+  }
+}
+async function readTurnText(page: ComposerSubmitPage, index: number): Promise<string | null> {
+  try {
+    return await page.locator(COMPOSER_TURN_SELECTOR).nth(index).innerText();
+  } catch {
+    return null;
+  }
+}
+
+async function observeSubmission(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgetMs: number): Promise<SendAcknowledgment | null> {
+  const expected = normalizeComposedText(prompt);
+  const deadline = Date.now() + Math.max(1, budgetMs);
+  for (;;) {
+    if (page.url() !== baseline.url) {
+      throw new Error('Target URL changed during submit; refusing to correlate turns across conversations.');
+    }
+    const turns = await page.locator(COMPOSER_TURN_SELECTOR).count();
+    if (turns > baseline.turnCount) {
+      const text = await readTurnText(page, baseline.turnCount);
+      const normalized = text === null ? '' : normalizeComposedText(text);
+      if (normalized.length > 0 && expected.length > 0 && normalized !== expected) {
+        throw new Error('New user turn text does not match the submitted prompt; refusing to claim this send.');
+      }
+      const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
+      if (normalized.length > 0 || composerEmpty) {
+        return { url: baseline.url, userTurnIndex: baseline.turnCount, ackTurnCount: turns, userTurnText: normalized.length > 0 ? normalized : null };
+      }
+    }
+    if (Date.now() >= deadline) return null;
+    await wait(500);
+  }
+}
+
+async function clickFirstVisible(page: ComposerSubmitPage, selectors: readonly string[]): Promise<boolean> {
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const total = await locator.count();
+    for (let index = total - 1; index >= 0; index--) {
+      const candidate = locator.nth(index);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      try {
+        await candidate.click({ timeout: 10000 });
+        return true;
+      } catch {
+        // Try the next visible candidate, then the keyboard fallback.
+      }
+    }
+  }
+  return false;
+}
+/**
+ * Submit the composed prompt and prove the delivery. Click-first preserves
+ * the established path; when the composer grid intercepts pointer events
+ * (or a click succeeds without registering a submission) it falls back to
+ * programmatic focus plus a single keyboard Enter, which the editor honors.
+ * The fallback runs only while the exact prompt still sits in the composer:
+ * a cleared composer without an acknowledgment is ambiguous, and pressing
+ * Enter there could double-send, so that path fails closed instead.
+ */
+export interface SubmitBudgets {
+  clickAckMs?: number;
+  enterAckMs?: number;
+}
+
+export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgets?: SubmitBudgets): Promise<SendAcknowledgment> {
+  if (page.url() !== baseline.url) {
+    throw new Error('Submit started on a different conversation than the send baseline.');
+  }
+  await clickFirstVisible(page, SELECTORS.sendButton);
+  const clickAckMs = budgets?.clickAckMs ?? 8000;
+  const enterAckMs = budgets?.enterAckMs ?? 15000;
+  const ack = await observeSubmission(page, prompt, baseline, clickAckMs);
+  if (ack) { console.error(`[submit] click-path acknowledged userTurnIndex=${ack.userTurnIndex}`); return ack; }
+  if (normalizeComposedText(prompt).length === 0
+    || normalizeComposedText(await readComposerText(page)) !== normalizeComposedText(prompt)) {
+    throw new Error('Send produced no delivery acknowledgment and the composer no longer holds the exact prompt; refusing a blind Enter that could double-send.');
+  }
+  await page.locator(SELECTORS.promptTextarea[0]).first().focus();
+  await page.keyboard.press('Enter');
+  console.error(`[submit] enter-fallback submitted once, awaiting acknowledgment`);
+  const retry = await observeSubmission(page, prompt, baseline, enterAckMs);
+  if (retry) { console.error(`[submit] enter-fallback acknowledged userTurnIndex=${retry.userTurnIndex}`); return retry; }
+  throw new Error('Prompt submission was not observed after send click and one keyboard submit.');
+}
+
+/**
+ * Send a prompt to ChatGPT by typing into the textarea and proving the
+ * delivery through the fail-closed submit contract. Returns the delivery
+ * acknowledgment so the response poll can anchor on turns that strictly
+ * follow the new user turn instead of stale pre-send content.
+ */
+async function sendPromptText(prompt: string, targetUrl?: string): Promise<SendAcknowledgment> {
+  const page = await getPage(targetUrl);
+  const baseline = await captureSendBaseline(page);
+  console.error('[send] baseline-captured composer-typing-begin');
+  appendStageEvent({ scope: 'send', stage: 'baseline-captured' });
   const typed = await typeText(SELECTORS.promptTextarea, prompt);
   if (!typed) {
     throw new Error('Failed to find prompt textarea. The ChatGPT UI may have changed.');
@@ -543,21 +648,23 @@ async function sendPromptText(prompt: string): Promise<void> {
 
   await wait(500);
 
-  const sent = await clickElement(SELECTORS.sendButton);
-  if (!sent) {
-    const page = await getPage();
-    await page.keyboard.press('Enter');
+  if (normalizeComposedText(await readComposerText(page)) !== normalizeComposedText(prompt)) {
+    throw new Error('Composer does not hold the exact prompt after typing; send was not attempted.');
   }
+
+  console.error('[send] composer-holds-exact-prompt submit-begin');
+  appendStageEvent({ scope: 'send', stage: 'composer-verified-submit-begin' });
+  const ack = await submitComposedPrompt(page, prompt, baseline);
 
   await wait(1000);
 
   // Extract conversation ID from URL
-  const page = await getPage();
   const url = page.url();
   const match = url.match(/\/c\/([A-Za-z0-9-]+)(?:$|[?#])/);
   if (match) {
     sessionState.conversationId = match[1];
   }
+  return ack;
 }
 
 // ============================================
@@ -570,29 +677,31 @@ async function sendPromptText(prompt: string): Promise<void> {
  */
 async function pollUntilComplete(
   timeoutMinutes: number,
+  anchor?: PollAnchor,
+  observe?: (afterUserTurnIndex: number) => Promise<FreshTurnSnapshot>,
 ): Promise<{ response: string; pollCount: number; elapsedSeconds: number }> {
   const startTime = Date.now();
   const deadline = startTime + timeoutMinutes * 60 * 1000;
   let pollCount = 0;
-  let lastContentLength = 0;
-  let stableCount = 0;
-
+  let progress: PollProgress = { contentLength: 0, stableCount: 0 };
+  const afterUserTurnIndex = anchor?.afterUserTurnIndex ?? -1;
+  const observeFn = observe ?? (async (index: number) => observeFreshTurns(await getPage(), index));
   while (Date.now() < deadline) {
     const waitMs = fibonacciBackoff(pollCount);
     await sleep(waitMs);
     pollCount++;
 
-    const result = await isGenerationComplete(lastContentLength, stableCount);
-    lastContentLength = result.contentLength;
-    stableCount = result.newStableCount;
+    const snapshot = await observeFn(afterUserTurnIndex);
+    console.error(`[poll] turns=${snapshot.turnCount} fresh=${snapshot.freshAssistantTexts.length} lastFreshCopy=${snapshot.lastFreshHasCopy} thinking=${snapshot.thinking} stable=${progress.stableCount}`);
+    const decision = decidePollCompletion(progress, snapshot);
+    progress = { contentLength: decision.contentLength, stableCount: decision.stableCount };
 
-    if (result.complete) {
-      const response = await getLatestResponseText();
+    if (decision.complete) {
       const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
       // Save cookies after successful response
       await saveStorageState();
       return {
-        response: response ?? '',
+        response: decision.response ?? '',
         pollCount,
         elapsedSeconds,
       };
@@ -943,11 +1052,11 @@ export async function blockingAsk(
       }
     }
 
-    // Send prompt
-    await sendPromptText(prompt);
+    // Send prompt; the poll anchors on turns after the acked user turn.
+    const askAck = await sendPromptText(prompt);
 
     // Poll until complete
-    const result = await pollUntilComplete(timeoutMinutes);
+    const result = await pollUntilComplete(timeoutMinutes, { afterUserTurnIndex: askAck.userTurnIndex });
 
     return {
       response: result.response,
@@ -977,20 +1086,39 @@ export async function blockingReply(
   timeoutMinutes = 60,
   options: BlockingReplyOptions = {},
 ): Promise<AskResult> {
+  // Diagnostic stage only: last completed phase for stderr on failure.
+  // Never added to the AskResult schema, never retried, never resent.
+  let stage = 'target-resolution';
+  let stageConversationId: string | null = null;
   try {
     // Resolve and validate the target before opening/typing in the browser.
     // Legacy callers omit options and retain the historical current-chat
     // behavior.
     const target = resolveReplyTarget(options);
+    stage = 'target-resolved';
+    stageConversationId = target?.conversationId ?? null;
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
     await ensureSession(target || undefined);
+    stage = 'session-ensured';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
 
     if (target) {
       await ensureReplyTarget(target);
+      stage = 'target-ensured';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
     }
 
-    await sendPromptText(prompt);
+    stage = 'submit-begin';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
+    const replyAck = await sendPromptText(prompt, target?.url);
+    stage = 'user-turn-acknowledged';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
 
-    const result = await pollUntilComplete(timeoutMinutes);
+    stage = 'assistant-turn-wait';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
+    const result = await pollUntilComplete(timeoutMinutes, { afterUserTurnIndex: replyAck.userTurnIndex });
+    stage = 'assistant-turn-waited';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
 
     if (target) {
       // A successful poll is not sufficient evidence that the response came
@@ -1003,6 +1131,8 @@ export async function blockingReply(
       }
       sessionState.conversationId = finalTarget.conversationId;
     }
+    stage = 'target-reverified';
+    appendStageEvent({ scope: 'reply', stage, conversation_id: stageConversationId });
 
     return {
       response: result.response,
@@ -1012,13 +1142,17 @@ export async function blockingReply(
       poll_count: result.pollCount,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[reply] stage=${stage} error=${message}`);
+    if (error instanceof Error && error.stack) console.error(`[reply] stack=${error.stack}`);
+    appendStageEvent({ scope: 'reply', stage, status: 'failed', conversation_id: stageConversationId, error: message, stack: error instanceof Error ? (error.stack ?? null) : null });
     return {
       response: '',
       elapsed_seconds: 0,
       model: null,
       chat_id: null,
       poll_count: 0,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     };
   }
 }
@@ -1065,12 +1199,11 @@ export async function uploadFiles(
       }
     }
 
-    // Send
+    // Send through the shared fail-closed submit contract. The baseline is
+    // captured before typing so the acknowledgment anchors on this upload. 
     await wait(500);
-    const sent = await clickElement(SELECTORS.sendButton);
-    if (!sent) {
-      await page.keyboard.press('Enter');
-    }
+    const uploadBaseline = await captureSendBaseline(page);
+    const uploadAck = await submitComposedPrompt(page, prompt ?? '', uploadBaseline);
 
     await wait(1000);
 
@@ -1082,7 +1215,7 @@ export async function uploadFiles(
     }
 
     // Poll until complete
-    const result = await pollUntilComplete(timeoutMinutes);
+    const result = await pollUntilComplete(timeoutMinutes, { afterUserTurnIndex: uploadAck.userTurnIndex });
 
     return {
       response: result.response,

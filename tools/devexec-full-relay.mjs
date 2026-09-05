@@ -895,7 +895,13 @@ export function createBoundChatGPTTransport({ callTool, taskChatBinding, chatBin
         conversation_id: fixedTarget.conversation_id,
         relay_request_id: input.relay_request_id,
       });
-      if (result?.isError) fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply MCP call failed.");
+      if (result?.isError) {
+        fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply MCP call failed; delivery is unconfirmed.", {
+          tool: "chatgpt_reply",
+          isError: true,
+          text_blocks: Array.isArray(result.content) ? result.content.filter((item) => item?.type === "text" && typeof item.text === "string").map((item) => item.text) : [],
+        });
+      }
       const blocks = Array.isArray(result?.content) ? result.content.filter((item) => item?.type === "text").map((item) => item.text) : [];
       if (blocks.length !== 1) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply must return exactly one text response envelope.");
       const toolResult = parseJsonValue(blocks[0], FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply response");
@@ -905,7 +911,12 @@ export function createBoundChatGPTTransport({ callTool, taskChatBinding, chatBin
       if (isObject(toolResult) && hasOwn(toolResult, "response") && typeof toolResult.response === "string" && !hasOwn(toolResult, "protocol")) {
         const allowedWrapperFields = new Set(["response", "elapsed_seconds", "model", "chat_id", "poll_count", "error"]);
         if (Object.keys(toolResult).some((field) => !allowedWrapperFields.has(field))) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply result wrapper contains unknown fields.");
-        if (typeof toolResult.error === "string" && toolResult.error.trim()) fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply reported an error after the send attempt.");
+        if (typeof toolResult.error === "string" && toolResult.error.trim()) {
+          fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply returned an error; delivery is unconfirmed.", {
+            tool: "chatgpt_reply",
+            error: toolResult.error,
+          });
+        }
         if (!toolResult.response.trim()) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply returned an empty response envelope.");
         if (toolResult.chat_id !== undefined && toolResult.chat_id !== null && toolResult.chat_id !== fixedTarget.conversation_id) fail(FULL_RELAY_ERRORS.IDENTITY_MISMATCH, "chatgpt_reply result conversation does not match the exact task chat binding.");
         return responseEnvelope(toolResult.response);
