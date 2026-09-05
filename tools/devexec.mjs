@@ -6,7 +6,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadRegistry, resolveTarget } from "./target-registry.mjs";
+import { isValidTargetAlias, loadRegistry, loadRegistryLenient, resolveTarget } from "./target-registry.mjs";
 import { loadAndClassifyRunState, loadAndInspectReceiptAwarePending, reconcileReceiptAwarePending, verifyEventJournal } from "./devexec-recovery.mjs";
 import { classifySelfRecovery } from "./devexec-self-recovery.mjs";
 import { queueTerminalStopAlert } from "./devexec-stop-alert-runtime.mjs";
@@ -194,8 +194,13 @@ if (command === "continue") {
  throw new Error("Parent run has no frozen target alias; pass --target <alias>.");
  }
 
- const registry = loadRegistry();
- const resolved = resolveTarget({ explicitTarget: targetAlias, cwd: process.cwd(), registry });
+ const lenient = loadRegistryLenient();
+ if (!isValidTargetAlias(targetAlias) || lenient.invalidAliases.includes(targetAlias)) {
+ const entryError = new Error(`Target alias is not usable: ${targetAlias}`);
+ entryError.code = "TARGET_ENTRY_INVALID";
+ throw entryError;
+ }
+ const resolved = resolveTarget({ explicitTarget: targetAlias, cwd: process.cwd(), registry: lenient.registry });
  const childRunId = makeContinueRunId();
  const priorStep = parent.step == null ? 0 : parent.step;
  const env = {

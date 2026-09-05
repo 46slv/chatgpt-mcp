@@ -7,7 +7,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createConsoleServer, createControlStore, isValidRunId, listRuns, listTargets, readStepFile, runDetail, startRun, stopRun } from "./devexec-native-console.mjs";
+import { continueRun, createConsoleServer, createControlStore, isValidRunId, listRuns, listTargets, readStepFile, runDetail, runRecovery, startRun, stopRun } from "./devexec-native-console.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CONSOLE = path.join(here, "devexec-native-console.mjs");
@@ -50,6 +50,14 @@ function setupFixtures() {
   fs.writeFileSync(path.join(stateDir, "RUN-BIG.json"), JSON.stringify({ ...goodState, run_id: "RUN-BIG", phase: "STEP_PASS" }), "utf8");
   fs.mkdirSync(path.join(runsDir, "RUN-BIG"), { recursive: true });
   fs.writeFileSync(path.join(runsDir, "RUN-BIG", "step-001.stdout.txt"), "x".repeat(70000), "utf8");
+  const terminalParent = { protocol: "dev-exec.state", schema_version: 1, run_id: "RUN-GOOD", phase: "COMPLETE" };
+  void terminalParent;
+  const active = { protocol: "dev-exec.state", schema_version: 1, run_id: "RUN-ACTIVE", parent_run_id: null, phase: "SUPERVISOR_ROUND_1_IN_FLIGHT", step: 0, pending: null, last_result: null, target: { target_id: "good", chat_url: GOOD_URL } };
+  fs.writeFileSync(path.join(stateDir, "RUN-ACTIVE.json"), JSON.stringify(active), "utf8");
+  const pend = { protocol: "dev-exec.state", schema_version: 1, run_id: "RUN-PEND", parent_run_id: null, phase: "COMPLETE", step: 1, pending: { step: 1, working_directory: "C:\\x", timeout_seconds: 60, script_sha256: "a", script: "x", accepted_at: "2026-09-06T00:00:00.000Z" }, last_result: null, target: { target_id: "good", chat_url: GOOD_URL } };
+  fs.writeFileSync(path.join(stateDir, "RUN-PEND.json"), JSON.stringify(pend), "utf8");
+  const badt = { protocol: "dev-exec.state", schema_version: 1, run_id: "RUN-BADTARGET", parent_run_id: null, phase: "COMPLETE", step: 0, pending: null, last_result: null, target: { target_id: "broken", chat_url: "https://chatgpt.com/c/old" } };
+  fs.writeFileSync(path.join(stateDir, "RUN-BADTARGET.json"), JSON.stringify(badt), "utf8");
   return { root, local, stateDir, runsDir, env: { LOCALAPPDATA: local } };
 }
 
@@ -332,4 +340,76 @@ test("server launch/stop APIs enforce ownership and conflicts", async (t) => {
   assert.equal(res.status, 400);
   res = await post("/api/runs", { target_alias: "good", purpose: "x" }, { origin: "https://evil.example" });
   assert.equal(res.status, 403);
+});
+
+test("continue validates parent state without spawning", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const spawnFn = makeSpawn([]);
+  assert.rejects(async () => continueRun({ parentRunId: "RUN-NOPE", controls, spawnFn, env }), (e) => e.status === 404);
+  assert.rejects(async () => continueRun({ parentRunId: "RUN-ACTIVE", controls, spawnFn, env }), (e) => e.status === 400 && e.code === "RUN_NOT_TERMINAL");
+  assert.rejects(async () => continueRun({ parentRunId: "RUN-PEND", controls, spawnFn, env }), (e) => e.status === 400 && e.code === "RUN_PENDING_BLOCKED");
+  assert.rejects(async () => continueRun({ parentRunId: "RUN-BADTARGET", controls, spawnFn, env }), (e) => e.status === 400 && e.code === "TARGET_ENTRY_INVALID");
+  assert.rejects(async () => continueRun({ parentRunId: "RUN-BAD", controls, spawnFn, env }), (e) => e.status === 400);
+});
+
+test("continue spawns the child with lineage and the exact parent target", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  const rec = continueRun({ parentRunId: "RUN-GOOD", controls, spawnFn, env });
+  assert.match(rec.run_id, /^CONSOLE-CONTINUE-[0-9]+-[0-9a-f]+$/);
+  assert.equal(rec.kind, "continue");
+  assert.equal(rec.parent_run_id, "RUN-GOOD");
+  assert.equal(rec.target_alias, "good");
+  assert.equal(rec.status, "RUNNING");
+  assert.equal(log.length, 1);
+  assert.deepEqual(log[0].args.slice(1), ["continue", "RUN-GOOD", "--target", "good"]);
+  assert.equal(log[0].opts.env.DEV_EXEC_CONTINUE_RUN_ID, rec.run_id);
+  assert.throws(() => continueRun({ parentRunId: "RUN-GOOD", controls, spawnFn, env }), (e) => e.status === 409);
+  assert.equal(log.length, 1);
+});
+
+test("recovery inspect and verify run the source CLI on fixtures", () => {
+  const { env } = setupFixtures();
+  const inspect = runRecovery("RUN-GOOD", "inspect", { env });
+  assert.equal(inspect.exit_code, 0);
+  assert.equal(typeof inspect.result, "object");
+  const verify = runRecovery("RUN-GOOD", "verify-journal", { env });
+  assert.ok(verify.exit_code === 0 || verify.exit_code === 3);
+  assert.equal(typeof verify.result.valid, "boolean");
+  assert.throws(() => runRecovery("RUN-GOOD", "reconcile", { env }), (e) => e.status === 400 && e.code === "RECONCILE_DISABLED");
+  assert.throws(() => runRecovery("RUN-GOOD", "nope", { env }), (e) => e.status === 400);
+  assert.throws(() => runRecovery("../evil", "inspect", { env }), (e) => e.status === 400);
+});
+
+test("server continue and recovery routes", async (t) => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const spawnFn = makeSpawn([]);
+  await startLocalServer(t, { env, controls, spawnFn, port: 43294 });
+  const post = (target, body) => fetch(`http://127.0.0.1:43294${target}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  let res = await post("/api/runs/RUN-NOPE/continue", {});
+  assert.equal(res.status, 404);
+  res = await post("/api/runs/RUN-ACTIVE/continue", {});
+  assert.equal(res.status, 400);
+  res = await post("/api/runs/RUN-GOOD/continue", {});
+  assert.equal(res.status, 200);
+  const child = await res.json();
+  assert.equal(child.parent_run_id, "RUN-GOOD");
+  assert.equal(child.kind, "continue");
+  res = await post("/api/runs/RUN-GOOD/continue", {});
+  assert.equal(res.status, 409);
+  let get = await fetch("http://127.0.0.1:43294/api/runs/RUN-GOOD/recovery?kind=inspect");
+  assert.equal(get.status, 200);
+  get = await fetch("http://127.0.0.1:43294/api/runs/RUN-GOOD/recovery?kind=verify-journal");
+  assert.equal(get.status, 200);
+  get = await fetch("http://127.0.0.1:43294/api/runs/RUN-GOOD/recovery?kind=reconcile");
+  assert.equal(get.status, 400);
+  assert.equal((await get.json()).error.includes("reconcile"), true);
 });

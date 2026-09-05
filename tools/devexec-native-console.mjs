@@ -5,7 +5,7 @@
 // every response is re-read from canonical files, so a restart rebuilds
 // the identical read model. Mutations arrive in P4/P6; P3 serves GET only.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -333,6 +333,8 @@ export function controlInfo(record) {
   if (!record) return null;
   return {
     run_id: record.run_id,
+    kind: record.kind || "run",
+    parent_run_id: record.parent_run_id || null,
     target_alias: record.target_alias,
     pid: record.pid,
     command: record.command,
@@ -385,6 +387,18 @@ export function startRun({ targetAlias, purpose, controls, spawnFn = spawn, env 
     error.status = 400;
     throw error;
   }
+  assertNoLiveTarget(targetAlias, controls);
+  const runId = generateRunId();
+  const args = [DEVEXEC_CLI, "run", "--target", targetAlias];
+  const record = spawnOwned({
+    argv: args, targetAlias, runId, kind: "run", parentRunId: null,
+    childEnv: { DEV_EXEC_PURPOSE: goal },
+    controls, spawnFn, env,
+  });
+  return controlInfo(record);
+}
+
+function assertNoLiveTarget(targetAlias, controls) {
   for (const record of controls.values()) {
     if (record.target_alias === targetAlias && record.status === "RUNNING") {
       const error = new Error(`Target is already running under this console: ${targetAlias} (${record.run_id}).`);
@@ -393,18 +407,28 @@ export function startRun({ targetAlias, purpose, controls, spawnFn = spawn, env 
       throw error;
     }
   }
-  const runId = generateRunId();
-  const args = [DEVEXEC_CLI, "run", "--target", targetAlias];
-  const child = spawnFn(process.execPath, args, {
+}
+
+function requireControls(controls) {
+  if (!controls) {
+    const error = new Error("Control store is required.");
+    error.status = 500;
+    throw error;
+  }
+}
+
+function spawnOwned({ argv, targetAlias, runId, childEnv = {}, kind, parentRunId = null, controls, spawnFn = spawn, env = process.env } = {}) {
+  requireControls(controls);
+  const child = spawnFn(process.execPath, argv, {
     cwd: process.cwd(),
-    env: { ...env, DEV_EXEC_TARGET_ALIAS: targetAlias, DEV_EXEC_PURPOSE: goal, DEV_EXEC_RUN_ID: runId },
+    env: { ...env, DEV_EXEC_TARGET_ALIAS: targetAlias, DEV_EXEC_RUN_ID: runId, ...childEnv },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
   const record = {
-    child, run_id: runId, target_alias: targetAlias,
+    child, run_id: runId, target_alias: targetAlias, kind, parent_run_id: parentRunId,
     pid: (child && Number.isInteger(child.pid)) ? child.pid : null,
-    command: [process.execPath, ...args],
+    command: [process.execPath, ...argv],
     started_at: new Date().toISOString(), ended_at: null,
     status: "RUNNING", exit_code: null, signal: null, log: [],
   };
@@ -420,7 +444,103 @@ export function startRun({ targetAlias, purpose, controls, spawnFn = spawn, env 
       record.signal = signal || null;
     });
   }
+  return record;
+}
+
+/**
+ * Continue a terminal run as a console-owned child. The parent is never
+ * rewritten: the CLI mints a child run that references it. Ambiguous
+ * pending parents are refused (BLOCKED, never auto-resent) and the target
+ * comes only from the explicit request or the parent frozen target.
+ */
+export function continueRun({ parentRunId, targetAlias = null, controls, spawnFn = spawn, env = process.env } = {}) {
+  requireControls(controls);
+  const detail = runDetail(parentRunId, env);
+  if (!detail.summary) {
+    const error = new Error(`Parent run is unreadable: ${parentRunId}`);
+    error.status = 400;
+    throw error;
+  }
+  const parent = detail.summary;
+  if (!parent.terminal) {
+    const error = new Error(`Parent run is not terminal: ${parentRunId} (phase=${parent.phase}).`);
+    error.status = 400;
+    error.code = "RUN_NOT_TERMINAL";
+    throw error;
+  }
+  if (parent.pending) {
+    const error = new Error(`Parent run has ambiguous pending execution: ${parentRunId} (step ${parent.pending_step}). Inspect and reconcile before continuing.`);
+    error.status = 400;
+    error.code = "RUN_PENDING_BLOCKED";
+    throw error;
+  }
+  const alias = targetAlias || parent.target_id;
+  if (typeof alias !== "string" || !alias) {
+    const error = new Error("No usable target: pass an explicit target alias.");
+    error.status = 400;
+    throw error;
+  }
+  const model = listTargets(env);
+  const row = model.targets.find((t) => t.alias === alias);
+  if (!row || !row.valid) {
+    const error = new Error(`Target alias is not usable: ${alias}`);
+    error.status = 400;
+    error.code = "TARGET_ENTRY_INVALID";
+    throw error;
+  }
+  assertNoLiveTarget(alias, controls);
+  const childRunId = generateRunId("CONSOLE-CONTINUE");
+  const record = spawnOwned({
+    argv: [DEVEXEC_CLI, "continue", parentRunId, "--target", alias],
+    targetAlias: alias, runId: childRunId, kind: "continue", parentRunId: parent.run_id,
+    childEnv: { DEV_EXEC_CONTINUE_RUN_ID: childRunId },
+    controls, spawnFn, env,
+  });
   return controlInfo(record);
+}
+
+/**
+ * Read-only recovery evidence via the source-owned CLI (captured, bounded).
+ * inspect/verify-journal only. reconcile mutates canonical state and has no
+ * route: it stays a deliberate human CLI act until proven safe to automate.
+ */
+const RECOVERY_KINDS = new Set(["inspect", "verify-journal"]);
+
+export function runRecovery(runId, kind, { env = process.env, timeoutMs = 30000 } = {}) {
+  if (!isValidRunId(runId)) {
+    const error = new Error("Invalid run id.");
+    error.status = 400;
+    throw error;
+  }
+  if (kind === "reconcile") {
+    const error = new Error("reconcile is not automated: inspect first, then run it deliberately from a shell.");
+    error.status = 400;
+    error.code = "RECONCILE_DISABLED";
+    throw error;
+  }
+  if (!RECOVERY_KINDS.has(kind)) {
+    const error = new Error(`Unknown recovery kind: ${String(kind).slice(0, 40)}`);
+    error.status = 400;
+    throw error;
+  }
+  const result = spawnSync(process.execPath, [DEVEXEC_CLI, "recover", kind, runId], {
+    cwd: process.cwd(),
+    env: { ...env },
+    encoding: "utf8",
+    timeout: timeoutMs,
+  });
+  let parsed = null;
+  let parseError = null;
+  try {
+    parsed = JSON.parse(String(result.stdout || ""));
+  } catch (error) {
+    parseError = String((error && error.message) || error);
+  }
+  return {
+    kind, run_id: runId, exit_code: result.status,
+    result: parsed, parse_error: parseError,
+    stderr: String(result.stderr || "").slice(0, 2000),
+  };
 }
 
 export function stopRun(runId, { controls } = {}) {
@@ -464,7 +584,10 @@ async function startRun(){var msg=document.getElementById('launchmsg');try{var r
 async function req(url,opt){const r=await fetch(url,opt);const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d}
 function renderTargets(el,data){el.innerHTML=data.targets.map(t=>'<div class="item"><div><b>'+esc(t.alias)+'</b> '+(t.valid?'<span class="good">valid</span>':'<span class="bad">TARGET_ERROR</span>')+'</div><div class="muted">'+esc(t.conversation_id||t.error||"")+'</div></div>').join("")||'<div class="item muted">targetなし</div>'}
 function renderRuns(el){el.innerHTML=runs.map(r=>'<div class="item '+(r.run_id===selected?"active":"")+'" data-id="'+esc(r.run_id)+'"><div class="phase">'+esc(r.phase)+'</div><div>'+esc(r.run_id)+'</div><div class="muted">step '+esc(r.step)+(r.pending?" · pending":"")+(r.terminal?" · terminal":"")+'</div></div>').join("")||'<div class="item muted">runなし</div>';el.querySelectorAll("[data-id]").forEach(x=>x.onclick=()=>{selected=x.dataset.id;renderRuns(el);detail()})}
-async function detail(){const n=document.getElementById("main");try{const d=await req("/api/runs/"+encodeURIComponent(selected));const s=d.summary||{};const ev=(d.events||[]).map(e=>JSON.stringify(e)).join("\n");const steps=(d.steps||[]).map(x=>x.file+" ("+x.size+"B)").join("\n");n.innerHTML="<h2>"+esc(s.run_id||selected)+'</h2><div class="phase">'+esc(s.phase||"")+'</div><div class="kv"><span class="muted">parent</span><span>'+esc(s.parent_run_id||"—")+'</span><span class="muted">step</span><span>'+esc(s.step)+'</span><span class="muted">pending</span><span>'+esc(s.pending)+'</span><span class="muted">target</span><span>'+esc(s.target_id||"—")+'</span><span class="muted">workdir</span><span>'+esc(s.working_directory||"—")+'</span><span class="muted">terminal</span><span>'+esc(s.terminal)+'</span><span class="muted">updated</span><span>'+esc(s.updated_at||"—")+'</span></div><h3>result</h3><pre>'+esc(JSON.stringify(s.last_result||null))+'</pre><h3>steps</h3><pre>'+esc(steps||"—")+'</pre><h3>events</h3><pre>'+esc(ev||"—")+"</pre>"}catch(e){n.innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
+async function detail(){const n=document.getElementById("main");try{const d=await req("/api/runs/"+encodeURIComponent(selected));const s=d.summary||{};const ev=(d.events||[]).map(e=>JSON.stringify(e)).join("\n");const steps=(d.steps||[]).map(x=>x.file+" ("+x.size+"B)").join("\n");n.innerHTML="<h2>"+esc(s.run_id||selected)+'</h2><div class="phase">'+esc(s.phase||"")+'</div><div class="kv"><span class="muted">parent</span><span>'+esc(s.parent_run_id||"—")+'</span><span class="muted">step</span><span>'+esc(s.step)+'</span><span class="muted">pending</span><span>'+esc(s.pending)+'</span><span class="muted">target</span><span>'+esc(s.target_id||"—")+'</span><span class="muted">workdir</span><span>'+esc(s.working_directory||"—")+'</span><span class="muted">terminal</span><span>'+esc(s.terminal)+'</span><span class="muted">updated</span><span>'+esc(s.updated_at||"—")+'</span></div><h3>recovery</h3><div id="recinfo" class="muted"></div><div class="buttons"><button id="cont">continue</button><button id="rins">inspect</button><button id="rver">verify</button></div><pre id="recout"></pre><h3>result</h3><pre>'+esc(JSON.stringify(s.last_result||null))+'</pre><h3>steps</h3><pre>'+esc(steps||"—")+'</pre><h3>events</h3><pre>'+esc(ev||"—")+"</pre>";wireDetail(s)}catch(e){n.innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
+async function wireDetail(s){var info=document.getElementById('recinfo');if(!info)return;if(s.pending){info.innerHTML='<span class="bad">BLOCKED: ambiguous pending at step '+esc(s.pending_step)+'. Inspect before continuing; no auto-resend.</span>'}else if(s.parent_run_id){info.innerHTML='child of '+esc(s.parent_run_id)}var c=document.getElementById('cont');if(c){if(s.terminal&&!s.pending){c.onclick=doContinue}else{c.disabled=true}}document.getElementById('rins').onclick=function(){doRecover('inspect')};document.getElementById('rver').onclick=function(){doRecover('verify-journal')}}
+async function doContinue(){var o=document.getElementById('recout');try{var r=await req('/api/runs/'+encodeURIComponent(selected)+'/continue',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});o.textContent='child '+r.run_id;selected=r.run_id;await load()}catch(e){o.textContent=e.message}}
+async function doRecover(kind){var o=document.getElementById('recout');try{var r=await req('/api/runs/'+encodeURIComponent(selected)+'/recovery?kind='+kind);o.textContent=JSON.stringify(r,null,2).slice(0,12000)}catch(e){o.textContent=e.message}}
 async function load(){try{const t=await req("/api/targets");targets=t.targets;renderTargets(document.getElementById("targets"),t);runs=(await req("/api/runs")).runs;if(selected&&!runs.some(r=>r.run_id===selected))selected=null;if(!selected&&runs[0])selected=runs[0].run_id;document.getElementById("time").textContent=new Date().toLocaleTimeString();renderRuns(document.getElementById("runs"));if(selected)detail();await loadLaunch();await loadControls()}catch(e){document.getElementById("main").innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
 load();setInterval(load,2000);
 </script></body></html>`;
@@ -490,6 +613,13 @@ export function createConsoleServer({ controls = createControlStore(), spawnFn =
       }
       if (req.method === "POST" && pathParts.length === 4 && pathParts[0] === "api" && pathParts[1] === "runs" && pathParts[3] === "stop") {
         return sendJson(res, 200, stopRun(decodeURIComponent(pathParts[2]), { controls }));
+      }
+      if (req.method === "POST" && pathParts.length === 4 && pathParts[0] === "api" && pathParts[1] === "runs" && pathParts[3] === "continue") {
+        const body = await readBody(req);
+        return sendJson(res, 200, continueRun({ parentRunId: decodeURIComponent(pathParts[2]), targetAlias: (body && body.target_alias) || null, controls, spawnFn, env }));
+      }
+      if (req.method === "GET" && pathParts.length === 4 && pathParts[0] === "api" && pathParts[1] === "runs" && pathParts[3] === "recovery") {
+        return sendJson(res, 200, runRecovery(decodeURIComponent(pathParts[2]), url.searchParams.get("kind") || "inspect", { env }));
       }
       if (req.method === "GET" && pathParts.length === 3 && pathParts[0] === "api" && pathParts[1] === "runs") {
         return sendJson(res, 200, runDetail(decodeURIComponent(pathParts[2]), env));
