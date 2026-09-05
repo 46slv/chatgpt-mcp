@@ -118,6 +118,24 @@ function attempt(value, name) {
   uniqueStrings(value.requested_context_refs, `${name}.requested_context_refs`);
   return clone(value);
 }
+function solvedReceipt(value, name) {
+  exact(value, ["problem", "problem_sha256", "solve_attempt_episode_id", "verify_episode_id", "evidence_refs"], name);
+  const solvedProblem = problem(value.problem, `${name}.problem`);
+  if (typeof value.problem_sha256 !== "string" || !HEX64.test(value.problem_sha256) || value.problem_sha256 !== sha256(solvedProblem)) {
+    throw new Error(`${name}.problem_sha256 mismatch`);
+  }
+  const solveAttemptEpisodeId = id(value.solve_attempt_episode_id, `${name}.solve_attempt_episode_id`);
+  const verifyEpisodeId = id(value.verify_episode_id, `${name}.verify_episode_id`);
+  const evidenceRefs = uniqueStrings(value.evidence_refs, `${name}.evidence_refs`);
+  requireEvidence(solvedProblem.required_evidence_refs, evidenceRefs, `${name} SOLVED`);
+  return {
+    problem: solvedProblem,
+    problem_sha256: value.problem_sha256,
+    solve_attempt_episode_id: solveAttemptEpisodeId,
+    verify_episode_id: verifyEpisodeId,
+    evidence_refs: evidenceRefs,
+  };
+}
 function validateGoal(value) {
   exact(value, ["text", "acceptance", "required_evidence_refs"], "goal");
   return {
@@ -130,7 +148,7 @@ function validateGoal(value) {
 const STATE_KEYS = [
   "schema", "schema_version", "mission_id", "goal_id", "goal", "constraints", "verified_facts",
   "evidence_authority_refs", "approved_context_refs", "pending_context_request_refs", "current_problem", "solved_problem_ids",
-  "attempts", "episode_seq", "next_role", "terminal", "last_result",
+  "solved_problem_receipts", "attempts", "episode_seq", "next_role", "terminal", "last_result",
 ];
 const LAST_RESULT_KEYS = ["episode_id", "role", "outcome", "summary", "evidence_refs"];
 
@@ -156,6 +174,22 @@ export function validateEphemeralReasoningState(state) {
     attempt(entry, `attempts[${index}]`);
     for (const evidenceRef of entry.evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("attempt evidence is outside parent evidence authority");
   });
+  if (!Array.isArray(state.solved_problem_receipts) || state.solved_problem_receipts.length > LIMITS.attempts) throw new Error("solved_problem_receipts invalid");
+  const checkedSolvedReceipts = state.solved_problem_receipts.map((entry, index) => solvedReceipt(entry, `solved_problem_receipts[${index}]`));
+  const receiptProblemIds = checkedSolvedReceipts.map((entry) => entry.problem.problem_id);
+  if (new Set(receiptProblemIds).size !== receiptProblemIds.length) throw new Error("solved problem receipt ids must be unique");
+  if (canonical(receiptProblemIds) !== canonical(state.solved_problem_ids)) throw new Error("solved problem index must match durable receipts");
+  for (const receipt of checkedSolvedReceipts) {
+    for (const evidenceRef of receipt.evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("solved receipt evidence is outside parent evidence authority");
+    for (const evidenceRef of receipt.problem.required_evidence_refs) if (!evidenceAuthority.has(evidenceRef)) throw new Error("solved receipt required evidence is outside parent evidence authority");
+    const solveRecord = state.attempts.find((entry) => entry.episode_id === receipt.solve_attempt_episode_id);
+    if (!solveRecord || solveRecord.problem_id !== receipt.problem.problem_id || solveRecord.outcome !== "ATTEMPTED") {
+      throw new Error("solved receipt must bind an ATTEMPTED solve record for the same problem");
+    }
+    const solveSequence = episodeSequenceFromId(receipt.solve_attempt_episode_id, "solved receipt solve_attempt_episode_id");
+    const verifySequence = episodeSequenceFromId(receipt.verify_episode_id, "solved receipt verify_episode_id");
+    if (verifySequence !== solveSequence + 1 || verifySequence > state.episode_seq) throw new Error("solved receipt VERIFY chronology is impossible");
+  }
   if (!Number.isInteger(state.episode_seq) || state.episode_seq < 0 || state.episode_seq > 1_000_000) throw new Error("episode_seq invalid");
   if (!NEXT_ROLES.has(state.next_role)) throw new Error("next_role invalid");
   if (state.terminal !== null && !["COMPLETE", "BLOCKED"].includes(state.terminal)) throw new Error("terminal invalid");
@@ -213,6 +247,7 @@ export function createEphemeralReasoningState({ mission_id, goal_id, goal, const
     pending_context_request_refs: [],
     current_problem: null,
     solved_problem_ids: [],
+    solved_problem_receipts: [],
     attempts: [],
     episode_seq: 0,
     next_role: "FIND",
@@ -228,6 +263,10 @@ function latestAttemptFor(state, problemId) {
     if (state.attempts[index].problem_id === problemId) return clone(state.attempts[index]);
   }
   return null;
+}
+function solvedReceiptFor(state, problemId) {
+  const receipt = state.solved_problem_receipts.find((entry) => entry.problem.problem_id === problemId);
+  return receipt ? clone(receipt) : null;
 }
 function episodeSequenceFromId(episodeId, name) {
   const match = /^E(\d+)-/.exec(episodeId);
@@ -251,6 +290,16 @@ function requireLatestAttempt(state, { problemId, outcome, expectedSequence = nu
   }
   return latest;
 }
+function requireSolvedReceipt(state, problemId, { verifySequence = null, evidenceRefs = null, problemValue = null } = {}) {
+  const receipt = solvedReceiptFor(state, problemId);
+  if (!receipt) throw new Error("transition coherence requires durable solved receipt");
+  if (verifySequence !== null && episodeSequenceFromId(receipt.verify_episode_id, "solved receipt verify_episode_id") !== verifySequence) {
+    throw new Error("transition coherence solved receipt VERIFY episode mismatch");
+  }
+  if (evidenceRefs !== null && !sameStringList(receipt.evidence_refs, evidenceRefs)) throw new Error("transition coherence solved receipt evidence mismatch");
+  if (problemValue !== null && canonical(receipt.problem) !== canonical(problemValue)) throw new Error("transition coherence solved receipt problem mismatch");
+  return receipt;
+}
 function validateTransitionCoherence(state) {
   let previousAttemptSequence = 0;
   for (const [index, entry] of state.attempts.entries()) {
@@ -260,7 +309,7 @@ function validateTransitionCoherence(state) {
   }
 
   if (state.episode_seq === 0) {
-    if (state.next_role !== "FIND" || state.terminal !== null || state.current_problem !== null || state.solved_problem_ids.length || state.attempts.length || state.pending_context_request_refs.length) {
+    if (state.next_role !== "FIND" || state.terminal !== null || state.current_problem !== null || state.solved_problem_ids.length || state.solved_problem_receipts.length || state.attempts.length || state.pending_context_request_refs.length) {
       throw new Error("initial transition state is impossible");
     }
     return;
@@ -290,6 +339,7 @@ function validateTransitionCoherence(state) {
     if (last.role === "GOAL_CHECK") {
       if (state.current_problem === null || !solved.has(currentProblemId)) throw new Error("GOAL_CHECK/BLOCKED requires solved current_problem");
       requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
+      requireSolvedReceipt(state, currentProblemId, { verifySequence: state.episode_seq - 1, problemValue: state.current_problem });
     }
     return;
   }
@@ -338,6 +388,7 @@ function validateTransitionCoherence(state) {
     if (last.outcome === "SOLVED") {
       requireEvidence(state.current_problem.required_evidence_refs, last.evidence_refs, "restart SOLVED");
       if (state.next_role !== "GOAL_CHECK" || !solved.has(currentProblemId)) throw new Error("VERIFY/SOLVED must transition to GOAL_CHECK with solved current_problem");
+      requireSolvedReceipt(state, currentProblemId, { verifySequence: state.episode_seq, evidenceRefs: last.evidence_refs, problemValue: state.current_problem });
       return;
     }
     throw new Error("transition coherence invalid VERIFY outcome");
@@ -351,6 +402,7 @@ function validateTransitionCoherence(state) {
       if (state.next_role !== "FIND" || state.current_problem !== null) throw new Error("GOAL_CHECK/INCOMPLETE must clear current_problem and transition to FIND");
       const latest = requireLatestAttempt(state, { outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
       if (!solved.has(latest.problem_id)) throw new Error("GOAL_CHECK/INCOMPLETE requires the preceding problem to remain solved");
+      requireSolvedReceipt(state, latest.problem_id, { verifySequence: state.episode_seq - 1 });
       return;
     }
     if (last.outcome === "COMPLETE") {
@@ -359,6 +411,7 @@ function validateTransitionCoherence(state) {
         throw new Error("GOAL_CHECK/COMPLETE must transition to COMPLETE/STOP with solved current_problem");
       }
       requireLatestAttempt(state, { problemId: currentProblemId, outcome: "ATTEMPTED", expectedSequence: state.episode_seq - 2 });
+      requireSolvedReceipt(state, currentProblemId, { verifySequence: state.episode_seq - 1, problemValue: state.current_problem });
       return;
     }
     throw new Error("transition coherence invalid GOAL_CHECK outcome");
@@ -367,7 +420,7 @@ function validateTransitionCoherence(state) {
 }
 function roleProjection(state) {
   if (state.next_role === "FIND") return {
-    goal: clone(state.goal), constraints: clone(state.constraints), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids),
+    goal: clone(state.goal), constraints: clone(state.constraints), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids), solved_problem_receipts: clone(state.solved_problem_receipts),
   };
   if (state.next_role === "SOLVE") return {
     problem: clone(state.current_problem), constraints: clone(state.constraints), prior_attempt: latestAttemptFor(state, state.current_problem.problem_id),
@@ -376,7 +429,7 @@ function roleProjection(state) {
     problem: clone(state.current_problem), attempt: latestAttemptFor(state, state.current_problem.problem_id),
   };
   if (state.next_role === "GOAL_CHECK") return {
-    goal: clone(state.goal), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids), last_result: clone(state.last_result),
+    goal: clone(state.goal), verified_facts: clone(state.verified_facts), solved_problem_ids: clone(state.solved_problem_ids), solved_problem_receipts: clone(state.solved_problem_receipts), last_result: clone(state.last_result),
   };
   throw new Error("terminal state cannot open reasoning episode");
 }
@@ -518,7 +571,19 @@ export function applyEphemeralReasoningResult(state, episode, result) {
     else if (result.outcome === "UNSOLVED") next.next_role = "SOLVE";
     else {
       requireEvidence(next.current_problem.required_evidence_refs, result.evidence_refs, "SOLVED");
-      if (!next.solved_problem_ids.includes(next.current_problem.problem_id)) next.solved_problem_ids.push(next.current_problem.problem_id);
+      if (next.solved_problem_ids.includes(next.current_problem.problem_id) || solvedReceiptFor(next, next.current_problem.problem_id)) {
+        throw new Error("SOLVED cannot duplicate durable solved authority");
+      }
+      const solveAttempt = latestAttemptFor(next, next.current_problem.problem_id);
+      if (!solveAttempt || solveAttempt.outcome !== "ATTEMPTED") throw new Error("SOLVED requires an ATTEMPTED solve record");
+      next.solved_problem_ids.push(next.current_problem.problem_id);
+      next.solved_problem_receipts.push({
+        problem: clone(next.current_problem),
+        problem_sha256: sha256(next.current_problem),
+        solve_attempt_episode_id: solveAttempt.episode_id,
+        verify_episode_id: episode.episode_id,
+        evidence_refs: clone(result.evidence_refs),
+      });
       next.next_role = "GOAL_CHECK";
     }
   } else if (episode.role === "GOAL_CHECK") {
