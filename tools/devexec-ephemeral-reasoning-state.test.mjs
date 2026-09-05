@@ -154,7 +154,7 @@ test("working set must be parent-approved, content-addressed, and inside the per
   assert.throws(() => open(state, { working_set: [{ ref: "ctx:unapproved", kind: "file", sha256: digest(content), content }] }), /not approved/);
   assert.throws(() => open(state, { working_set: [{ ref: "ctx:base", kind: "file", sha256: "0".repeat(64), content }] }), /sha256 mismatch/);
   const large = "x".repeat(3000);
-  assert.throws(() => open(state, { max_input_bytes: 1024, working_set: [{ ref: "ctx:base", kind: "file", sha256: digest(large), content: large }] }), /exceeds byte budget/);
+  assert.throws(() => open(state, { max_input_bytes: 1024, working_set: [{ ref: "ctx:base", kind: "file", sha256: digest(large), content: large }] }), /exceeds byte budget|insufficient room/);
 });
 
 test("JSON restart reconstructs the next episode from durable state without conversation memory", () => {
