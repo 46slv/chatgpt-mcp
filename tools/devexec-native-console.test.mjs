@@ -7,7 +7,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isValidRunId, listRuns, listTargets, readStepFile, runDetail } from "./devexec-native-console.mjs";
+import { createConsoleServer, createControlStore, isValidRunId, listRuns, listTargets, readStepFile, runDetail, startRun, stopRun } from "./devexec-native-console.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CONSOLE = path.join(here, "devexec-native-console.mjs");
@@ -199,4 +199,137 @@ test("server serves UI and JSON, guards foreign Host and Origin", async () => {
   } finally {
     await stopServer(child);
   }
+});
+
+function makeSpawn(log) {
+  const child = {
+    pid: 4242,
+    killed: [],
+    killResult: true,
+    handlers: {},
+    stdout: { on() {} },
+    stderr: { on() {} },
+    on(ev, fn) { child.handlers[ev] = fn; },
+    kill(sig) { child.killed.push(sig); return child.killResult !== false; },
+  };
+  const fn = (cmd, args, opts) => { log.push({ cmd, args, opts }); return child; };
+  fn.child = child;
+  return fn;
+}
+
+function exitChild(spawnFn, code = 0) {
+  spawnFn.child.handlers.exit(code, null);
+}
+
+test("launch records exact spawn identity and returns the run id", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  const record = startRun({ targetAlias: "good", purpose: "canary goal", controls, spawnFn, env });
+  assert.match(record.run_id, /^CONSOLE-[0-9]+-[0-9a-f]+$/);
+  assert.equal(record.target_alias, "good");
+  assert.equal(record.pid, 4242);
+  assert.equal(record.status, "RUNNING");
+  assert.equal(record.owned_by_console, true);
+  assert.equal(log.length, 1);
+  assert.ok(log[0].cmd.endsWith("node") || log[0].cmd.endsWith("node.exe"));
+  assert.deepEqual(log[0].args.slice(1), ["run", "--target", "good"]);
+  assert.ok(log[0].args[0].endsWith("devexec.mjs"));
+  assert.equal(log[0].opts.env.DEV_EXEC_TARGET_ALIAS, "good");
+  assert.equal(log[0].opts.env.DEV_EXEC_PURPOSE, "canary goal");
+  assert.equal(log[0].opts.env.DEV_EXEC_RUN_ID, record.run_id);
+  assert.equal(controls.get(record.run_id).status, "RUNNING");
+});
+
+test("duplicate launch on a running target is refused, relaunch after exit is allowed", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  const first = startRun({ targetAlias: "good", purpose: "one", controls, spawnFn, env });
+  assert.throws(() => startRun({ targetAlias: "good", purpose: "two", controls, spawnFn, env }), (e) => e.status === 409 && e.code === "RUN_CONFLICT");
+  assert.equal(log.length, 1);
+  exitChild(spawnFn, 0);
+  assert.equal(controls.get(first.run_id).status, "EXITED");
+  const second = startRun({ targetAlias: "good", purpose: "three", controls, spawnFn, env });
+  assert.notEqual(second.run_id, first.run_id);
+  assert.equal(log.length, 2);
+});
+
+test("launch validates target and purpose without spawning", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  assert.throws(() => startRun({ targetAlias: "broken", purpose: "x", controls, spawnFn, env }), (e) => e.status === 400);
+  assert.throws(() => startRun({ targetAlias: "../evil", purpose: "x", controls, spawnFn, env }), (e) => e.status === 400);
+  assert.throws(() => startRun({ targetAlias: "good", purpose: "  ", controls, spawnFn, env }), (e) => e.status === 400);
+  assert.throws(() => startRun({ targetAlias: "good", purpose: "x".repeat(4001), controls, spawnFn, env }), (e) => e.status === 400);
+  assert.equal(log.length, 0);
+});
+
+test("stop reaches only console-owned running children", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const spawnFn = makeSpawn([]);
+  const record = startRun({ targetAlias: "good", purpose: "x", controls, spawnFn, env });
+  const stopped = stopRun(record.run_id, { controls });
+  assert.equal(stopped.status, "STOP_REQUESTED");
+  assert.deepEqual(spawnFn.child.killed, ["SIGTERM"]);
+  assert.throws(() => stopRun("RUN-NOPE", { controls }), (e) => e.status === 400);
+  exitChild(spawnFn, 0);
+  assert.throws(() => stopRun(record.run_id, { controls }), (e) => e.status === 400);
+  const controls2 = createControlStore();
+  const spawnFn2 = makeSpawn([]);
+  spawnFn2.child.killResult = false;
+  const record2 = startRun({ targetAlias: "good", purpose: "x", controls: controls2, spawnFn: spawnFn2, env });
+  assert.throws(() => stopRun(record2.run_id, { controls: controls2 }), (e) => e.status === 500);
+});
+
+async function startLocalServer(t, { env, controls, spawnFn, port }) {
+  const { createConsoleServer: create } = await import("./devexec-native-console.mjs");
+  const server = create({ controls, spawnFn, env });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  return server;
+}
+
+test("server launch/stop APIs enforce ownership and conflicts", async (t) => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  await startLocalServer(t, { env, controls, spawnFn, port: 43293 });
+  const post = (target, body, headers) => fetch(`http://127.0.0.1:43293${target}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(headers || {}) },
+    body: JSON.stringify(body || {}),
+  });
+  let res = await post("/api/runs", { target_alias: "good", purpose: "api goal" });
+  assert.equal(res.status, 200);
+  const launched = await res.json();
+  assert.match(launched.run_id, /^CONSOLE-/);
+  assert.equal(log.length, 1);
+  res = await post("/api/runs", { target_alias: "good", purpose: "again" });
+  assert.equal(res.status, 409);
+  res = await post("/api/runs", { target_alias: "broken", purpose: "x" });
+  assert.equal(res.status, 400);
+  res = await post("/api/runs", { target_alias: "good" });
+  assert.equal(res.status, 400);
+  const controlsRes = await fetch("http://127.0.0.1:43293/api/controls");
+  assert.equal(controlsRes.status, 200);
+  const listed = (await controlsRes.json()).controls;
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].owned_by_console, true);
+  res = await post(`/api/runs/${launched.run_id}/stop`, {});
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, "STOP_REQUESTED");
+  res = await post("/api/runs/RUN-NOPE/stop", {});
+  assert.equal(res.status, 400);
+  res = await post("/api/runs", { target_alias: "good", purpose: "x" }, { origin: "https://evil.example" });
+  assert.equal(res.status, 403);
 });

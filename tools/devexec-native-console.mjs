@@ -5,6 +5,8 @@
 // every response is re-read from canonical files, so a restart rebuilds
 // the identical read model. Mutations arrive in P4/P6; P3 serves GET only.
 
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -308,6 +310,136 @@ export function readStepFile(runId, step, kind, env = process.env) {
   };
 }
 
+// ---- launcher (P4): console-owned native runs ----
+const DEVEXEC_CLI = path.join(here, "devexec.mjs");
+const MAX_PURPOSE_CHARS = 4000;
+const MAX_RUN_LOG_LINES = 500;
+
+export function generateRunId(prefix = "CONSOLE") {
+  return `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
+export function createControlStore() {
+  return new Map();
+}
+
+function appendRunLog(record, source, chunk) {
+  const at = new Date().toISOString();
+  for (const line of String(chunk).split(/\r?\n/).filter(Boolean)) record.log.push({ at, source, line });
+  if (record.log.length > MAX_RUN_LOG_LINES) record.log.splice(0, record.log.length - MAX_RUN_LOG_LINES);
+}
+
+export function controlInfo(record) {
+  if (!record) return null;
+  return {
+    run_id: record.run_id,
+    target_alias: record.target_alias,
+    pid: record.pid,
+    command: record.command,
+    started_at: record.started_at,
+    ended_at: record.ended_at,
+    status: record.status,
+    owned_by_console: true,
+    exit_code: record.exit_code,
+    signal: record.signal,
+    log: record.log.slice(-50),
+  };
+}
+
+export function listControls(controls) {
+  return [...controls.values()].map(controlInfo);
+}
+
+/**
+ * Launch a native devexec run as a console-owned child. The canonical run
+ * state stays file-owned; the control record lives apart and only tracks
+ * process ownership for safe stop/duplicate decisions.
+ */
+export function startRun({ targetAlias, purpose, controls, spawnFn = spawn, env = process.env } = {}) {
+  if (!controls) {
+    const error = new Error("Control store is required.");
+    error.status = 500;
+    throw error;
+  }
+  if (typeof targetAlias !== "string" || !targetAlias) {
+    const error = new Error("target_alias is required.");
+    error.status = 400;
+    throw error;
+  }
+  const model = listTargets(env);
+  const row = model.targets.find((t) => t.alias === targetAlias);
+  if (!row || !row.valid) {
+    const error = new Error(`Target alias is not usable: ${targetAlias}`);
+    error.status = 400;
+    error.code = "TARGET_ENTRY_INVALID";
+    throw error;
+  }
+  const goal = String(purpose ?? "");
+  if (!goal.trim()) {
+    const error = new Error("purpose is required.");
+    error.status = 400;
+    throw error;
+  }
+  if (goal.length > MAX_PURPOSE_CHARS) {
+    const error = new Error("purpose is too long.");
+    error.status = 400;
+    throw error;
+  }
+  for (const record of controls.values()) {
+    if (record.target_alias === targetAlias && record.status === "RUNNING") {
+      const error = new Error(`Target is already running under this console: ${targetAlias} (${record.run_id}).`);
+      error.status = 409;
+      error.code = "RUN_CONFLICT";
+      throw error;
+    }
+  }
+  const runId = generateRunId();
+  const args = [DEVEXEC_CLI, "run", "--target", targetAlias];
+  const child = spawnFn(process.execPath, args, {
+    cwd: process.cwd(),
+    env: { ...env, DEV_EXEC_TARGET_ALIAS: targetAlias, DEV_EXEC_PURPOSE: goal, DEV_EXEC_RUN_ID: runId },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const record = {
+    child, run_id: runId, target_alias: targetAlias,
+    pid: (child && Number.isInteger(child.pid)) ? child.pid : null,
+    command: [process.execPath, ...args],
+    started_at: new Date().toISOString(), ended_at: null,
+    status: "RUNNING", exit_code: null, signal: null, log: [],
+  };
+  controls.set(runId, record);
+  if (child.stdout && typeof child.stdout.on === "function") child.stdout.on("data", (chunk) => appendRunLog(record, "stdout", chunk));
+  if (child.stderr && typeof child.stderr.on === "function") child.stderr.on("data", (chunk) => appendRunLog(record, "stderr", chunk));
+  if (typeof child.on === "function") {
+    child.on("error", (error) => appendRunLog(record, "error", (error && error.stack) || error));
+    child.on("exit", (code, signal) => {
+      record.status = "EXITED";
+      record.ended_at = new Date().toISOString();
+      record.exit_code = Number.isInteger(code) ? code : null;
+      record.signal = signal || null;
+    });
+  }
+  return controlInfo(record);
+}
+
+export function stopRun(runId, { controls } = {}) {
+  const record = controls ? controls.get(runId) : null;
+  if (!record || record.status !== "RUNNING") {
+    const error = new Error("Only a run started by this console can be stopped safely.");
+    error.status = 400;
+    throw error;
+  }
+  if (!record.child || typeof record.child.kill !== "function" || !record.child.kill("SIGTERM")) {
+    const error = new Error("Failed to request process termination.");
+    error.status = 500;
+    throw error;
+  }
+  record.status = "STOP_REQUESTED";
+  appendRunLog(record, "console", "Operator requested stop.");
+  return controlInfo(record);
+}
+
 // ---- HTTP server ----
 function sendJson(res, status, value) {
   const body = JSON.stringify(value, null, 2);
@@ -323,17 +455,21 @@ function httpError(status, message) {
 
 const PAGE = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Native Dev Exec Console</title><style>
 :root{font-family:Consolas,ui-monospace,monospace;color:#111;background:#f3f3ef}*{box-sizing:border-box}body{margin:0}header{height:58px;padding:0 20px;background:white;border-bottom:1px solid #bbb;display:flex;align-items:center;justify-content:space-between}h1{font-size:17px;margin:0}.layout{display:grid;grid-template-columns:400px 1fr 300px;height:calc(100vh - 58px)}aside{background:white;border-right:1px solid #bbb;overflow:auto}.item{padding:11px 14px;border-bottom:1px solid #ddd;cursor:pointer}.item.active,.item:hover{background:#ebebe5}.phase{font-weight:700}.muted{color:#666}.bad{color:#a31313}.good{color:#08783b}.main{padding:20px;overflow:auto}.side{padding:20px;overflow:auto;background:white;border-left:1px solid #bbb}.kv{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin:14px 0;font-size:13px}pre{background:#111;color:#eee;padding:12px;white-space:pre-wrap;word-break:break-word;max-height:40vh;overflow:auto;font-size:12px}h2{font-size:15px;margin:0 0 4px}h3{font-size:13px;margin:18px 0 6px}@media(max-width:900px){.layout{grid-template-columns:1fr;display:block}aside{max-height:30vh}.side{border-left:0;border-top:1px solid #bbb}}
-</style></head><body><header><h1>Native Dev Exec Console (read-only)</h1><span id="time" class="muted"></span></header><div class="layout"><aside><h3>Targets</h3><div id="targets"></div><h3>Runs</h3><div id="runs"></div></aside><main id="main" class="main">loading...</main><div class="side"><h3>Controls</h3><div class="muted">read-only mode (P3). Launch / Continue / Recovery arrive in P4/P6.</div></div></div><script>
-let targets=[],runs=[],selected=null;const esc=v=>String(v??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+</style></head><body><header><h1>Native Dev Exec Console</h1><span id="time" class="muted"></span></header><div class="layout"><aside><h3>Targets</h3><div id="targets"></div><h3>Runs</h3><div id="runs"></div></aside><main id="main" class="main">loading...</main><div class="side"><h3>Launch</h3><div id="launch"><div class="muted">loading targets...</div></div><div id="launchmsg" class="muted"></div><h3>Console runs</h3><div id="controls"><div class="muted">none owned</div></div><h3>Recovery</h3><div class="muted">continue / inspect arrive in P6.</div></div></div><script>
+let targets=[],runs=[],selected=null,owned=[];
+async function loadControls(){try{owned=(await req('/api/controls')).controls||[]}catch(e){owned=[]}var n=document.getElementById('controls');var h='';for(var i=0;i<owned.length;i++){var o=owned[i];h+='<div class="item"><div><b>'+esc(o.run_id)+'</b></div><div class="muted">'+esc(o.target_alias)+' - '+esc(o.status)+'</div>';if(o.status==='RUNNING'){h+='<button data-stop="'+esc(o.run_id)+'">stop</button>'}h+='</div>'}n.innerHTML=h||'<div class="muted">none owned</div>';var btns=n.querySelectorAll('[data-stop]');for(var j=0;j<btns.length;j++){btns[j].onclick=stopOwned}}
+async function stopOwned(e){var b=e.target||e.srcElement;var id=b.getAttribute('data-stop');try{await req('/api/runs/'+encodeURIComponent(id)+'/stop',{method:'POST'})}catch(err){alert(err.message)}await loadControls()}
+async function loadLaunch(){var n=document.getElementById('launch');try{var t=await req('/api/targets');var opts='';var arr=t.targets||[];for(var i=0;i<arr.length;i++){if(arr[i].valid){opts+='<option value="'+esc(arr[i].alias)+'">'+esc(arr[i].alias)+'</option>'}}if(!opts){n.innerHTML='<div class="muted">no valid target</div>';return}n.innerHTML='<select id="target">'+opts+'</select><br><br><textarea id="purpose" rows="4" cols="30"></textarea><br><br><button id="start">start</button>';document.getElementById('start').onclick=startRun}catch(e){n.innerHTML='<div class="muted">no valid target</div>'}}
+async function startRun(){var msg=document.getElementById('launchmsg');try{var r=await req('/api/runs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({target_alias:document.getElementById('target').value,purpose:document.getElementById('purpose').value})});msg.textContent='started '+r.run_id;selected=r.run_id;await load()}catch(e){msg.textContent=e.message}}const esc=v=>String(v??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function req(url,opt){const r=await fetch(url,opt);const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d}
 function renderTargets(el,data){el.innerHTML=data.targets.map(t=>'<div class="item"><div><b>'+esc(t.alias)+'</b> '+(t.valid?'<span class="good">valid</span>':'<span class="bad">TARGET_ERROR</span>')+'</div><div class="muted">'+esc(t.conversation_id||t.error||"")+'</div></div>').join("")||'<div class="item muted">targetなし</div>'}
 function renderRuns(el){el.innerHTML=runs.map(r=>'<div class="item '+(r.run_id===selected?"active":"")+'" data-id="'+esc(r.run_id)+'"><div class="phase">'+esc(r.phase)+'</div><div>'+esc(r.run_id)+'</div><div class="muted">step '+esc(r.step)+(r.pending?" · pending":"")+(r.terminal?" · terminal":"")+'</div></div>').join("")||'<div class="item muted">runなし</div>';el.querySelectorAll("[data-id]").forEach(x=>x.onclick=()=>{selected=x.dataset.id;renderRuns(el);detail()})}
 async function detail(){const n=document.getElementById("main");try{const d=await req("/api/runs/"+encodeURIComponent(selected));const s=d.summary||{};const ev=(d.events||[]).map(e=>JSON.stringify(e)).join("\n");const steps=(d.steps||[]).map(x=>x.file+" ("+x.size+"B)").join("\n");n.innerHTML="<h2>"+esc(s.run_id||selected)+'</h2><div class="phase">'+esc(s.phase||"")+'</div><div class="kv"><span class="muted">parent</span><span>'+esc(s.parent_run_id||"—")+'</span><span class="muted">step</span><span>'+esc(s.step)+'</span><span class="muted">pending</span><span>'+esc(s.pending)+'</span><span class="muted">target</span><span>'+esc(s.target_id||"—")+'</span><span class="muted">workdir</span><span>'+esc(s.working_directory||"—")+'</span><span class="muted">terminal</span><span>'+esc(s.terminal)+'</span><span class="muted">updated</span><span>'+esc(s.updated_at||"—")+'</span></div><h3>result</h3><pre>'+esc(JSON.stringify(s.last_result||null))+'</pre><h3>steps</h3><pre>'+esc(steps||"—")+'</pre><h3>events</h3><pre>'+esc(ev||"—")+"</pre>"}catch(e){n.innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
-async function load(){try{const t=await req("/api/targets");targets=t.targets;renderTargets(document.getElementById("targets"),t);runs=(await req("/api/runs")).runs;if(selected&&!runs.some(r=>r.run_id===selected))selected=null;if(!selected&&runs[0])selected=runs[0].run_id;document.getElementById("time").textContent=new Date().toLocaleTimeString();renderRuns(document.getElementById("runs"));if(selected)detail()}catch(e){document.getElementById("main").innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
+async function load(){try{const t=await req("/api/targets");targets=t.targets;renderTargets(document.getElementById("targets"),t);runs=(await req("/api/runs")).runs;if(selected&&!runs.some(r=>r.run_id===selected))selected=null;if(!selected&&runs[0])selected=runs[0].run_id;document.getElementById("time").textContent=new Date().toLocaleTimeString();renderRuns(document.getElementById("runs"));if(selected)detail();await loadLaunch();await loadControls()}catch(e){document.getElementById("main").innerHTML='<span class="bad">'+esc(e.message)+"</span>"}}
 load();setInterval(load,2000);
 </script></body></html>`;
 
-export function createConsoleServer() {
+export function createConsoleServer({ controls = createControlStore(), spawnFn = spawn, env = process.env } = {}) {
   return http.createServer(async (req, res) => {
     try {
       if (!LOOPBACK_PEERS.has(req.socket.remoteAddress || "")) return sendJson(res, 403, { error: "loopback only" });
@@ -345,13 +481,21 @@ export function createConsoleServer() {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "x-content-type-options": "nosniff" });
         return res.end(PAGE);
       }
-      if (req.method === "GET" && url.pathname === "/api/targets") return sendJson(res, 200, listTargets());
-      if (req.method === "GET" && url.pathname === "/api/runs") return sendJson(res, 200, listRuns());
+      if (req.method === "GET" && url.pathname === "/api/targets") return sendJson(res, 200, listTargets(env));
+      if (req.method === "GET" && url.pathname === "/api/runs") return sendJson(res, 200, listRuns(env));
+      if (req.method === "GET" && url.pathname === "/api/controls") return sendJson(res, 200, { controls: listControls(controls) });
+      if (req.method === "POST" && url.pathname === "/api/runs") {
+        const body = await readBody(req);
+        return sendJson(res, 200, startRun({ targetAlias: body.target_alias, purpose: body.purpose, controls, spawnFn, env }));
+      }
+      if (req.method === "POST" && pathParts.length === 4 && pathParts[0] === "api" && pathParts[1] === "runs" && pathParts[3] === "stop") {
+        return sendJson(res, 200, stopRun(decodeURIComponent(pathParts[2]), { controls }));
+      }
       if (req.method === "GET" && pathParts.length === 3 && pathParts[0] === "api" && pathParts[1] === "runs") {
-        return sendJson(res, 200, runDetail(decodeURIComponent(pathParts[2])));
+        return sendJson(res, 200, runDetail(decodeURIComponent(pathParts[2]), env));
       }
       if (req.method === "GET" && pathParts.length === 6 && pathParts[0] === "api" && pathParts[1] === "runs" && pathParts[3] === "step") {
-        return sendJson(res, 200, readStepFile(decodeURIComponent(pathParts[2]), pathParts[4], decodeURIComponent(pathParts[5] || "")));
+        return sendJson(res, 200, readStepFile(decodeURIComponent(pathParts[2]), pathParts[4], decodeURIComponent(pathParts[5]), env));
       }
       return sendJson(res, 404, { error: "not found" });
     } catch (error) {
