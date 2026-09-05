@@ -46,6 +46,13 @@ function verify(state, outcome) {
   const episode = open(state);
   return applyEphemeralReasoningResult(state, episode, result(episode, outcome, { evidence_refs: ["ev:p"] }));
 }
+function solvedThenIncomplete(problemId = "P-retained") {
+  let state = findProblem(base(), problemId);
+  state = solveAttempt(state);
+  state = verify(state, "SOLVED");
+  const goalEpisode = open(state);
+  return applyEphemeralReasoningResult(state, goalEpisode, result(goalEpisode, "INCOMPLETE", { evidence_refs: ["ev:goal"] }));
+}
 
 test("restart rejects Worker-B counterexample: GOAL_CHECK/INCOMPLETE cannot coexist with post-FIND SOLVE state", () => {
   const state = findProblem(base());
@@ -135,7 +142,7 @@ test("restart rejects VERIFY/SOLVED when required problem evidence was stripped 
 
   const substituted = structuredClone(state);
   substituted.last_result.evidence_refs = ["ev:verify"];
-  assert.throws(() => validateEphemeralReasoningState(substituted), /restart SOLVED missing required deterministic evidence/);
+  assert.throws(() => validateEphemeralReasoningState(substituted), /restart SOLVED missing required deterministic evidence|solved receipt evidence mismatch/);
 });
 
 test("restart rejects GOAL_CHECK/COMPLETE when required goal evidence was stripped or substituted", () => {
@@ -171,4 +178,44 @@ test("restart preserves canonical non-empty evidence gates for VERIFY/UNSOLVED a
   const strippedIncomplete = structuredClone(incomplete);
   strippedIncomplete.last_result.evidence_refs = [];
   assert.throws(() => validateEphemeralReasoningState(strippedIncomplete), /restart GOAL_CHECK\/INCOMPLETE requires deterministic evidence/);
+});
+
+test("durable solved receipts bind retained solved ids to problem, solve attempt, VERIFY episode and evidence", () => {
+  const state = solvedThenIncomplete("P-receipt");
+  assert.deepEqual(state.solved_problem_ids, ["P-receipt"]);
+  assert.equal(state.solved_problem_receipts.length, 1);
+  const receipt = state.solved_problem_receipts[0];
+  assert.equal(receipt.problem.problem_id, "P-receipt");
+  assert.deepEqual(receipt.problem.required_evidence_refs, ["ev:p"]);
+  assert.equal(receipt.solve_attempt_episode_id, state.attempts.at(-1).episode_id);
+  assert.deepEqual(receipt.evidence_refs, ["ev:p"]);
+  assert.match(receipt.problem_sha256, /^[0-9a-f]{64}$/);
+  assert.doesNotThrow(() => validateEphemeralReasoningState(JSON.parse(JSON.stringify(state))));
+  const findEpisode = open(state);
+  assert.deepEqual(findEpisode.input.solved_problem_ids, ["P-receipt"]);
+  assert.deepEqual(findEpisode.input.solved_problem_receipts, state.solved_problem_receipts);
+});
+
+test("restart rejects forged, stripped or mutated historical solved authority after GOAL_CHECK/INCOMPLETE", () => {
+  const state = solvedThenIncomplete("P-authority-receipt");
+
+  const forgedId = structuredClone(state);
+  forgedId.solved_problem_ids.push("P-forged");
+  assert.throws(() => validateEphemeralReasoningState(forgedId), /solved problem index must match durable receipts/);
+
+  const strippedReceipt = structuredClone(state);
+  strippedReceipt.solved_problem_receipts = [];
+  assert.throws(() => validateEphemeralReasoningState(strippedReceipt), /solved problem index must match durable receipts/);
+
+  const mutatedProblem = structuredClone(state);
+  mutatedProblem.solved_problem_receipts[0].problem.statement = "forged historical problem";
+  assert.throws(() => validateEphemeralReasoningState(mutatedProblem), /problem_sha256 mismatch/);
+
+  const substitutedEvidence = structuredClone(state);
+  substitutedEvidence.solved_problem_receipts[0].evidence_refs = ["ev:verify"];
+  assert.throws(() => validateEphemeralReasoningState(substitutedEvidence), /missing required deterministic evidence/);
+
+  const forgedAttemptBinding = structuredClone(state);
+  forgedAttemptBinding.solved_problem_receipts[0].solve_attempt_episode_id = "E000001-deadbeefdeadbeef";
+  assert.throws(() => validateEphemeralReasoningState(forgedAttemptBinding), /ATTEMPTED solve record/);
 });
