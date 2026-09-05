@@ -27,6 +27,7 @@ function setupFixtures() {
     targets: {
       good: { transport: "chatgpt-web", title: "Good", chat_url: GOOD_URL, conversation_id: "6a9ba452-8b64-83e8-a7f6-e5704521360b" },
       broken: { transport: "chatgpt-web", title: "Broken", chat_url: "https://chatgpt.com/c/not a url!!" },
+      good2: { transport: "chatgpt-web", title: "Good 2", chat_url: GOOD_URL, conversation_id: "6a9ba452-8b64-83e8-a7f6-e5704521360b" },
     },
   }), "utf8");
   const goodState = {
@@ -209,9 +210,9 @@ test("server serves UI and JSON, guards foreign Host and Origin", async () => {
   }
 });
 
-function makeSpawn(log) {
+function freshChild(log) {
   const child = {
-    pid: 4242,
+    pid: 4242 + log.length,
     killed: [],
     killResult: true,
     handlers: {},
@@ -220,13 +221,24 @@ function makeSpawn(log) {
     on(ev, fn) { child.handlers[ev] = fn; },
     kill(sig) { child.killed.push(sig); return child.killResult !== false; },
   };
-  const fn = (cmd, args, opts) => { log.push({ cmd, args, opts }); return child; };
-  fn.child = child;
+  return child;
+}
+
+function makeSpawn(log) {
+  const children = [];
+  const fn = (cmd, args, opts) => {
+    const child = freshChild(log);
+    children.push(child);
+    log.push({ cmd, args, opts });
+    return child;
+  };
+  fn.children = children;
+  Object.defineProperty(fn, "child", { get() { return children[children.length - 1]; } });
   return fn;
 }
 
-function exitChild(spawnFn, code = 0) {
-  spawnFn.child.handlers.exit(code, null);
+function exitChild(spawnFn, code = 0, index = 0) {
+  spawnFn.children[index].handlers.exit(code, null);
 }
 
 test("launch records exact spawn identity and returns the run id", () => {
@@ -290,8 +302,8 @@ test("stop reaches only console-owned running children", () => {
   assert.throws(() => stopRun(record.run_id, { controls }), (e) => e.status === 400);
   const controls2 = createControlStore();
   const spawnFn2 = makeSpawn([]);
-  spawnFn2.child.killResult = false;
   const record2 = startRun({ targetAlias: "good", purpose: "x", controls: controls2, spawnFn: spawnFn2, env });
+  spawnFn2.children[0].killResult = false;
   assert.throws(() => stopRun(record2.run_id, { controls: controls2 }), (e) => e.status === 500);
 });
 
@@ -412,4 +424,34 @@ test("server continue and recovery routes", async (t) => {
   get = await fetch("http://127.0.0.1:43294/api/runs/RUN-GOOD/recovery?kind=reconcile");
   assert.equal(get.status, 400);
   assert.equal((await get.json()).error.includes("reconcile"), true);
+});
+
+test("concurrent runs on different targets are independent", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const log = [];
+  const spawnFn = makeSpawn(log);
+  const first = startRun({ targetAlias: "good", purpose: "one", controls, spawnFn, env });
+  const second = startRun({ targetAlias: "good2", purpose: "two", controls, spawnFn, env });
+  assert.notEqual(first.run_id, second.run_id);
+  assert.equal(controls.get(first.run_id).status, "RUNNING");
+  assert.equal(controls.get(second.run_id).status, "RUNNING");
+  assert.equal(log.length, 2);
+  exitChild(spawnFn, 0, 1);
+  assert.equal(controls.get(second.run_id).status, "EXITED");
+  stopRun(first.run_id, { controls });
+  assert.equal(controls.get(first.run_id).status, "STOP_REQUESTED");
+  assert.equal(controls.get(second.run_id).status, "EXITED");
+});
+
+test("stale and reused ownership records can never stop anything", () => {
+  const { env } = setupFixtures();
+  const controls = createControlStore();
+  const spawnFn = makeSpawn([]);
+  const rec = startRun({ targetAlias: "good", purpose: "x", controls, spawnFn, env });
+  exitChild(spawnFn, 1);
+  assert.equal(controls.get(rec.run_id).status, "EXITED");
+  assert.throws(() => stopRun(rec.run_id, { controls }), (e) => e.status === 400);
+  assert.deepEqual(spawnFn.child.killed, []);
+  assert.throws(() => stopRun("RUN-NEVER-EXISTED", { controls }), (e) => e.status === 400);
 });
