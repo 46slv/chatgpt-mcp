@@ -2,6 +2,7 @@
 
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { CONFIG } from './types.js';
+import { appendStageEvent } from './utils/stage-sidecar.js';
 import { mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 
@@ -272,18 +273,31 @@ export async function elementExists(selectors: readonly string[]): Promise<boole
 /**
  * Type text into an element found by selectors
  */
-export async function typeText(selectors: readonly string[], text: string): Promise<boolean> {
-  const element = await findElement(selectors);
+export async function typeText(selectors: readonly string[], text: string, find: (selectors: readonly string[]) => Promise<any | null> = findElement): Promise<boolean> {
+  const element = await find(selectors);
   if (!element) {
     return false;
   }
+  appendStageEvent({ scope: 'composer', stage: 'composer-located' });
 
-  await element.click();
-  await element.fill('');
-
-  for (const char of text) {
-    await element.type(char, { delay: CONFIG.typingDelay });
+  try {
+    await element.click();
+    appendStageEvent({ scope: 'composer', stage: 'composer-focused', method: 'click' });
+  } catch {
+    // The composer grid can intercept pointer events on the editor itself.
+    // Focus needs no hit target and leaves the editor ready for input.
+    await element.focus();
+    appendStageEvent({ scope: 'composer', stage: 'composer-focused', method: 'focus' });
   }
+  await element.fill('');
+  appendStageEvent({ scope: 'composer', stage: 'composer-cleared' });
+
+  // The prompt is set atomically: long per-character streams outlive one editor
+  // mount and the page drops already-typed content (observed live as only the
+  // prompt tail surviving a ~100s stream, while one fill() of 1399 chars reads
+  // back exact). No send click and no Enter happen here.
+  await element.fill(text);
+  appendStageEvent({ scope: 'composer', stage: 'composer-typed', chars: text.length });
 
   return true;
 }
