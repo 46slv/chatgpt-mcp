@@ -895,7 +895,13 @@ export function createBoundChatGPTTransport({ callTool, taskChatBinding, chatBin
         conversation_id: fixedTarget.conversation_id,
         relay_request_id: input.relay_request_id,
       });
-      if (result?.isError) fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply MCP call failed.");
+      if (result?.isError) {
+        fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply MCP call failed; delivery is unconfirmed.", {
+          tool: "chatgpt_reply",
+          isError: true,
+          text_blocks: Array.isArray(result.content) ? result.content.filter((item) => item?.type === "text" && typeof item.text === "string").map((item) => item.text) : [],
+        });
+      }
       const blocks = Array.isArray(result?.content) ? result.content.filter((item) => item?.type === "text").map((item) => item.text) : [];
       if (blocks.length !== 1) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply must return exactly one text response envelope.");
       const toolResult = parseJsonValue(blocks[0], FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply response");
@@ -905,7 +911,12 @@ export function createBoundChatGPTTransport({ callTool, taskChatBinding, chatBin
       if (isObject(toolResult) && hasOwn(toolResult, "response") && typeof toolResult.response === "string" && !hasOwn(toolResult, "protocol")) {
         const allowedWrapperFields = new Set(["response", "elapsed_seconds", "model", "chat_id", "poll_count", "error"]);
         if (Object.keys(toolResult).some((field) => !allowedWrapperFields.has(field))) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply result wrapper contains unknown fields.");
-        if (typeof toolResult.error === "string" && toolResult.error.trim()) fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply reported an error after the send attempt.");
+        if (typeof toolResult.error === "string" && toolResult.error.trim()) {
+          fail(FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "chatgpt_reply returned an error; delivery is unconfirmed.", {
+            tool: "chatgpt_reply",
+            error: toolResult.error,
+          });
+        }
         if (!toolResult.response.trim()) fail(FULL_RELAY_ERRORS.CHATGPT_RESPONSE_INVALID, "chatgpt_reply returned an empty response envelope.");
         if (toolResult.chat_id !== undefined && toolResult.chat_id !== null && toolResult.chat_id !== fixedTarget.conversation_id) fail(FULL_RELAY_ERRORS.IDENTITY_MISMATCH, "chatgpt_reply result conversation does not match the exact task chat binding.");
         return responseEnvelope(toolResult.response);
@@ -1099,6 +1110,8 @@ export function createFullRelayOrchestrator({
       raw = await callBoundAdapter(relayChatGPT, input, chatgptTimeoutMs, FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, "ChatGPT");
     } catch (error) {
       state = save({ phase: FULL_RELAY_STATES.DELIVERY_UNKNOWN, error_code: error?.code || FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN, terminal_reason: "ChatGPT delivery result is ambiguous" }, { expectedPhase: FULL_RELAY_STATES.CHATGPT_IN_FLIGHT });
+      // Delivery ambiguity is terminal for this request, so the conversation slot is released here.
+      releaseLease();
       return terminalResult(state, { delivery_unknown: true });
     }
     let response;
@@ -1186,7 +1199,8 @@ export function createFullRelayOrchestrator({
       const phase = classifyCodexError(error, sender, returnRequest.return_id);
       const senderRecord = sender?.inspect ? sender.inspect(returnRequest.return_id) : null;
       state = save({ phase, error_code: error?.code || senderRecord?.error_code || FULL_RELAY_ERRORS.CODEX_DELIVERY_UNKNOWN, terminal_reason: phase === FULL_RELAY_STATES.DELIVERY_UNKNOWN ? "Codex injection result is ambiguous" : "Bound Codex runtime rejected the return" }, { expectedPhase: FULL_RELAY_STATES.CODEX_IN_FLIGHT });
-      if (state.phase === phase && phase === FULL_RELAY_STATES.REJECTED) releaseLease();
+      // A wedged conversation slot would block every later round, so ambiguity releases it like rejection does.
+      if (state.phase === phase && (phase === FULL_RELAY_STATES.REJECTED || phase === FULL_RELAY_STATES.DELIVERY_UNKNOWN)) releaseLease();
       return terminalResult(state, { delivery_unknown: phase === FULL_RELAY_STATES.DELIVERY_UNKNOWN, rejected: phase === FULL_RELAY_STATES.REJECTED });
     }
   };

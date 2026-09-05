@@ -496,6 +496,28 @@ test("bound MCP adapter unwraps the bundled chatgpt-mcp result without relaxing 
   assert.deepEqual(envelope, expected);
 });
 
+test("bound MCP adapter preserves toolResult.error in DELIVERY_UNKNOWN cause without retry", async () => {
+  const f = fixture({ label: "mcp-error-cause" });
+  let calls = 0;
+  const marker = "SYNTH-DIAG-TOOLERROR-001 pre-submit marker";
+  const transport = createBoundChatGPTTransport({ taskChatBinding: f.chat, callTool: async () => { calls += 1; return { content: [{ type: "text", text: JSON.stringify({ response: "", elapsed_seconds: 0, model: null, chat_id: f.chat.conversation_id, poll_count: 0, error: marker }) }] }; } });
+  const error = await transport.send({ target: { binding_id: f.chat.binding_id, chat_url: f.chat.chat_url, conversation_id: f.chat.conversation_id }, payload: "payload", relay_request_id: "relay-cause" }).then(() => null, (entry) => entry);
+  assert.equal(calls, 1);
+  assert.equal(error?.code, FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN);
+  assert.equal(error?.cause?.tool, "chatgpt_reply");
+  assert.equal(error?.cause?.error, marker);
+});
+
+test("bound MCP adapter preserves isError text blocks in DELIVERY_UNKNOWN cause without retry", async () => {
+  const f = fixture({ label: "mcp-iserror-cause" });
+  let calls = 0;
+  const transport = createBoundChatGPTTransport({ taskChatBinding: f.chat, callTool: async () => { calls += 1; return { isError: true, content: [{ type: "text", text: "SYNTH-DIAG-ISERROR-001 bridge marker" }] }; } });
+  const error = await transport.send({ target: { binding_id: f.chat.binding_id, chat_url: f.chat.chat_url, conversation_id: f.chat.conversation_id }, payload: "payload", relay_request_id: "relay-iserror" }).then(() => null, (entry) => entry);
+  assert.equal(calls, 1);
+  assert.equal(error?.code, FULL_RELAY_ERRORS.CHATGPT_DELIVERY_UNKNOWN);
+  assert.equal(error?.cause?.isError, true);
+  assert.deepEqual(error?.cause?.text_blocks, ["SYNTH-DIAG-ISERROR-001 bridge marker"]);
+});
 test("deterministic hashes and strict envelopes reject unknown fields", () => {
   assert.equal(canonicalJson({ b: 2, a: 1 }), '{"a":1,"b":2}');
   assert.equal(hashJson({ b: 2, a: 1 }), hashJson({ a: 1, b: 2 }));
@@ -513,4 +535,19 @@ test("runFullRelayRound performs one bounded round only", async () => {
   assert.equal(result.status, FULL_RELAY_STATES.STOPPED);
   assert.equal(chat, 1);
   assert.equal(codex, 0);
+});
+test("ChatGPT delivery ambiguity releases the conversation slot", async () => {
+  const f = fixture({ label: "chat-ambiguous", conversation: "chat-ambiguous-slot" });
+  const o = orchestrator(f, relayAdapters({ chat: async () => { throw new Error("bridge down"); } }));
+  const result = await o.run();
+  assert.equal(result.status, FULL_RELAY_STATES.DELIVERY_UNKNOWN);
+  assert.equal(o.conversationArbitrator.inspect(f.chat.conversation_id), null);
+});
+test("Codex delivery ambiguity releases the conversation slot", async () => {
+  const f = fixture({ label: "codex-ambiguous", conversation: "chat-codex-ambiguous-slot", task_id: "task-codex-ambiguous" });
+  const failingSender = { send: async () => { throw Object.assign(new Error("queue ambiguous"), { code: CODEX_CONTINUATION_ERRORS.DELIVERY_UNKNOWN }); } };
+  const o = orchestrator(f, { ...relayAdapters({}), codexSender: failingSender });
+  const result = await o.run();
+  assert.equal(result.status, FULL_RELAY_STATES.DELIVERY_UNKNOWN);
+  assert.equal(o.conversationArbitrator.inspect(f.chat.conversation_id), null);
 });
