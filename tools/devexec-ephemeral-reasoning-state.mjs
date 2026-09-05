@@ -440,72 +440,14 @@ function roleProjection(state) {
   };
   throw new Error("terminal state cannot open reasoning episode");
 }
-const PROJECTION_COMPACTION_SCHEMA = "devexec.projection-compaction/v1";
-const PROJECTION_COMPACTION_PROFILES = Object.freeze([
-  { max_string_bytes: 1024, max_array_items: 16 },
-  { max_string_bytes: 512, max_array_items: 8 },
-  { max_string_bytes: 256, max_array_items: 4 },
-  { max_string_bytes: 128, max_array_items: 2 },
-  { max_string_bytes: 64, max_array_items: 1 },
-  { max_string_bytes: 32, max_array_items: 0 },
-]);
 function canonicalBytes(value) { return Buffer.byteLength(canonical(value), "utf8"); }
-function compactProjectionString(value, maxBytes) {
-  const bytes = Buffer.byteLength(value, "utf8");
-  if (bytes <= maxBytes) return value;
-  const digest = sha256(value);
-  const marker = `[sha256:${digest};bytes:${bytes}]`;
-  if (Buffer.byteLength(marker, "utf8") >= maxBytes) return digest.slice(0, Math.max(1, maxBytes));
-  let prefix = "";
-  for (const character of value) {
-    if (Buffer.byteLength(`${prefix}${character}${marker}`, "utf8") > maxBytes) break;
-    prefix += character;
-  }
-  return `${prefix}${marker}`;
-}
-function compactProjectionValue(value, profile) {
-  if (typeof value === "string") return compactProjectionString(value, profile.max_string_bytes);
-  if (Array.isArray(value)) {
-    if (value.length <= profile.max_array_items) return value.map((item) => compactProjectionValue(item, profile));
-    if (profile.max_array_items === 0) return [];
-    const headCount = Math.ceil(profile.max_array_items / 2);
-    const tailCount = Math.floor(profile.max_array_items / 2);
-    const retained = [...value.slice(0, headCount), ...(tailCount ? value.slice(-tailCount) : [])];
-    return retained.map((item) => compactProjectionValue(item, profile));
-  }
-  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactProjectionValue(item, profile)]));
-  return value;
-}
 function boundedRoleProjection(state, checkedWorkingSet, maxInputBytes) {
-  const rawProjection = roleProjection(state);
-  const payload = (input) => ({ input, working_set: checkedWorkingSet });
-  if (canonicalBytes(payload(rawProjection)) <= maxInputBytes) return rawProjection;
-  const sourceSha256 = sha256(rawProjection);
-  const sourceBytes = canonicalBytes(rawProjection);
-  for (const profile of PROJECTION_COMPACTION_PROFILES) {
-    const candidate = {
-      ...compactProjectionValue(rawProjection, profile),
-      projection_compaction: {
-        schema: PROJECTION_COMPACTION_SCHEMA,
-        mode: "LOSSY_DIGESTED",
-        source_sha256: sourceSha256,
-        source_bytes: sourceBytes,
-        max_string_bytes: profile.max_string_bytes,
-        max_array_items: profile.max_array_items,
-      },
-    };
-    if (canonicalBytes(payload(candidate)) <= maxInputBytes) return candidate;
+  const projection = roleProjection(state);
+  const bytes = canonicalBytes({ input: projection, working_set: checkedWorkingSet });
+  if (bytes > maxInputBytes) {
+    throw new Error(`mandatory ${state.next_role} semantic core exceeds episode input budget`);
   }
-  const digestOnly = {
-    projection_compaction: {
-      schema: PROJECTION_COMPACTION_SCHEMA,
-      mode: "DIGEST_ONLY",
-      source_sha256: sourceSha256,
-      source_bytes: sourceBytes,
-    },
-  };
-  if (canonicalBytes(payload(digestOnly)) <= maxInputBytes) return digestOnly;
-  throw new Error("working_set leaves insufficient room for bounded role projection metadata");
+  return projection;
 }
 function workingSet(values, approved) {
   if (!Array.isArray(values) || values.length > 32) throw new Error("working_set invalid");
