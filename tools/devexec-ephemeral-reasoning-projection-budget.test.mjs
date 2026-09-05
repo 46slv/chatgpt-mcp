@@ -62,7 +62,7 @@ function markIncomplete(state) {
   }));
 }
 
-function base() {
+function solvedHistoryBase() {
   return createEphemeralReasoningState({
     mission_id: "M-DEV-LER-PROJECTION-BUDGET",
     goal_id: "DEV-LER-001",
@@ -77,8 +77,8 @@ function base() {
   });
 }
 
-test("many large durable solved receipts stay out of fixed-budget FIND and GOAL_CHECK projections", () => {
-  let state = base();
+test("large solved provenance stays parent-owned while FIND and GOAL_CHECK keep exact live authority", () => {
+  let state = solvedHistoryBase();
 
   for (let index = 0; index < PROBLEM_COUNT; index += 1) {
     state = solveOne(state, index);
@@ -88,106 +88,174 @@ test("many large durable solved receipts stay out of fixed-budget FIND and GOAL_
 
     const goalEpisode = open(state);
     assert.equal(goalEpisode.role, "GOAL_CHECK");
+    assert.deepEqual(goalEpisode.input.goal, state.goal);
+    assert.deepEqual(goalEpisode.input.verified_facts, state.verified_facts);
+    assert.deepEqual(goalEpisode.input.current_problem, state.current_problem);
     assert.equal(goalEpisode.input.solved_progress.count, index + 1);
     assert.equal(goalEpisode.input.solved_progress.digest.length, 64);
-    assert.deepEqual(
-      goalEpisode.input.solved_progress.recent_problem_ids,
-      state.solved_problem_ids.slice(-8),
-    );
+    assert.deepEqual(goalEpisode.input.solved_progress.recent_problem_ids, state.solved_problem_ids.slice(-8));
     assert.equal("solved_problem_receipts" in goalEpisode.input, false);
     assert.equal("solved_problem_ids" in goalEpisode.input, false);
+    assert.equal("projection_compaction" in goalEpisode.input, false);
     assert.ok(goalEpisode.input_bytes < 16 * 1024);
 
     if (index < PROBLEM_COUNT - 1) state = markIncomplete(state);
   }
 
   assert.ok(Buffer.byteLength(JSON.stringify(state), "utf8") > 64 * 1024);
-  assert.doesNotThrow(() => open(state, { max_input_bytes: 64 * 1024 }));
-
   state = markIncomplete(state);
   assert.equal(state.next_role, "FIND");
   assert.equal(state.current_problem, null);
   assert.equal(state.solved_problem_receipts.length, PROBLEM_COUNT);
-  assert.ok(Buffer.byteLength(JSON.stringify(state), "utf8") > 64 * 1024);
 
   const findEpisode = open(state);
   assert.equal(findEpisode.role, "FIND");
+  assert.deepEqual(findEpisode.input.goal, state.goal);
+  assert.deepEqual(findEpisode.input.constraints, state.constraints);
+  assert.deepEqual(findEpisode.input.verified_facts, state.verified_facts);
   assert.equal(findEpisode.input.solved_progress.count, PROBLEM_COUNT);
   assert.equal(findEpisode.input.solved_progress.digest.length, 64);
   assert.deepEqual(findEpisode.input.solved_progress.recent_problem_ids, state.solved_problem_ids.slice(-8));
   assert.equal("solved_problem_receipts" in findEpisode.input, false);
   assert.equal("solved_problem_ids" in findEpisode.input, false);
+  assert.equal("projection_compaction" in findEpisode.input, false);
   assert.ok(findEpisode.input_bytes < 16 * 1024);
-  assert.doesNotThrow(() => open(state, { max_input_bytes: 64 * 1024 }));
 });
 
-const AGGREGATE_FACT_COUNT = 40;
-const aggregateFactEvidence = Array.from({ length: AGGREGATE_FACT_COUNT }, (_, index) => `ev:f${index}`);
 function maxItem(prefix, index) {
   const head = `${prefix}-${String(index).padStart(2, "0")}-`;
   return `${head}${"z".repeat((2 * 1024) - head.length)}`;
 }
-function aggregateBase() {
+
+function oversizedAuthorityBase() {
+  const factEvidence = Array.from({ length: 4 }, (_, index) => `ev:f${index}`);
   return createEphemeralReasoningState({
-    mission_id: "M-DEV-LER-AGGREGATE-BUDGET",
+    mission_id: "M-DEV-LER-SEMANTIC-CORE-BUDGET",
     goal_id: "DEV-LER-001",
     goal: {
       text: "g".repeat(8 * 1024),
-      acceptance: Array.from({ length: 24 }, (_, index) => maxItem("accept", index)),
+      acceptance: Array.from({ length: 4 }, (_, index) => maxItem("accept", index)),
       required_evidence_refs: ["ev:goal"],
     },
-    constraints: Array.from({ length: 24 }, (_, index) => maxItem("constraint", index)),
-    verified_facts: Array.from({ length: AGGREGATE_FACT_COUNT }, (_, index) => ({
-      key: `fact-${String(index).padStart(2, "0")}`,
+    constraints: Array.from({ length: 4 }, (_, index) => maxItem("constraint", index)),
+    verified_facts: factEvidence.map((evidence_ref, index) => ({
+      key: `fact-${index}`,
       value: "f".repeat(2 * 1024),
-      evidence_ref: aggregateFactEvidence[index],
+      evidence_ref,
     })),
-    evidence_authority_refs: ["ev:goal", "ev:p", ...aggregateFactEvidence],
+    evidence_authority_refs: ["ev:goal", ...factEvidence],
     approved_context_refs: [],
   });
 }
-function assertCompacted(episode) {
-  assert.ok(episode.input_bytes <= episode.budgets.max_input_bytes);
-  assert.equal(episode.input.projection_compaction.schema, "devexec.projection-compaction/v1");
-  assert.equal(episode.input.projection_compaction.mode, "LOSSY_DIGESTED");
-  assert.match(episode.input.projection_compaction.source_sha256, /^[0-9a-f]{64}$/);
-  assert.ok(episode.input.projection_compaction.source_bytes > episode.budgets.max_input_bytes);
+
+test("authority-bearing role input never becomes lossy or digest-only to satisfy a smaller budget", () => {
+  const state = oversizedAuthorityBase();
+  assert.doesNotThrow(() => validateEphemeralReasoningState(state));
+
+  assert.throws(
+    () => open(state),
+    /mandatory FIND semantic core exceeds episode input budget/,
+  );
+  assert.throws(
+    () => open(state, { max_input_bytes: 256 }),
+    /mandatory FIND semantic core exceeds episode input budget/,
+  );
+
+  const roomy = open(state, { max_input_bytes: 64 * 1024 });
+  assert.equal(roomy.role, "FIND");
+  assert.deepEqual(roomy.input.goal, state.goal);
+  assert.deepEqual(roomy.input.constraints, state.constraints);
+  assert.deepEqual(roomy.input.verified_facts, state.verified_facts);
+  assert.equal("projection_compaction" in roomy.input, false);
+});
+
+function semanticBase() {
+  return createEphemeralReasoningState({
+    mission_id: "M-DEV-LER-SEMANTIC-IDENTITY",
+    goal_id: "DEV-LER-001",
+    goal: {
+      text: "Preserve the exact semantic authority visible to every reasoning role",
+      acceptance: ["protected role inputs are byte-for-byte exact", "tampering cannot promote authority"],
+      required_evidence_refs: ["ev:goal"],
+    },
+    constraints: ["constraint:immutable", "constraint:evidence-bound"],
+    verified_facts: [{ key: "fact-a", value: "verified", evidence_ref: "ev:fact" }],
+    evidence_authority_refs: ["ev:goal", "ev:fact", "ev:problem"],
+    approved_context_refs: [],
+  });
 }
 
-test("aggregate goal, constraints and verified facts are deterministically bounded for every role projection", () => {
-  let state = aggregateBase();
-  assert.doesNotThrow(() => validateEphemeralReasoningState(state));
-  assert.ok(Buffer.byteLength(JSON.stringify(state), "utf8") > 64 * 1024);
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+test("every opened role preserves its required semantic core byte-for-byte and altered core cannot transition", () => {
+  let state = semanticBase();
 
   let episode = open(state);
   assert.equal(episode.role, "FIND");
-  assertCompacted(episode);
-  assert.ok(episode.input.verified_facts.length < AGGREGATE_FACT_COUNT);
-  assert.ok(episode.input.constraints.length < state.constraints.length);
-  assert.deepEqual(open(state).input, episode.input);
-
-  const tiny = open(state, { max_input_bytes: 256 });
-  assert.ok(tiny.input_bytes <= 256);
-  assert.equal(tiny.input.projection_compaction.schema, "devexec.projection-compaction/v1");
-  assert.equal(tiny.input.projection_compaction.mode, "DIGEST_ONLY");
-  assert.match(tiny.input.projection_compaction.source_sha256, /^[0-9a-f]{64}$/);
-
+  assert.deepEqual(episode.input.goal, state.goal);
+  assert.deepEqual(episode.input.constraints, state.constraints);
+  assert.deepEqual(episode.input.verified_facts, state.verified_facts);
+  const forgedFind = clone(episode);
+  forgedFind.input.goal.acceptance[0] = "forged acceptance";
+  assert.throws(
+    () => applyEphemeralReasoningResult(state, forgedFind, result(forgedFind, "FOUND", {
+      problem: { problem_id: "P-semantic", statement: "work", required_evidence_refs: ["ev:problem"] },
+    })),
+    /episode role projection mismatch/,
+  );
   state = applyEphemeralReasoningResult(state, episode, result(episode, "FOUND", {
-    problem: { problem_id: "P-aggregate", statement: "bounded aggregate projection", required_evidence_refs: ["ev:p"] },
+    problem: { problem_id: "P-semantic", statement: "work", required_evidence_refs: ["ev:problem"] },
   }));
+
   episode = open(state);
   assert.equal(episode.role, "SOLVE");
-  assertCompacted(episode);
-
+  assert.deepEqual(episode.input.problem, state.current_problem);
+  assert.deepEqual(episode.input.constraints, state.constraints);
+  const forgedSolve = clone(episode);
+  forgedSolve.input.constraints = [];
+  assert.throws(
+    () => applyEphemeralReasoningResult(state, forgedSolve, result(forgedSolve, "ATTEMPTED")),
+    /episode role projection mismatch/,
+  );
   state = applyEphemeralReasoningResult(state, episode, result(episode, "ATTEMPTED"));
+
   episode = open(state);
   assert.equal(episode.role, "VERIFY");
-  assert.ok(episode.input_bytes <= 16 * 1024);
-  assert.equal("projection_compaction" in episode.input, false);
+  assert.deepEqual(episode.input.problem, state.current_problem);
+  assert.deepEqual(episode.input.attempt, state.attempts[state.attempts.length - 1]);
+  const forgedVerify = clone(episode);
+  forgedVerify.input.problem.statement = "forged work";
+  assert.throws(
+    () => applyEphemeralReasoningResult(state, forgedVerify, result(forgedVerify, "SOLVED", {
+      evidence_refs: ["ev:problem"],
+    })),
+    /episode role projection mismatch/,
+  );
+  assert.equal(state.solved_problem_ids.length, 0);
+  state = applyEphemeralReasoningResult(state, episode, result(episode, "SOLVED", {
+    evidence_refs: ["ev:problem"],
+  }));
 
-  state = applyEphemeralReasoningResult(state, episode, result(episode, "SOLVED", { evidence_refs: ["ev:p"] }));
   episode = open(state);
   assert.equal(episode.role, "GOAL_CHECK");
-  assertCompacted(episode);
-  assert.equal(episode.input.current_problem.problem_id, "P-aggregate");
+  assert.deepEqual(episode.input.goal, state.goal);
+  assert.deepEqual(episode.input.verified_facts, state.verified_facts);
+  assert.deepEqual(episode.input.current_problem, state.current_problem);
+  assert.deepEqual(episode.input.last_result, state.last_result);
+  const forgedGoalCheck = clone(episode);
+  forgedGoalCheck.input.goal.acceptance = [];
+  assert.throws(
+    () => applyEphemeralReasoningResult(state, forgedGoalCheck, result(forgedGoalCheck, "COMPLETE", {
+      evidence_refs: ["ev:goal"],
+    })),
+    /episode role projection mismatch/,
+  );
+  assert.equal(state.terminal, null);
+  const completed = applyEphemeralReasoningResult(state, episode, result(episode, "COMPLETE", {
+    evidence_refs: ["ev:goal"],
+  }));
+  assert.equal(completed.terminal, "COMPLETE");
+  assert.equal(completed.next_role, "STOP");
 });
