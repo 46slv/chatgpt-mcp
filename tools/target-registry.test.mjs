@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { captureCurrentChat, emptyRegistry, freezeTarget, parseChatGPTTargetUrl, resolveTarget, setTarget, verifyFrozenTarget } from "./target-registry.mjs";
+import { captureCurrentChat, emptyRegistry, freezeTarget, isValidTargetAlias, loadRegistryLenient, parseChatGPTTargetUrl, resolveTarget, setTarget, validateRegistry, verifyFrozenTarget } from "./target-registry.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { runIterativeLocalWorker } from "./local-worker-iterative-runner.mjs";
 
 test("prepared ChatGPT URL parser accepts direct and project-scoped canonical forms", () => {
@@ -104,4 +107,71 @@ test("resume verification fails closed when prepared alias is missing or changed
   assert.throws(() => verifyFrozenTarget(frozen, { registry: changed }), error => error.code === "TARGET_FROZEN_MISMATCH");
   const same = emptyRegistry(); setTarget(same, "prepared", "https://chatgpt.com/c/old-1");
   assert.deepEqual(verifyFrozenTarget(frozen, { registry: same }), frozen);
+});
+
+function writeTempRegistry(value) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "devexec-target-test-"));
+  const file = path.join(dir, "targets.json");
+  fs.writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value), "utf8");
+  return file;
+}
+
+const GOOD_URL = "https://chatgpt.com/c/6a9ba452-8b64-83e8-a7f6-e5704521360b";
+
+function mixedRegistry() {
+  return {
+    schema_version: 1,
+    default_target: "good",
+    targets: {
+      good: { transport: "chatgpt-web", title: "Good", chat_url: GOOD_URL, conversation_id: "6a9ba452-8b64-83e8-a7f6-e5704521360b" },
+      "bad-url": { transport: "chatgpt-web", chat_url: "https://chatgpt.com/g/g-p-slug/c/ZZZ/project-extra/wrong" },
+      "bad-id": { transport: "chatgpt-web", chat_url: GOOD_URL, conversation_id: "mismatch" },
+      "bad-transport": { transport: "carrier-pigeon", chat_url: GOOD_URL },
+      "../evil": { transport: "chatgpt-web", chat_url: GOOD_URL },
+    },
+  };
+}
+
+test("alias charset rejects traversal and unsafe names", () => {
+  assert.equal(isValidTargetAlias("good"), true);
+  assert.equal(isValidTargetAlias("a1._-"), true);
+  for (const bad of ["", "../evil", "a/b", "__proto__", "_lead", null, undefined, 7]) {
+    assert.equal(isValidTargetAlias(bad), false);
+  }
+});
+
+test("lenient load isolates broken entries and keeps valid ones", () => {
+  const file = writeTempRegistry(mixedRegistry());
+  const { registry, errors, invalidAliases, invalidDefault } = loadRegistryLenient(file);
+  assert.deepEqual(Object.keys(registry.targets), ["good"]);
+  assert.equal(registry.default_target, "good");
+  assert.equal(invalidDefault, null);
+  assert.equal(errors.length, 4);
+  for (const entry of errors) {
+    assert.equal(entry.code, "TARGET_ENTRY_INVALID");
+    assert.ok(entry.error.length <= 200);
+  }
+  assert.deepEqual([...invalidAliases].sort(), ["../evil", "bad-id", "bad-transport", "bad-url"]);
+  assert.equal(resolveTarget({ explicitTarget: "good", registry }).target_id, "good");
+});
+
+test("lenient load nulls an invalid default instead of falling through", () => {
+  const raw = mixedRegistry();
+  raw.default_target = "bad-url";
+  const file = writeTempRegistry(raw);
+  const { registry, invalidDefault, errors } = loadRegistryLenient(file);
+  assert.equal(registry.default_target, null);
+  assert.equal(invalidDefault, "bad-url");
+  assert.ok(errors.some((e) => e.code === "TARGET_DEFAULT_INVALID"));
+});
+
+test("lenient load fails closed on envelope corruption, not on entries", () => {
+  assert.throws(() => loadRegistryLenient(writeTempRegistry("{oops")), /readable JSON/);
+  assert.throws(() => loadRegistryLenient(writeTempRegistry({ schema_version: 99, targets: {} })), /schema_version/);
+  const missing = loadRegistryLenient(path.join(os.tmpdir(), "devexec-target-test-no-such-dir", "targets.json"));
+  assert.deepEqual(missing.registry.targets, {});
+});
+
+test("strict validation still rejects mixed registries (regression guard)", () => {
+  assert.throws(() => validateRegistry(mixedRegistry()));
 });

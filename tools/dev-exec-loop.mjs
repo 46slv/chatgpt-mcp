@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { resolveTarget } from "./target-registry.mjs";
+import { isValidTargetAlias, loadRegistryLenient, resolveTarget } from "./target-registry.mjs";
 import { parseNaturalDirective } from "./dev-exec-natural-protocol.mjs";
 import { loadMissionEscalation, appendMissionEscalationToReport } from "./devexec-mission-supervisor-envelope.mjs";
 import { loadOpsSyncPacket, appendOpsSyncToReport } from "./devexec-ops-sync-envelope.mjs";
@@ -175,9 +175,21 @@ function freezeRunTarget(state) {
     return state.target;
   }
 
+  const lenient = loadRegistryLenient();
+  if (EXPLICIT_TARGET_ALIAS !== null && (!isValidTargetAlias(EXPLICIT_TARGET_ALIAS) || lenient.invalidAliases.includes(EXPLICIT_TARGET_ALIAS))) {
+    const invalidError = new Error(`Target alias is not usable: ${EXPLICIT_TARGET_ALIAS}`);
+    invalidError.code = "TARGET_ENTRY_INVALID";
+    throw invalidError;
+  }
+  if (EXPLICIT_TARGET_ALIAS === null && lenient.invalidDefault !== null) {
+    const invalidError = new Error(`Target alias is not usable: ${lenient.invalidDefault}`);
+    invalidError.code = "TARGET_ENTRY_INVALID";
+    throw invalidError;
+  }
   const resolved = resolveTarget({
     explicitTarget: EXPLICIT_TARGET_ALIAS,
-    cwd: PROBE_ROOT
+    cwd: PROBE_ROOT,
+    registry: lenient.registry
   });
 
   state.target = {
