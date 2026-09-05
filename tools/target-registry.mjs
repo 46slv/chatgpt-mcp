@@ -53,6 +53,73 @@ export function loadRegistry(registryPath = defaultRegistryPath()) {
   if (!fs.existsSync(registryPath)) return emptyRegistry();
   return validateRegistry(JSON.parse(fs.readFileSync(registryPath, "utf8")));
 }
+export function isValidTargetAlias(name) {
+  return typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name);
+}
+
+function invalidEntry(alias, error) {
+  const reason = String((error && error.message) || error || "invalid target entry");
+  return { alias: String(alias), code: "TARGET_ENTRY_INVALID", error: reason.length > 200 ? reason.slice(0, 200) : reason };
+}
+
+export function validateTargetEntry(name, target) {
+  if (!isValidTargetAlias(name) || !target || typeof target !== "object" || Array.isArray(target)) {
+    throw new Error(`Invalid target entry: ${String(name)}.`);
+  }
+  if (target.transport !== "chatgpt-web") throw new Error(`Unsupported transport for target ${name}.`);
+  const normalized = parseChatGPTTargetUrl(target.chat_url);
+  if (target.conversation_id !== undefined && target.conversation_id !== normalized.conversation_id) {
+    throw new Error(`Target conversation_id does not match alias ${name}.`);
+  }
+  return normalized;
+}
+
+/**
+ * Lenient registry read for list/observer/resolve paths. Envelope failures
+ * (unreadable JSON, wrong schema) still throw fail-closed; per-entry
+ * failures are isolated so one broken entry never hides valid targets.
+ * Write paths must keep using strict loadRegistry/saveRegistry: this loader
+ * never repairs, deletes, or rewrites anything on disk.
+ */
+export function loadRegistryLenient(registryPath = defaultRegistryPath()) {
+  if (!fs.existsSync(registryPath)) {
+    return { registry: emptyRegistry(), errors: [], invalidAliases: [], invalidDefault: null, registryPath };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Target registry is not readable JSON: ${error.message}`);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Target registry must be an object.");
+  if (raw.schema_version !== SCHEMA_VERSION) throw new Error(`Unsupported target registry schema_version: ${raw.schema_version}`);
+  if (!raw.targets || typeof raw.targets !== "object" || Array.isArray(raw.targets)) throw new Error("Target registry targets must be an object.");
+  const registry = { schema_version: SCHEMA_VERSION, default_target: null, targets: {} };
+  const errors = [];
+  const invalidAliases = [];
+  for (const [name, target] of Object.entries(raw.targets)) {
+    try {
+      validateTargetEntry(name, target);
+      registry.targets[name] = target;
+    } catch (error) {
+      errors.push(invalidEntry(name, error));
+      invalidAliases.push(String(name));
+    }
+  }
+  let invalidDefault = null;
+  const def = raw.default_target ?? null;
+  if (def !== null) {
+    if (typeof def !== "string" || !Object.prototype.hasOwnProperty.call(registry.targets, def)) {
+      invalidDefault = typeof def === "string" ? def : String(def);
+      const reason = `default_target is not a usable entry: ${invalidDefault}`;
+      errors.push({ alias: invalidDefault, code: "TARGET_DEFAULT_INVALID", error: reason.length > 200 ? reason.slice(0, 200) : reason });
+    } else {
+      registry.default_target = def;
+    }
+  }
+  return { registry, errors, invalidAliases, invalidDefault, registryPath };
+}
+
 
 export function saveRegistry(registry, registryPath = defaultRegistryPath()) {
   validateRegistry(registry);

@@ -10,6 +10,7 @@
     "dev": "tsc --watch",
     "test:devexec": "npm run build && node --test \"tools/*.test.mjs\"",
     "test:portability": "npm run build && node --test tools/portability.test.mjs",
+    "console:native": "node tools/devexec-native-console.mjs",
     "check:preflight": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/devexec-preflight.ps1",
     "test": "npm run test:devexec && npm run test:portability && npm run check:preflight"
   },
