@@ -66,6 +66,25 @@ test("crash residue is inspectable and never auto-broken", () => {
   );
 });
 
+test("ownerless crash window remains inspectable and fail-closed", () => {
+  const root = tmp();
+  const held = acquireMissionTransitionLock({ stateDir: root, missionId: "mission-ownerless", timeoutMs: 0 });
+  const lockPath = held.lock_path;
+  held.release();
+
+  // Simulate a process dying after mkdir(lockPath) wins the mutex but before
+  // owner.json is published. This residue must remain visible and must not be
+  // auto-broken by another acquisition attempt.
+  fs.mkdirSync(lockPath, { mode: 0o700 });
+  const observed = inspectMissionTransitionLock({ stateDir: root, missionId: "mission-ownerless" });
+  assert.equal(observed.lock_path, lockPath);
+  assert.equal(observed.owner, null);
+  assert.throws(
+    () => acquireMissionTransitionLock({ stateDir: root, missionId: "mission-ownerless", timeoutMs: 0 }),
+    (error) => error instanceof MissionTransitionLockError && error.code === "MISSION_TRANSITION_BUSY",
+  );
+});
+
 test("owner metadata replacement is never unlinked by the original owner", () => {
   const root = tmp();
   const held = acquireMissionTransitionLock({ stateDir: root, missionId: "mission-replaced", timeoutMs: 0 });
