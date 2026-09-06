@@ -91,13 +91,16 @@ export function assertFixedTarget(taskChatBinding) {
 }
 
 // ---- canary payload: asks ChatGPT for the EXISTING devexec.codex-prompt CONTINUE envelope ----
-export function buildCanaryChatGPTPayload({ report, relay_request_id, report_sha256, nonce, mission_id, task_id } = {}) {
+export function buildCanaryChatGPTPayload({ report, relay_request_id, report_sha256, nonce, mission_id, task_id, headline, instruction, expect } = {}) {
   const body = requiredText(report, "report");
   const requestId = requiredText(relay_request_id, "relay_request_id");
   const hash = requiredText(report_sha256, "report_sha256");
   const tag = requiredText(nonce, "nonce");
+  const head = headline === undefined ? "This is a Dev Exec supervisor relay canary." : requiredText(headline, "headline");
+  const expected = expect === undefined ? null : requiredText(expect, "expect");
+  const cont = instruction === undefined ? (expected === null ? `Reply with exactly: ROUNDTRIP-RETURN-OK ${tag}` : `Reply with exactly: ${expected}`) : requiredText(instruction, "instruction");
   return [
-    "This is a Dev Exec supervisor relay canary.",
+    head,
     "",
     "Below is the report from the currently bound Codex task.",
     "",
@@ -112,7 +115,7 @@ export function buildCanaryChatGPTPayload({ report, relay_request_id, report_sha
     `  "relay_request_id": "${requestId}",`,
     `  "report_sha256": "${hash}",`,
     '  "decision": "CONTINUE",',
-    `  "prompt": "Reply with exactly: ROUNDTRIP-RETURN-OK ${tag}"`,
+    `  "prompt": ${JSON.stringify(cont)},`,
     "}",
     "No extra text, no second object, no code fence.",
   ].join("\n");
