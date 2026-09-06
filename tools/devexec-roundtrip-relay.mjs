@@ -78,8 +78,8 @@ export function createCanaryBindings({ mission_id, task_id, thread_id, working_d
   return Object.freeze({ taskChatBinding, continuationBinding });
 }
 
-export function createCanaryRuntimeBinding({ executable_path, version, capabilities, bound_at, provenance = "explicit-canary-runtime" } = {}) {
-  return createCodexRuntimeBinding({ executable_path, version, capabilities, bound_at, provenance });
+export function createCanaryRuntimeBinding({ executable_path, version, capabilities, bound_at, provenance = "explicit-canary-runtime", fingerprint_files } = {}) {
+  return createCodexRuntimeBinding({ executable_path, version, capabilities, bound_at, provenance, ...(fingerprint_files === undefined ? {} : { fingerprint_files }) });
 }
 
 // Mission fixed-target gate: drift fails closed.

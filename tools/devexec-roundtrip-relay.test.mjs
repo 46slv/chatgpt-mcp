@@ -13,6 +13,7 @@ import {
   claimChatGPTSendSlot,
   createCanaryBindings,
   createCanaryCodexReturn,
+  createCanaryRuntimeBinding,
 
   sha256Digest,
   validateCanaryContinue,
@@ -177,4 +178,26 @@ test("happy-path composition ends in a binding-validated return for the same thr
   assert.match(text, /Do not create a new task\/thread\./);
   const request = createCanaryCodexReturn({ continuationBinding, prompt: text, response_id: REQUEST_ID });
   assert.equal(request.thread_id, THREAD_A);
+});
+
+test("ps1 shim runtime binding carries underlying implementation evidence", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-shim-"));
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const shim = path.join(dir, "codex-test.ps1");
+  const impl = path.join(dir, "codex-test.js");
+  fs.writeFileSync(shim, "shim\n", "utf8");
+  fs.writeFileSync(impl, "impl\n", "utf8");
+  assert.throws(
+    () => createCanaryRuntimeBinding({
+      executable_path: shim, version: "fixture",
+      capabilities: { queue: false, resume: true }, bound_at: BOUND_AT,
+    }),
+    (error) => error.code === "CODEX_RUNTIME_BINDING_INVALID",
+  );
+  const bound = createCanaryRuntimeBinding({
+    executable_path: shim, version: "fixture",
+    capabilities: { queue: false, resume: true }, bound_at: BOUND_AT,
+    fingerprint_files: [shim, impl],
+  });
+  assert.equal(bound.capabilities.resume, true);
 });
