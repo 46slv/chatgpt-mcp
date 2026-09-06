@@ -123,6 +123,10 @@ export function inspectMissionTransitionLock({ stateDir, missionId } = {}) {
   if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) {
     throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_UNSAFE", "transition lock path is unsafe");
   }
+  // A process can die after the atomic lock-directory claim but before owner
+  // metadata is published. Keep that residue visible to operators instead of
+  // leaking a raw ENOENT; acquisition remains fail-closed on the directory.
+  if (!fs.existsSync(ownerFile)) return { lock_path: lockPath, owner: null };
   return { lock_path: lockPath, owner: { ...readOwner(ownerFile, missionKey) } };
 }
 
