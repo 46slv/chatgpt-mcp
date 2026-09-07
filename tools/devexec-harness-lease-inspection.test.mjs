@@ -168,3 +168,37 @@ test("pre-receipt dead-owner classification never authorizes replay or receipt m
   assert.equal(fs.existsSync(f.receiptFile), false);
   assert.equal(fs.existsSync(f.leaseDirectory), true);
 });
+
+test("no lease is explicit and inspection does not create parent state", (t) => {
+  const f = fixture(t, "no-lease");
+  const state = inspectOuterLeaseState(options(f), { isProcessAlive: () => { throw new Error("must not probe"); } });
+  assert.equal(state.state, "NO_LEASE");
+  assert.equal(state.receipt_state, "ABSENT");
+  assert.equal(fs.existsSync(f.leaseDirectory), false);
+  assert.equal(fs.existsSync(f.receiptFile), false);
+});
+
+test("valid dead owner with non-pending receipt remains explicit residue and does not authorize recovery", (t) => {
+  const f = fixture(t, "dead-receipt-present");
+  writeOwner(f);
+  writeReceipt(f, { pending: false });
+  const receiptBefore = fs.readFileSync(f.receiptFile, "utf8");
+  const state = inspectOuterLeaseState(options(f), { isProcessAlive: () => false });
+  assert.equal(state.state, "DEAD_VALID_OWNER_RECEIPT_PRESENT");
+  assert.equal(state.receipt_state, "PRESENT_NO_PENDING");
+  assert.equal(state.receipt_status, "RUNNING");
+  assert.equal(fs.readFileSync(f.receiptFile, "utf8"), receiptBefore);
+  assert.equal(fs.existsSync(f.leaseDirectory), true);
+});
+
+test("valid dead owner with malformed receipt is explicit ambiguous residue", (t) => {
+  const f = fixture(t, "dead-ambiguous-receipt");
+  writeOwner(f);
+  fs.writeFileSync(f.receiptFile, "{not-json\n", "utf8");
+  const receiptBefore = fs.readFileSync(f.receiptFile, "utf8");
+  const state = inspectOuterLeaseState(options(f), { isProcessAlive: () => false });
+  assert.equal(state.state, "DEAD_VALID_OWNER_RECEIPT_AMBIGUOUS");
+  assert.equal(state.receipt_state, "AMBIGUOUS");
+  assert.equal(fs.readFileSync(f.receiptFile, "utf8"), receiptBefore);
+  assert.equal(fs.existsSync(f.leaseDirectory), true);
+});
