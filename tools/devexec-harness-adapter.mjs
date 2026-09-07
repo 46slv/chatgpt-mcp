@@ -7,6 +7,7 @@ import {
   createOuterReceipt,
   dedupeOuterCycle,
   runOuterCycles as runOuterCyclesCore,
+  validateReceipt,
   verifyHarnessBinding,
 } from "./devexec-harness-adapter-core.mjs";
 
@@ -27,15 +28,6 @@ const OUTER_LEASE_KEYS = [
   "target_base_sha",
   "target_ref",
   "acquired_at",
-];
-const BINDING_KEYS = [
-  "harness_repository",
-  "harness_commit_sha",
-  "target_repository",
-  "target_ref",
-  "target_base_sha",
-  "working_directory",
-  "evidence_root",
 ];
 
 const requiredString = (value, label) => {
@@ -122,31 +114,14 @@ function validateLeaseOwner(owner, expected, receiptFile) {
   return owner;
 }
 
-function sameBinding(left, right) {
-  return BINDING_KEYS.every((key) => left?.[key] === right?.[key]);
-}
-
 function inspectReceiptState(receiptFile, expected) {
   if (!fs.existsSync(receiptFile)) return { receipt_state: "ABSENT" };
   try {
-    const receipt = requireObject(readJson(receiptFile), "OUTER_RECEIPT_INSPECTION");
-    if (receipt.schema !== OUTER_SCHEMA) throw new Error("OUTER_RECEIPT_INSPECTION_SCHEMA_MISMATCH");
-    for (const key of ["outer_run_id", "goal_identity", "task_identity", "project_adapter"]) {
-      if (receipt[key] !== expected[key]) throw new Error(`OUTER_RECEIPT_INSPECTION_IDENTITY_MISMATCH:${key}`);
-    }
-    const binding = verifyHarnessBinding(receipt.harness_binding);
-    if (!sameBinding(binding, expected.binding)) throw new Error("OUTER_RECEIPT_INSPECTION_BINDING_MISMATCH");
+    const receipt = validateReceipt(readJson(receiptFile), expected);
     if (receipt.pending_cycle === null) {
-      return { receipt_state: "PRESENT_NO_PENDING", receipt_status: typeof receipt.status === "string" ? receipt.status : null };
+      return { receipt_state: "PRESENT_NO_PENDING", receipt_status: receipt.status };
     }
-    const pending = requireObject(receipt.pending_cycle, "OUTER_RECEIPT_INSPECTION_PENDING");
-    if (pending.harness_commit_sha !== expected.binding.harness_commit_sha) throw new Error("OUTER_RECEIPT_INSPECTION_PENDING_HARNESS_MISMATCH");
-    if (pending.target_base_sha !== expected.binding.target_base_sha) throw new Error("OUTER_RECEIPT_INSPECTION_PENDING_TARGET_MISMATCH");
-    if (pending.target_ref !== expected.binding.target_ref) throw new Error("OUTER_RECEIPT_INSPECTION_PENDING_REF_MISMATCH");
-    if (pending.task_id !== expected.task_identity || pending.goal_id !== expected.goal_identity) {
-      throw new Error("OUTER_RECEIPT_INSPECTION_PENDING_IDENTITY_MISMATCH");
-    }
-    return { receipt_state: "PENDING", receipt_status: typeof receipt.status === "string" ? receipt.status : null };
+    return { receipt_state: "PENDING", receipt_status: receipt.status };
   } catch (error) {
     return { receipt_state: "AMBIGUOUS", receipt_error: error?.message || String(error) };
   }
