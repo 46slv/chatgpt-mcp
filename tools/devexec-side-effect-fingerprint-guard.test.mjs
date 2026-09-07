@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
 import {
+  deriveSideEffectFingerprint,
   inspectSideEffectFingerprint,
   runSideEffectWithFingerprintGuard,
 } from "./devexec-side-effect-fingerprint-guard.mjs";
@@ -169,4 +172,183 @@ test("ambiguous transport can converge to PASS only through authoritative matchi
   assert.equal(result.record.status, "SUCCEEDED");
   assert.match(result.record.diagnostic, /timeout after commit/);
   assert.equal(calls, 1);
+});
+
+
+function runConcurrentWorker({ moduleUrl, stateDir, actionValue, shared }) {
+  return new Promise((resolve, reject) => {
+    const source = `
+      const fs = require("node:fs");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const shared = new Int32Array(workerData.shared);
+      const originalOpenSync = fs.openSync.bind(fs);
+      let fenced = false;
+      fs.openSync = function(file, flags, ...args) {
+        if (!fenced && flags === "wx" && (String(file).endsWith(".json") || String(file).endsWith(".claim"))) {
+          fenced = true;
+          const arrived = Atomics.add(shared, 0, 1) + 1;
+          Atomics.notify(shared, 0);
+          const deadline = Date.now() + 5000;
+          while (Atomics.load(shared, 0) < 2) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) throw new Error("equivalence race barrier timeout");
+            Atomics.wait(shared, 0, Atomics.load(shared, 0), Math.min(remaining, 50));
+          }
+        }
+        return originalOpenSync(file, flags, ...args);
+      };
+      (async () => {
+        const mod = await import(workerData.moduleUrl);
+        const result = await mod.runSideEffectWithFingerprintGuard({
+          stateDir: workerData.stateDir,
+          action: workerData.actionValue,
+          readControlIdentity: async () => ({ identity: "ledger:control-v1", decision: "ALLOW" }),
+          readPrecondition: async () => "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          execute: async () => {
+            Atomics.add(shared, 1, 1);
+            return { ok: true };
+          },
+          readBack: async () => ({ state: "MATCH", identity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }),
+        });
+        parentPort.postMessage({ ok: true, decision: result.decision, reason_code: result.reason_code });
+      })().catch((error) => {
+        parentPort.postMessage({ ok: false, code: error.code || null, message: String(error.message || error) });
+      });
+    `;
+    const worker = new Worker(source, {
+      eval: true,
+      workerData: { moduleUrl, stateDir, actionValue, shared },
+    });
+    let settled = false;
+    worker.on("message", (message) => {
+      if (settled) return;
+      settled = true;
+      resolve(message);
+    });
+    worker.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    worker.on("exit", (code) => {
+      if (!settled && code !== 0) reject(new Error(`race worker exited ${code}`));
+    });
+  });
+}
+
+test("concurrent equivalent actions with distinct fingerprints cross the side-effect boundary at most once", async () => {
+  const root = tmp();
+  const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const shared = new Int32Array(sharedBuffer);
+  const moduleUrl = pathToFileURL(path.join(import.meta.dirname, "devexec-side-effect-fingerprint-guard.mjs")).href;
+  const [first, second] = await Promise.all([
+    runConcurrentWorker({
+      moduleUrl,
+      stateDir: root,
+      actionValue: action({ prior_attempt_id: "attempt-a", distinct_reason: "concurrent-a" }),
+      shared: sharedBuffer,
+    }),
+    runConcurrentWorker({
+      moduleUrl,
+      stateDir: root,
+      actionValue: action({ prior_attempt_id: "attempt-b", distinct_reason: "concurrent-b" }),
+      shared: sharedBuffer,
+    }),
+  ]);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.equal(Atomics.load(shared, 0), 2);
+  assert.equal(Atomics.load(shared, 1), 1, `results=${JSON.stringify([first, second])}`);
+  assert.ok([first.decision, second.decision].includes("PASS"));
+});
+
+
+test("orphaned equivalence ownership remains fail-closed and is never replayed", async () => {
+  const root = tmp();
+  const derived = deriveSideEffectFingerprint(action());
+  const originalOpenSync = fs.openSync.bind(fs);
+  const firstHarness = harness();
+  fs.openSync = function(file, flags, ...args) {
+    if (flags === "wx" && path.basename(String(file)) === `${derived.fingerprint}.json`) {
+      const error = new Error("injected fingerprint persistence failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalOpenSync(file, flags, ...args);
+  };
+  try {
+    await assert.rejects(
+      () => runSideEffectWithFingerprintGuard({ stateDir: root, action: action(), ...firstHarness }),
+      (error) => error?.code === "SIDE_EFFECT_GUARD_FINGERPRINT_RECORD_FAILED",
+    );
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(firstHarness.calls(), 0);
+
+  const secondHarness = harness();
+  const second = await runSideEffectWithFingerprintGuard({
+    stateDir: root,
+    action: action({ prior_attempt_id: "after-orphan", distinct_reason: "must-not-replay" }),
+    ...secondHarness,
+  });
+  assert.equal(second.decision, "STOP");
+  assert.equal(second.reason_code, "AMBIGUOUS_EQUIVALENCE_OWNER");
+  assert.equal(second.record, null);
+  assert.equal(secondHarness.calls(), 0);
+});
+
+test("corrupt equivalence ownership fails closed before any connector call", async () => {
+  const root = tmp();
+  const derived = deriveSideEffectFingerprint(action());
+  const claimRoot = path.join(root, "side-effect-fingerprints-v1", "equivalence-claims-v1");
+  fs.mkdirSync(claimRoot, { recursive: true });
+  fs.writeFileSync(path.join(claimRoot, `${derived.equivalence_key}.claim`), "tampered", "utf8");
+
+  const h = harness();
+  await assert.rejects(
+    () => runSideEffectWithFingerprintGuard({ stateDir: root, action: action(), ...h }),
+    (error) => error?.code === "SIDE_EFFECT_GUARD_CORRUPT",
+  );
+  assert.equal(h.calls(), 0);
+});
+
+test("an in-flight equivalent action blocks a second distinct fingerprint without replay", async () => {
+  const root = tmp();
+  let releaseExecute;
+  let enteredExecute;
+  const entered = new Promise((resolve) => { enteredExecute = resolve; });
+  const hold = new Promise((resolve) => { releaseExecute = resolve; });
+  let firstCalls = 0;
+
+  const firstPromise = runSideEffectWithFingerprintGuard({
+    stateDir: root,
+    action: action({ prior_attempt_id: "first", distinct_reason: "first-owner" }),
+    readControlIdentity: async () => ({ identity: "ledger:control-v1", decision: "ALLOW" }),
+    readPrecondition: async () => action().expected_precondition,
+    execute: async () => {
+      firstCalls += 1;
+      enteredExecute();
+      await hold;
+      return { ok: true };
+    },
+    readBack: async () => ({ state: "MATCH", identity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }),
+  });
+  await entered;
+
+  const secondHarness = harness();
+  const second = await runSideEffectWithFingerprintGuard({
+    stateDir: root,
+    action: action({ prior_attempt_id: "second", distinct_reason: "concurrent-retry" }),
+    ...secondHarness,
+  });
+  assert.equal(second.decision, "STOP");
+  assert.equal(second.reason_code, "AMBIGUOUS_PRIOR_ATTEMPT");
+  assert.equal(second.record.status, "IN_FLIGHT");
+  assert.equal(secondHarness.calls(), 0);
+
+  releaseExecute();
+  const first = await firstPromise;
+  assert.equal(first.decision, "PASS");
+  assert.equal(firstCalls, 1);
 });

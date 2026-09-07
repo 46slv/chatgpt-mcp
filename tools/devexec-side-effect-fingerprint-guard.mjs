@@ -190,12 +190,14 @@ function replaceRecord(file, record, claimToken) {
   return readRecord(file, fingerprint);
 }
 
-function pathsFor(stateDir, fingerprint) {
+function pathsFor(stateDir, fingerprint, equivalenceKeyValue = null) {
   if (typeof stateDir !== "string" || !stateDir.trim()) {
     throw new SideEffectGuardError("SIDE_EFFECT_GUARD_STATE_DIR_REQUIRED", "stateDir is required");
   }
   const root = path.join(path.resolve(stateDir), "side-effect-fingerprints-v1");
-  return { root, file: path.join(root, `${fingerprint}.json`) };
+  const claimRoot = path.join(root, "equivalence-claims-v1");
+  const claimFile = equivalenceKeyValue === null ? null : path.join(claimRoot, `${equivalenceKeyValue}.claim`);
+  return { root, file: path.join(root, `${fingerprint}.json`), claimRoot, claimFile };
 }
 
 function equivalenceKey(action) {
@@ -218,6 +220,49 @@ function listEquivalent(root, key) {
     if (record.equivalence_key === key) output.push(record);
   }
   return output;
+}
+
+function validateEquivalenceClaim(file) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink?.() || stat.isReparsePoint?.() || (Number.isInteger(stat.nlink) && stat.nlink !== 1)) {
+    throw new SideEffectGuardError("SIDE_EFFECT_GUARD_CORRUPT", "equivalence claim is not a private regular file");
+  }
+  if (stat.size !== 0) {
+    throw new SideEffectGuardError("SIDE_EFFECT_GUARD_CORRUPT", "equivalence claim payload must be empty");
+  }
+}
+
+function acquireEquivalenceClaim(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "wx", 0o600);
+    // The zero-byte file's exclusive directory entry is the ownership token.
+    // It is intentionally never deleted automatically; crash residue must
+    // block a second equivalent side effect until an operator adjudicates it.
+    fs.fsyncSync(fd);
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      validateEquivalenceClaim(file);
+      return false;
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function outcomeForEquivalentState(root, equivalenceKeyValue) {
+  const equivalent = listEquivalent(root, equivalenceKeyValue);
+  if (equivalent.length > 1) {
+    throw new SideEffectGuardError("SIDE_EFFECT_GUARD_CORRUPT", "multiple records exist for one side-effect equivalence key");
+  }
+  if (equivalent.length === 1) return outcomeFromExisting(equivalent[0]);
+  return {
+    decision: "STOP",
+    reason_code: "AMBIGUOUS_EQUIVALENCE_OWNER",
+    record: null,
+  };
 }
 
 export function deriveSideEffectFingerprint(actionInput) {
@@ -281,7 +326,7 @@ export async function runSideEffectWithFingerprintGuard({
   }
   const derived = deriveSideEffectFingerprint(actionInput);
   const { action, fingerprint, equivalence_key } = derived;
-  const { root, file } = pathsFor(stateDir, fingerprint);
+  const { root, file, claimRoot, claimFile } = pathsFor(stateDir, fingerprint, equivalence_key);
 
   let observedControl;
   try {
@@ -293,7 +338,23 @@ export async function runSideEffectWithFingerprintGuard({
 
   ensurePrivateDirectory(root);
   const equivalent = listEquivalent(root, equivalence_key);
-  if (equivalent.length > 0) return outcomeFromExisting(equivalent.at(-1));
+  if (equivalent.length > 1) {
+    throw new SideEffectGuardError("SIDE_EFFECT_GUARD_CORRUPT", "multiple records exist for one side-effect equivalence key");
+  }
+  if (equivalent.length === 1) return outcomeFromExisting(equivalent[0]);
+
+  // Ownership is acquired atomically on the equivalence key before any
+  // full-fingerprint record or connector call can occur. Retry metadata may
+  // change the full fingerprint, but it can never create a second owner.
+  ensurePrivateDirectory(claimRoot);
+  let ownsEquivalence;
+  try {
+    ownsEquivalence = acquireEquivalenceClaim(claimFile);
+  } catch (error) {
+    if (error instanceof SideEffectGuardError) throw error;
+    throw new SideEffectGuardError("SIDE_EFFECT_GUARD_EQUIVALENCE_OWNER_FAILED", "equivalence ownership could not be recorded", { cause: error });
+  }
+  if (!ownsEquivalence) return outcomeForEquivalentState(root, equivalence_key);
 
   const claimToken = crypto.randomBytes(16).toString("hex");
   if (!HEX32.test(claimToken)) throw new Error("unreachable claim token");
@@ -319,8 +380,16 @@ export async function runSideEffectWithFingerprintGuard({
   try {
     writeExclusiveRecord(file, record);
   } catch (error) {
-    if (error?.code === "EEXIST") return outcomeFromExisting(readRecord(file, fingerprint));
+    if (error?.code === "EEXIST") {
+      const existing = readRecord(file, fingerprint);
+      if (existing.equivalence_key !== equivalence_key) {
+        throw new SideEffectGuardError("SIDE_EFFECT_GUARD_CORRUPT", "fingerprint record conflicts with equivalence ownership");
+      }
+      return outcomeFromExisting(existing);
+    }
     if (error instanceof SideEffectGuardError) throw error;
+    // Keep the equivalence claim. A crash or write failure between ownership
+    // and full-record publication must not reopen the side-effect gate.
     throw new SideEffectGuardError("SIDE_EFFECT_GUARD_FINGERPRINT_RECORD_FAILED", "pre-action fingerprint could not be recorded", { cause: error });
   }
   record = readRecord(file, fingerprint);
