@@ -128,7 +128,7 @@ async function waitForFile(file, workers, timeoutMs = 5000) {
 
 test("completion holding the Mission lock commits before a racing follow-up, which is then terminal-rejected", { timeout: 15000 }, async () => {
   const root = tmp();
-  const store = new DevExecMissionStore({ stateDir: root });
+  const store = new DevExecMissionStore({ stateDir: root, now: () => new Date("2026-09-06T23:59:00.000Z") });
   const created = store.submitOperatorEvent(operatorEvent({ eventId: "evt-race-a", requestId: "req-race-a", idempotencyKey: "idem-race-a" }));
   const marker = path.join(root, "completion-held.marker");
   const release = path.join(root, "completion-release.marker");
@@ -179,7 +179,7 @@ test("completion holding the Mission lock commits before a racing follow-up, whi
 
 test("follow-up holding the Mission lock defers before a racing completion, which then refuses the pending event", { timeout: 15000 }, async () => {
   const root = tmp();
-  const store = new DevExecMissionStore({ stateDir: root });
+  const store = new DevExecMissionStore({ stateDir: root, now: () => new Date("2026-09-06T23:59:00.000Z") });
   const created = store.submitOperatorEvent(operatorEvent({ eventId: "evt-race-b", requestId: "req-race-b", idempotencyKey: "idem-race-b" }));
   const follow = operatorEvent({
     eventId: "evt-race-b-follow",
