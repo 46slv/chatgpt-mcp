@@ -98,6 +98,38 @@ function writeReceipt(f, { pending = false } = {}) {
     cycles: [],
   };
   fs.writeFileSync(f.receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  return receipt;
+}
+
+async function assertParseableMalformedReceiptFailsClosed(t, name, mutate, expectedError) {
+  const f = fixture(t, name);
+  writeOwner(f);
+  const receipt = writeReceipt(f);
+  mutate(receipt);
+  fs.writeFileSync(f.receiptFile, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  const receiptBefore = fs.readFileSync(f.receiptFile, "utf8");
+  const ownerBefore = fs.readFileSync(f.ownerFile, "utf8");
+
+  const inspection = inspectOuterLeaseState(options(f), { isProcessAlive: () => false });
+  assert.equal(inspection.state, "DEAD_VALID_OWNER_RECEIPT_AMBIGUOUS");
+  assert.equal(inspection.receipt_state, "AMBIGUOUS");
+  assert.match(inspection.reason, expectedError);
+
+  let launches = 0;
+  await assert.rejects(
+    () => runOuterCycles({
+      ...options(f),
+      launchCycle: async () => {
+        launches += 1;
+        return {};
+      },
+    }),
+    (error) => error?.code === "OUTER_RUN_LEASE_HELD" && error?.message === "OUTER_RUN_LEASE_HELD",
+  );
+  assert.equal(launches, 0);
+  assert.equal(fs.readFileSync(f.receiptFile, "utf8"), receiptBefore);
+  assert.equal(fs.readFileSync(f.ownerFile, "utf8"), ownerBefore);
+  assert.equal(fs.existsSync(f.leaseDirectory), true);
 }
 
 test("live matching owner is inspectable without mutating lease or receipt", (t) => {
@@ -201,4 +233,31 @@ test("valid dead owner with malformed receipt is explicit ambiguous residue", (t
   assert.equal(state.receipt_state, "AMBIGUOUS");
   assert.equal(fs.readFileSync(f.receiptFile, "utf8"), receiptBefore);
   assert.equal(fs.existsSync(f.leaseDirectory), true);
+});
+
+test("parseable receipt missing a canonical required field is ambiguous and cannot replay", async (t) => {
+  await assertParseableMalformedReceiptFailsClosed(
+    t,
+    "dead-parseable-missing-field",
+    (receipt) => { delete receipt.max_cycles; },
+    /OUTER_RECEIPT_REQUIRED_FIELD_MISSING:max_cycles/,
+  );
+});
+
+test("parseable receipt with invalid status is ambiguous and cannot replay", async (t) => {
+  await assertParseableMalformedReceiptFailsClosed(
+    t,
+    "dead-parseable-invalid-status",
+    (receipt) => { receipt.status = "BROKEN"; },
+    /OUTER_STATUS_INVALID/,
+  );
+});
+
+test("parseable receipt with malformed pending cycle is ambiguous and cannot replay", async (t) => {
+  await assertParseableMalformedReceiptFailsClosed(
+    t,
+    "dead-parseable-invalid-pending",
+    (receipt) => { receipt.pending_cycle = { cycle_index: 0 }; },
+    /OUTER_PENDING_CYCLE_REQUIRED_FIELD_MISSING:child_run_id/,
+  );
 });
