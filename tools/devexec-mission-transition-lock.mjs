@@ -154,7 +154,26 @@ export function inspectMissionTransitionLock({ stateDir, missionId } = {}) {
   // A process can die after the atomic lock-directory claim but before owner
   // metadata is published. Keep that residue visible to operators instead of
   // leaking a raw ENOENT; acquisition remains fail-closed on the directory.
-  if (!fs.existsSync(ownerFile)) return { lock_path: lockPath, owner: null };
+  if (!fs.existsSync(ownerFile)) {
+    const entries = fs.readdirSync(lockPath);
+    if (entries.length === 0) return { lock_path: lockPath, owner: null };
+
+    // Release first moves owner.json to a nonce-bound proof path. If release
+    // then fails or crashes, surface that preserved owner instead of folding
+    // it into the indistinguishable ownerless-acquire window. Unknown or
+    // multiple residues remain fail-closed as corruption.
+    const releaseOwners = entries.filter((entry) => /^owner\.release-[a-f0-9]{32}\.json$/.test(entry));
+    if (entries.length !== 1 || releaseOwners.length !== 1) {
+      throw new MissionTransitionLockError(
+        "MISSION_TRANSITION_LOCK_CORRUPT",
+        "transition lock has ambiguous release residue",
+      );
+    }
+    return {
+      lock_path: lockPath,
+      owner: { ...readOwner(path.join(lockPath, releaseOwners[0]), missionKey) },
+    };
+  }
   return { lock_path: lockPath, owner: { ...readOwner(ownerFile, missionKey) } };
 }
 
