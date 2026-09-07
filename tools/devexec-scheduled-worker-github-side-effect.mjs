@@ -57,6 +57,14 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
 function normalizeMutation(input) {
   if (!isObject(input)) throw new ScheduledWorkerGitHubSideEffectError("SCHEDULED_WORKER_SIDE_EFFECT_INVALID", "mutation must be an object");
   const repository = bounded(input.repository, "mutation.repository");
@@ -72,11 +80,12 @@ function normalizeMutation(input) {
   if (Buffer.byteLength(payloadCanonical, "utf8") > MAX_CANONICAL_BYTES) {
     throw new ScheduledWorkerGitHubSideEffectError("SCHEDULED_WORKER_SIDE_EFFECT_INVALID", "mutation payload is too large to fingerprint safely");
   }
+  const payload = deepFreeze(JSON.parse(payloadCanonical));
   return {
     repository,
     operation,
     resource,
-    payload: input.payload,
+    payload,
     payload_fingerprint: `sha256:${sha256(payloadCanonical)}`,
     expected_precondition: bounded(input.expected_precondition, "mutation.expected_precondition"),
     expected_post_identity: bounded(input.expected_post_identity, "mutation.expected_post_identity"),
@@ -154,7 +163,7 @@ export async function runScheduledWorkerGitHubMutation({
   return deps.runSideEffectWithFingerprintGuard({
     stateDir,
     action,
-    readControlIdentity,
+    readControlIdentity: async () => readControlIdentity({ mutation, action }),
     readPrecondition: async () => readGitHubIdentity({ phase: "PRE", mutation, action }),
     execute: async () => executeGitHubMutation({ mutation, action }),
     readBack: async () => {
