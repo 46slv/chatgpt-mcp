@@ -243,7 +243,28 @@ export function acquireMissionTransitionLock({
         if (observed.nonce !== nonce || observed.owner_pid !== process.pid) {
           throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_REPLACED", "transition lock ownership changed before release");
         }
-        fs.unlinkSync(ownerFile);
+
+        // Do not unlink owner.json directly after validating it. Another actor
+        // can replace that path between the read above and unlinkSync(), which
+        // would erase foreign/ambiguous evidence and reopen the Mission gate.
+        // Move the currently published path to a nonce-bound quarantine first,
+        // then revalidate the captured bytes before deleting only that proof.
+        const releaseOwnerFile = path.join(lockPath, `owner.release-${nonce}.json`);
+        if (fs.existsSync(releaseOwnerFile)) {
+          throw new MissionTransitionLockError(
+            "MISSION_TRANSITION_RELEASE_AMBIGUOUS",
+            "transition lock release proof already exists",
+          );
+        }
+        fs.renameSync(ownerFile, releaseOwnerFile);
+        const captured = readOwner(releaseOwnerFile, missionKey);
+        if (captured.nonce !== nonce || captured.owner_pid !== process.pid) {
+          throw new MissionTransitionLockError(
+            "MISSION_TRANSITION_LOCK_REPLACED",
+            "transition lock ownership changed during release",
+          );
+        }
+        fs.unlinkSync(releaseOwnerFile);
         fs.rmdirSync(lockPath);
         released = true;
       } catch (error) {
