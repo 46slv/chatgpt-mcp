@@ -18,7 +18,13 @@ export class MissionTransitionLockError extends Error {
 }
 
 function digestMissionId(missionId) {
-  return crypto.createHash("sha256").update(String(missionId), "utf8").digest("hex");
+  if (typeof missionId !== "string" || !missionId.trim()) {
+    throw new MissionTransitionLockError(
+      "MISSION_TRANSITION_LOCK_MISSION_ID_REQUIRED",
+      "missionId is required",
+    );
+  }
+  return crypto.createHash("sha256").update(missionId, "utf8").digest("hex");
 }
 
 function monotonicMs() {
@@ -226,9 +232,9 @@ export function acquireMissionTransitionLock({
     throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_OPTIONS_INVALID", "pollMs is invalid");
   }
 
+  const missionKey = digestMissionId(missionId);
   const root = path.join(path.resolve(stateDir), "mission-transition-locks");
   ensureSafeDirectory(root, "transition lock root");
-  const missionKey = digestMissionId(missionId);
   const lockPath = path.join(root, `${missionKey}.lock`);
   const ownerFile = path.join(lockPath, "owner.json");
   const started = monotonicMs();
