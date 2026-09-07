@@ -105,9 +105,37 @@ function writeOwner(ownerFile, owner) {
   }
 }
 
-function cleanupFailedAcquire(lockPath, ownerFile) {
-  try { if (fs.existsSync(ownerFile)) fs.unlinkSync(ownerFile); } catch { /* fail closed at caller */ }
-  try { if (fs.existsSync(lockPath)) fs.rmdirSync(lockPath); } catch { /* fail closed at caller */ }
+function cleanupFailedAcquire(lockPath, ownerFile, expectedOwner) {
+  try {
+    if (!fs.existsSync(lockPath)) return;
+    const lockStat = fs.lstatSync(lockPath);
+    if (!lockStat.isDirectory() || lockStat.isSymbolicLink?.() || lockStat.isReparsePoint?.()) return;
+
+    if (!fs.existsSync(ownerFile)) {
+      if (fs.readdirSync(lockPath).length === 0) fs.rmdirSync(lockPath);
+      return;
+    }
+
+    let observed;
+    try {
+      observed = readOwner(ownerFile, expectedOwner.mission_key);
+    } catch {
+      // An unreadable/partial owner publication is ambiguous evidence. Never
+      // erase it automatically; leave the lock fail-closed for adjudication.
+      return;
+    }
+    if (observed.nonce !== expectedOwner.nonce || observed.owner_pid !== expectedOwner.owner_pid) {
+      // The owner path was replaced after our directory claim. Do not delete
+      // another actor's evidence or reopen the Mission transition race.
+      return;
+    }
+
+    fs.unlinkSync(ownerFile);
+    if (fs.readdirSync(lockPath).length === 0) fs.rmdirSync(lockPath);
+  } catch {
+    // Cleanup is best-effort only. Any unproven state remains as a blocking
+    // residue rather than being guessed away.
+  }
 }
 
 export function inspectMissionTransitionLock({ stateDir, missionId } = {}) {
@@ -194,7 +222,7 @@ export function acquireMissionTransitionLock({
     }
     writeOwner(ownerFile, owner);
   } catch (error) {
-    cleanupFailedAcquire(lockPath, ownerFile);
+    cleanupFailedAcquire(lockPath, ownerFile, owner);
     if (error instanceof MissionTransitionLockError) throw error;
     throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_IO", "failed to publish transition lock owner metadata", { cause: error });
   }
