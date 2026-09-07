@@ -146,38 +146,67 @@ export function inspectMissionTransitionLock({ stateDir, missionId } = {}) {
   const missionKey = digestMissionId(missionId);
   const lockPath = path.join(root, `${missionKey}.lock`);
   const ownerFile = path.join(lockPath, "owner.json");
-  if (!fs.existsSync(lockPath)) return null;
-  const stat = fs.lstatSync(lockPath);
-  if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) {
-    throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_UNSAFE", "transition lock path is unsafe");
+
+  // Inspection is read-only, but a legitimate owner may complete release while
+  // the directory is being observed. Retry only disappearance/path-transition
+  // races; corruption and unsafe shapes remain immediate fail-closed errors.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!fs.existsSync(lockPath)) return null;
+
+    let stat;
+    try {
+      stat = fs.lstatSync(lockPath);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+      throw error;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) {
+      throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_UNSAFE", "transition lock path is unsafe");
+    }
+
+    // A lock directory has exactly three inspectable shapes: an empty directory
+    // from the acquire-before-owner crash window, one canonical owner.json, or
+    // one nonce-bound release proof. Any mixed/unknown residue is ambiguous and
+    // must remain fail-closed instead of hiding evidence behind owner.json.
+    let entries;
+    try {
+      entries = fs.readdirSync(lockPath);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+      throw error;
+    }
+    if (entries.length === 0) return { lock_path: lockPath, owner: null };
+    if (entries.length !== 1) {
+      throw new MissionTransitionLockError(
+        "MISSION_TRANSITION_LOCK_CORRUPT",
+        "transition lock has ambiguous residue",
+      );
+    }
+
+    const [entry] = entries;
+    let inspectedOwnerFile;
+    if (entry === "owner.json") {
+      inspectedOwnerFile = ownerFile;
+    } else if (/^owner\.release-[a-f0-9]{32}\.json$/.test(entry)) {
+      inspectedOwnerFile = path.join(lockPath, entry);
+    } else {
+      throw new MissionTransitionLockError(
+        "MISSION_TRANSITION_LOCK_CORRUPT",
+        "transition lock has ambiguous residue",
+      );
+    }
+
+    try {
+      return { lock_path: lockPath, owner: { ...readOwner(inspectedOwnerFile, missionKey) } };
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+      throw error;
+    }
   }
 
-  // A lock directory has exactly three inspectable shapes: an empty directory
-  // from the acquire-before-owner crash window, one canonical owner.json, or
-  // one nonce-bound release proof. Any mixed/unknown residue is ambiguous and
-  // must remain fail-closed instead of hiding evidence behind owner.json.
-  const entries = fs.readdirSync(lockPath);
-  if (entries.length === 0) return { lock_path: lockPath, owner: null };
-  if (entries.length !== 1) {
-    throw new MissionTransitionLockError(
-      "MISSION_TRANSITION_LOCK_CORRUPT",
-      "transition lock has ambiguous residue",
-    );
-  }
-
-  const [entry] = entries;
-  if (entry === "owner.json") {
-    return { lock_path: lockPath, owner: { ...readOwner(ownerFile, missionKey) } };
-  }
-  if (/^owner\.release-[a-f0-9]{32}\.json$/.test(entry)) {
-    return {
-      lock_path: lockPath,
-      owner: { ...readOwner(path.join(lockPath, entry), missionKey) },
-    };
-  }
   throw new MissionTransitionLockError(
-    "MISSION_TRANSITION_LOCK_CORRUPT",
-    "transition lock has ambiguous residue",
+    "MISSION_TRANSITION_LOCK_UNSTABLE",
+    "transition lock changed repeatedly during inspection",
   );
 }
 
