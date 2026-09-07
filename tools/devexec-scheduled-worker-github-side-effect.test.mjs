@@ -58,6 +58,18 @@ test("action fingerprint is deterministic across payload key order and binds exa
   assert.match(first.action.immutable_input, /^sha256:[a-f0-9]{64}$/);
 });
 
+test("normalized payload is detached and frozen before control or connector callbacks", () => {
+  const source = { sha: "e".repeat(40), force: false, nested: { mode: "safe" } };
+  const derived = deriveScheduledWorkerGitHubAction(mutation({ payload: source }));
+  source.sha = "0".repeat(40);
+  source.nested.mode = "changed";
+  assert.equal(derived.mutation.payload.sha, "e".repeat(40));
+  assert.equal(derived.mutation.payload.nested.mode, "safe");
+  assert.equal(Object.isFrozen(derived.mutation.payload), true);
+  assert.equal(Object.isFrozen(derived.mutation.payload.nested), true);
+  assert.throws(() => { derived.mutation.payload.sha = "1".repeat(40); }, TypeError);
+});
+
 test("destructive GitHub operations and force ref updates fail closed before connector use", () => {
   assert.throws(
     () => deriveScheduledWorkerGitHubAction(mutation({ operation: "merge_pull_request" })),
@@ -75,7 +87,11 @@ test("scheduled-worker seam fresh-reads pre/post identities and crosses connecto
   const result = await runScheduledWorkerGitHubMutation({
     stateDir: "/tmp/not-used-by-fake",
     mutation: mutation(),
-    readControlIdentity: async () => ({ identity: "ledger:control-v2", decision: "ALLOW" }),
+    readControlIdentity: async ({ mutation: normalized, action }) => {
+      assert.equal(normalized.repository, "46slv/example");
+      assert.equal(action.surface, "github-scheduled-worker");
+      return { identity: "ledger:control-v2", decision: "ALLOW" };
+    },
     readGitHubIdentity: async ({ phase }) => { phases.push(phase); return phase === "PRE" ? PRE : POST; },
     executeGitHubMutation: async ({ mutation: normalized }) => { calls += 1; assert.equal(normalized.payload_fingerprint.startsWith("sha256:"), true); },
     dependencies: { runSideEffectWithFingerprintGuard: behavioralGuard() },
