@@ -7,6 +7,7 @@ import {
   createOuterReceipt,
   dedupeOuterCycle,
   runOuterCycles as runOuterCyclesCore,
+  validateReceipt,
   verifyHarnessBinding,
 } from "./devexec-harness-adapter-core.mjs";
 
@@ -67,6 +68,16 @@ function canonicalReceiptPath(receiptFile) {
   return canonical;
 }
 
+function canonicalReceiptPathReadOnly(receiptFile) {
+  requiredString(receiptFile, "receiptFile");
+  const resolved = path.resolve(receiptFile);
+  const parent = path.dirname(resolved);
+  if (!fs.existsSync(parent)) return resolved;
+  const canonical = path.join(fs.realpathSync(parent), path.basename(resolved));
+  if (fs.existsSync(canonical) && fs.lstatSync(canonical).isSymbolicLink()) throw new Error("OUTER_RECEIPT_SYMLINK_FORBIDDEN");
+  return canonical;
+}
+
 function expectedLeaseIdentity(args) {
   requireObject(args, "OUTER_RUN_ARGS");
   const receiptFile = requiredString(args.receiptFile, "receiptFile");
@@ -101,6 +112,135 @@ function validateLeaseOwner(owner, expected, receiptFile) {
   if (owner.target_ref !== expected.binding.target_ref) throw new Error("OUTER_RUN_LEASE_TARGET_REF_MISMATCH");
   requireDateTime(owner.acquired_at, "OUTER_RUN_LEASE_ACQUIRED_AT");
   return owner;
+}
+
+function inspectReceiptState(receiptFile, expected) {
+  if (!fs.existsSync(receiptFile)) return { receipt_state: "ABSENT" };
+  try {
+    const receipt = validateReceipt(readJson(receiptFile), expected);
+    if (receipt.pending_cycle === null) {
+      return { receipt_state: "PRESENT_NO_PENDING", receipt_status: receipt.status };
+    }
+    return { receipt_state: "PENDING", receipt_status: receipt.status };
+  } catch (error) {
+    return { receipt_state: "AMBIGUOUS", receipt_error: error?.message || String(error) };
+  }
+}
+
+function defaultIsProcessAlive(processId) {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    return null;
+  }
+}
+
+export function inspectOuterLeaseState(args, { isProcessAlive = defaultIsProcessAlive } = {}) {
+  const expected = expectedLeaseIdentity(args);
+  const canonicalReceipt = canonicalReceiptPathReadOnly(expected.receiptFile);
+  const leaseDirectory = `${canonicalReceipt}.lease`;
+  const ownerFile = path.join(leaseDirectory, "owner.json");
+  const receipt = inspectReceiptState(canonicalReceipt, expected);
+  if (!fs.existsSync(leaseDirectory)) {
+    return {
+      state: "NO_LEASE",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+    };
+  }
+
+  let owner;
+  try {
+    owner = validateLeaseOwner(readJson(ownerFile), expected, canonicalReceipt);
+  } catch (error) {
+    return {
+      state: "AMBIGUOUS_OWNER",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      reason: error?.message || String(error),
+    };
+  }
+
+  let processAlive;
+  try {
+    processAlive = isProcessAlive(owner.process_id);
+  } catch (error) {
+    return {
+      state: "AMBIGUOUS_LIVENESS",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+      reason: error?.message || String(error),
+    };
+  }
+  if (processAlive !== true && processAlive !== false) {
+    return {
+      state: "AMBIGUOUS_LIVENESS",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+    };
+  }
+  if (processAlive) {
+    return {
+      state: "LIVE_MATCHING_OWNER",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+    };
+  }
+  if (receipt.receipt_state === "ABSENT") {
+    return {
+      state: "DEAD_VALID_OWNER_RECEIPT_ABSENT",
+      receipt_state: receipt.receipt_state,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+    };
+  }
+  if (receipt.receipt_state === "PENDING") {
+    return {
+      state: "DEAD_VALID_OWNER_PENDING_RECEIPT",
+      receipt_state: receipt.receipt_state,
+      receipt_status: receipt.receipt_status,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+    };
+  }
+  if (receipt.receipt_state === "PRESENT_NO_PENDING") {
+    return {
+      state: "DEAD_VALID_OWNER_RECEIPT_PRESENT",
+      receipt_state: receipt.receipt_state,
+      receipt_status: receipt.receipt_status,
+      receipt_file: canonicalReceipt,
+      lease_directory: leaseDirectory,
+      owner_file: ownerFile,
+      owner_process_id: owner.process_id,
+    };
+  }
+  return {
+    state: "DEAD_VALID_OWNER_RECEIPT_AMBIGUOUS",
+    receipt_state: receipt.receipt_state,
+    receipt_file: canonicalReceipt,
+    lease_directory: leaseDirectory,
+    owner_file: ownerFile,
+    owner_process_id: owner.process_id,
+    reason: receipt.receipt_error || null,
+  };
 }
 
 function acquireOuterLease(expected) {
