@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   MissionTransitionLockError,
   acquireMissionTransitionLock,
+  inspectMissionTransitionLock,
 } from "./devexec-mission-transition-lock.mjs";
 
 function tmp() {
@@ -52,6 +53,9 @@ test("release preserves owner metadata replaced after validation and keeps the M
   assert.ok(preservedOwner);
   const observed = JSON.parse(fs.readFileSync(preservedOwner, "utf8"));
   assert.equal(observed.nonce, "f".repeat(32));
+  const inspected = inspectMissionTransitionLock({ stateDir: root, missionId: "mission-release-race" });
+  assert.equal(inspected.owner.nonce, "f".repeat(32));
+  assert.equal(inspected.owner.owner_pid, process.pid + 1);
   assert.throws(
     () => acquireMissionTransitionLock({ stateDir: root, missionId: "mission-release-race", timeoutMs: 0 }),
     (error) => error instanceof MissionTransitionLockError && error.code === "MISSION_TRANSITION_BUSY",
