@@ -151,30 +151,34 @@ export function inspectMissionTransitionLock({ stateDir, missionId } = {}) {
   if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) {
     throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_UNSAFE", "transition lock path is unsafe");
   }
-  // A process can die after the atomic lock-directory claim but before owner
-  // metadata is published. Keep that residue visible to operators instead of
-  // leaking a raw ENOENT; acquisition remains fail-closed on the directory.
-  if (!fs.existsSync(ownerFile)) {
-    const entries = fs.readdirSync(lockPath);
-    if (entries.length === 0) return { lock_path: lockPath, owner: null };
 
-    // Release first moves owner.json to a nonce-bound proof path. If release
-    // then fails or crashes, surface that preserved owner instead of folding
-    // it into the indistinguishable ownerless-acquire window. Unknown or
-    // multiple residues remain fail-closed as corruption.
-    const releaseOwners = entries.filter((entry) => /^owner\.release-[a-f0-9]{32}\.json$/.test(entry));
-    if (entries.length !== 1 || releaseOwners.length !== 1) {
-      throw new MissionTransitionLockError(
-        "MISSION_TRANSITION_LOCK_CORRUPT",
-        "transition lock has ambiguous release residue",
-      );
-    }
+  // A lock directory has exactly three inspectable shapes: an empty directory
+  // from the acquire-before-owner crash window, one canonical owner.json, or
+  // one nonce-bound release proof. Any mixed/unknown residue is ambiguous and
+  // must remain fail-closed instead of hiding evidence behind owner.json.
+  const entries = fs.readdirSync(lockPath);
+  if (entries.length === 0) return { lock_path: lockPath, owner: null };
+  if (entries.length !== 1) {
+    throw new MissionTransitionLockError(
+      "MISSION_TRANSITION_LOCK_CORRUPT",
+      "transition lock has ambiguous residue",
+    );
+  }
+
+  const [entry] = entries;
+  if (entry === "owner.json") {
+    return { lock_path: lockPath, owner: { ...readOwner(ownerFile, missionKey) } };
+  }
+  if (/^owner\.release-[a-f0-9]{32}\.json$/.test(entry)) {
     return {
       lock_path: lockPath,
-      owner: { ...readOwner(path.join(lockPath, releaseOwners[0]), missionKey) },
+      owner: { ...readOwner(path.join(lockPath, entry), missionKey) },
     };
   }
-  return { lock_path: lockPath, owner: { ...readOwner(ownerFile, missionKey) } };
+  throw new MissionTransitionLockError(
+    "MISSION_TRANSITION_LOCK_CORRUPT",
+    "transition lock has ambiguous residue",
+  );
 }
 
 export function acquireMissionTransitionLock({
