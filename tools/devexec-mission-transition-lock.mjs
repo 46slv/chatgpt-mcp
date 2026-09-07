@@ -232,6 +232,7 @@ export function acquireMissionTransitionLock({
   const lockPath = path.join(root, `${missionKey}.lock`);
   const ownerFile = path.join(lockPath, "owner.json");
   const started = monotonicMs();
+  let transientPathRaces = 0;
 
   while (true) {
     try {
@@ -239,7 +240,23 @@ export function acquireMissionTransitionLock({
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      const stat = fs.lstatSync(lockPath);
+      let stat;
+      try {
+        stat = fs.lstatSync(lockPath);
+      } catch (statError) {
+        if (statError?.code === "ENOENT" || statError?.code === "ENOTDIR") {
+          transientPathRaces += 1;
+          if (transientPathRaces >= 3) {
+            throw new MissionTransitionLockError(
+              "MISSION_TRANSITION_LOCK_UNSTABLE",
+              "transition lock changed repeatedly during acquisition",
+            );
+          }
+          continue;
+        }
+        throw statError;
+      }
+      transientPathRaces = 0;
       if (!stat.isDirectory() || stat.isSymbolicLink?.() || stat.isReparsePoint?.()) {
         throw new MissionTransitionLockError("MISSION_TRANSITION_LOCK_UNSAFE", "transition lock path is unsafe");
       }
