@@ -17,6 +17,7 @@ const localAgentCli = path.join(here, "local-agent-facade.mjs");
 const runtimeCli = path.join(here, "devexec-runtime-cli.mjs");
 const goalCli = path.join(here, "devexec-goal.mjs");
 const closedLoopCli = path.join(here, "devexec-closed-loop-cli.mjs");
+const missionCli = path.join(here, "devexec-mission-cli.mjs");
 const runner = process.env.DEV_EXEC_RUNNER_PATH || path.join(here, "dev-exec-loop.mjs");
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR = process.env.DEV_EXEC_STATE_DIR || path.join(BASE, "ChatGPTMCPProbe", "dev-exec-state");
@@ -82,6 +83,15 @@ function usage() {
  " devexec closed-loop admit --mission-id <id> --task-id <id> --thread-id <uuid> --initial-turn-id <uuid> --chat-url <url> --runtime-path <path> --working-directory <path> [--until-complete]",
  " devexec closed-loop run --admission <id-or-manifest-path> [--mode <bounded|completion-driven>] [--until-complete] [--relay-url <loopback-url>] [--relay-model <id>]",
  " devexec closed-loop inspect --admission <id-or-manifest-path>",
+ " devexec mission submit --request <file|-> --json",
+ " devexec mission followup --event <file|-> --json",
+ " devexec mission control --command <file|-> --json",
+ " devexec mission reconcile --mission <exact-id> --json",
+ " devexec mission inspect --mission <exact-id> --json",
+ " devexec mission wait --mission <exact-id> --until <terminal|revision|episode-complete> --timeout-ms <bounded> --json",
+ " devexec mission result --mission <exact-id> --json",
+ " devexec mission events --mission <exact-id> [--after <cursor>] [--limit <bounded>] <--json|--jsonl>",
+ " devexec mission episodes --mission <exact-id> [--after <cursor>] [--limit <bounded>] --json",
  " devexec run [--target <alias>]",
  " devexec continue <run-id> [--target <alias>]",
  " devexec recover inspect <run-id>",
@@ -119,6 +129,11 @@ if (command === "runtime") {
 
 if (command === "closed-loop") {
  const code = await runNode(closedLoopCli, ["closed-loop", ...args], process.env);
+ process.exit(code);
+}
+
+if (command === "mission") {
+ const code = await runNode(missionCli, args, process.env);
  process.exit(code);
 }
 
