@@ -391,6 +391,7 @@ function sameAdmissionIdentity(left, right) {
     mission_id: left.mission_id,
     task_id: left.task_id,
     initial_turn_id: left.initial_turn_id,
+    source_turn_sha256: left.thread_probe.source_turn_sha256,
     task_chat_binding: left.task_chat_binding,
     codex_continuation_binding: left.codex_continuation_binding,
     codex_runtime_binding: left.codex_runtime_binding,
@@ -404,6 +405,7 @@ function sameAdmissionIdentity(left, right) {
     mission_id: right.mission_id,
     task_id: right.task_id,
     initial_turn_id: right.initial_turn_id,
+    source_turn_sha256: right.thread_probe.source_turn_sha256,
     task_chat_binding: right.task_chat_binding,
     codex_continuation_binding: right.codex_continuation_binding,
     codex_runtime_binding: right.codex_runtime_binding,
@@ -474,6 +476,15 @@ export async function admitExistingCodexTask(input = {}) {
   const taskId = requiredText(input.task_id || input.taskId, "task_id");
   const threadId = uuid(input.thread_id || input.threadId, "thread_id");
   const initialTurnId = uuid(input.initial_turn_id || input.initialTurnId, "initial_turn_id");
+  // Upstream bootstrap consumers pin the completion bytes as well as IDs.
+  // Enforce this before persistence for both injected and live observations.
+  const expectedTurnHash = input.expected_source_turn_sha256 === undefined
+    ? null : digest(input.expected_source_turn_sha256, "expected_source_turn_sha256");
+  const checkExpectedTurn = (probe) => {
+    if (expectedTurnHash !== null && probe.source_turn_sha256 !== expectedTurnHash) {
+      throw new ClosedLoopFacadeError("Initial turn bytes do not match the validated bootstrap completion.", CLOSED_LOOP_FACADE_ERRORS.THREAD_UNPROVEN);
+    }
+  };
   const chatUrl = requiredText(input.chat_url || input.chatUrl, "chat_url");
   const runtimePath = absolutePath(input.runtime_path || input.runtimePath || input.executable_path, "runtime_path");
   const workingDirectory = absolutePath(input.working_directory || input.workingDirectory || input.cwd, "working_directory");
@@ -544,6 +555,7 @@ export async function admitExistingCodexTask(input = {}) {
   }
   if (candidateFile !== null) {
     const existing = loadClosedLoopAdmission(candidateFile);
+    checkExpectedTurn(existing.thread_probe);
     const requestedStateDir = input.state_dir || input.stateDir ? absolutePath(input.state_dir || input.stateDir, "state_dir") : null;
     const limitFields = [
       ["max_rounds", ["max_rounds", "maxRounds"]],
@@ -596,6 +608,7 @@ export async function admitExistingCodexTask(input = {}) {
     now,
   });
   const admissionId = requestedAdmissionId || existingCandidateId;
+  checkExpectedTurn(threadProbe);
   const admission = validateClosedLoopAdmission({
     protocol: CLOSED_LOOP_ADMISSION_PROTOCOL,
     schema_version: CLOSED_LOOP_ADMISSION_SCHEMA_VERSION,

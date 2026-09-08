@@ -82,6 +82,19 @@ test("admitExistingCodexTask persists exact identities and is idempotent", async
   assert.deepEqual(second.thread_identity, first.thread_identity);
 });
 
+test("expected bootstrap completion hash gates normalized observation and existing admission", async () => {
+  const root = tempRoot("expected-hash");
+  const input = baseInput(root);
+  const wrong = `sha256:${"0".repeat(64)}`;
+  await assert.rejects(() => admitExistingCodexTask({ ...input, expected_source_turn_sha256: wrong }), { code: "CLOSED_LOOP_EXISTING_THREAD_UNPROVEN" });
+  assert.equal(fs.existsSync(input.admission_root), false);
+  const first = await admitExistingCodexTask(input);
+  const bytes = fs.readFileSync(first.file);
+  await assert.rejects(() => admitExistingCodexTask({ ...input, expected_source_turn_sha256: wrong }), { code: "CLOSED_LOOP_EXISTING_THREAD_UNPROVEN" });
+  assert.deepEqual(fs.readFileSync(first.file), bytes);
+  assert.equal((await admitExistingCodexTask({ ...input, expected_source_turn_sha256: first.admission.thread_probe.source_turn_sha256 })).created, false);
+});
+
 test("legacy bounded admission id remains loadable after the completion-driven extension", async () => {
   const root = tempRoot("legacy-id");
   const input = baseInput(root);
