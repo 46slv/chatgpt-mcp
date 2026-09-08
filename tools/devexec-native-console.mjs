@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defaultRegistryPath, loadRegistryLenient } from "./target-registry.mjs";
+import { createMissionConsoleHandler } from "./devexec-mission-console.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY_BYTES = 65536;
@@ -592,17 +593,19 @@ async function load(){try{const t=await req("/api/targets");targets=t.targets;re
 load();setInterval(load,2000);
 </script></body></html>`;
 
-export function createConsoleServer({ controls = createControlStore(), spawnFn = spawn, env = process.env } = {}) {
+export function createConsoleServer({ controls = createControlStore(), spawnFn = spawn, env = process.env, missionService = null } = {}) {
+  const missionHandler = missionService ? createMissionConsoleHandler({ missionService }) : null;
   return http.createServer(async (req, res) => {
     try {
       if (!LOOPBACK_PEERS.has(req.socket.remoteAddress || "")) return sendJson(res, 403, { error: "loopback only" });
       if (!isLoopbackHostHeader(req.headers.host)) return sendJson(res, 403, { error: "loopback Host required" });
       if (req.method === "POST" && !isAllowedMutatingOrigin(req.headers.origin)) return sendJson(res, 403, { error: "loopback Origin required for browser mutation" });
       const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (missionHandler && await missionHandler(req, res, url)) return;
       const pathParts = url.pathname.split("/").filter(Boolean);
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "x-content-type-options": "nosniff" });
-        return res.end(PAGE);
+        return res.end(missionHandler ? PAGE.replace('</body>', '<a href="/missions" style="position:fixed;right:20px;bottom:20px;padding:12px;background:#c7ddff;color:#142034;border-radius:8px">Missions</a></body>') : PAGE);
       }
       if (req.method === "GET" && url.pathname === "/api/targets") return sendJson(res, 200, listTargets(env));
       if (req.method === "GET" && url.pathname === "/api/runs") return sendJson(res, 200, listRuns(env));
