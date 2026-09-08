@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
+    "console:devexec": "node tools/devexec-console.mjs",
     "test:devexec": "npm run build && node --test \"tools/*.test.mjs\"",
     "test:portability": "npm run build && node --test tools/portability.test.mjs",
     "console:native": "node tools/devexec-native-console.mjs",
