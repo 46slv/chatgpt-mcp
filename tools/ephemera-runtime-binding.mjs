@@ -11,7 +11,7 @@ export const EPHEMERA_RUNTIME_BINDING_SCHEMA = "ephemera.runtime-binding/v1";
 export const EPHEMERA_RUNTIME_BINDING = Object.freeze({
   schema: EPHEMERA_RUNTIME_BINDING_SCHEMA,
   repository: "46slv/EPHEMERA-System",
-  target_commit_sha: "b8fd0250893566c0a731986f90488565273f4c83",
+  target_commit_sha: "2f99bfbdee7d0f78536622285d66771b324380f8",
   package_name: "@46slv/ephemera-system-local-runtime",
   package_version: "0.1.0",
   artifact_sha256: "28b10e0be02f90fa71646a9ea1cfced012bcd492a1719833ca4a8ca47b260ceb",
