@@ -1,4 +1,5 @@
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
+import { createLlamaCppInferenceAdapter } from "./llamacpp-inference-adapter.mjs";
 import os from "node:os";
 import path from "node:path";
 import { runLocalWorkerTask, validateTaskContract, validateTaskBoundary } from "./local-worker-runtime.mjs";
@@ -6,7 +7,7 @@ import { logicalModelId } from "./freetoken-inference-adapter.mjs";
 import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
 
 export const DEVEXEC_RUNTIME = Object.freeze({ DEFAULT: "default", CLOUD: "cloud", LOCAL: "local" });
-export const DEVEXEC_PROVIDER = Object.freeze({ EXISTING: "existing", CHATGPT: "chatgpt", LM_STUDIO: "lmstudio", FREETOKEN: "freetoken" });
+export const DEVEXEC_PROVIDER = Object.freeze({ EXISTING: "existing", CHATGPT: "chatgpt", LM_STUDIO: "lmstudio", FREETOKEN: "freetoken", LLAMA_CPP: "llamacpp" });
 
 export class DevExecRuntimeSelectionError extends Error {
   constructor(message, code = "INVALID_RUNTIME_SELECTION") {
@@ -21,7 +22,7 @@ function fail(message, code) { throw new DevExecRuntimeSelectionError(message, c
 /**
  * Resolve an explicit runtime choice. The default is deliberately opaque and
  * keeps the caller's existing Cloud/LM Studio adapter untouched. Local
- * FreeToken is entered only when both runtime and provider are explicit.
+ * providers are entered only when both runtime and provider are explicit.
  */
 export function resolveDevExecRuntimeSelection(input = {}, env = process.env) {
   if (!input || typeof input !== "object" || Array.isArray(input)) fail("runtime selection must be an object");
@@ -33,13 +34,11 @@ export function resolveDevExecRuntimeSelection(input = {}, env = process.env) {
   const provider = providerValue == null ? null : String(providerValue).trim().toLowerCase();
 
   if (!Object.values(DEVEXEC_RUNTIME).includes(runtime)) fail(`unsupported runtime: ${runtime}`, "UNSUPPORTED_RUNTIME");
-  // Disabled is an explicit fail-safe back to the established path. It never
-  // constructs or starts a local provider.
   if (!enabled || runtime === DEVEXEC_RUNTIME.DEFAULT) {
     return Object.freeze({ runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, explicit: hasExplicit, enabled: false });
   }
   if (runtime === DEVEXEC_RUNTIME.LOCAL) {
-    if (![DEVEXEC_PROVIDER.FREETOKEN, DEVEXEC_PROVIDER.LM_STUDIO].includes(provider)) {
+    if (![DEVEXEC_PROVIDER.FREETOKEN, DEVEXEC_PROVIDER.LM_STUDIO, DEVEXEC_PROVIDER.LLAMA_CPP].includes(provider)) {
       fail("local runtime requires an explicit supported provider", "UNSUPPORTED_PROVIDER");
     }
     return Object.freeze({ runtime, provider, explicit: true, enabled: true });
@@ -69,6 +68,11 @@ function adapterFor(selection, adapters = {}, options = {}) {
   if (selection.provider === DEVEXEC_PROVIDER.FREETOKEN) {
     const adapter = adapters.freetoken || createFreeTokenInferenceAdapter(options.freetoken || {});
     if (!adapter || typeof adapter.run !== "function") fail("FreeToken adapter is required", "ADAPTER_MISSING");
+    return adapter;
+  }
+  if (selection.provider === DEVEXEC_PROVIDER.LLAMA_CPP) {
+    const adapter = adapters.llamacpp || createLlamaCppInferenceAdapter(options.llamacpp || {});
+    if (!adapter || typeof adapter.run !== "function") fail("llama.cpp adapter is required", "ADAPTER_MISSING");
     return adapter;
   }
   if (selection.provider === DEVEXEC_PROVIDER.LM_STUDIO) {
@@ -122,28 +126,22 @@ export function createDevExecEntrypoint({
   env = process.env,
   adapters = {},
   freetoken = {},
+  llamacpp = {},
   recoveryStateDir = null,
   leaseStateDir = null,
   admissionStateDir = null,
   runtimeCacheDir = null,
 } = {}) {
   const resolved = resolveDevExecRuntimeSelection(selection || {}, env);
-  const adapter = adapterFor(resolved, adapters, { freetoken });
+  const adapter = adapterFor(resolved, adapters, { freetoken, llamacpp });
   const local = resolved.runtime === DEVEXEC_RUNTIME.LOCAL;
   return Object.freeze({
     selection: resolved,
     identity: Object.freeze({ runtime: resolved.runtime, provider: resolved.provider }),
     async run(task, context = {}) {
       if (!local) return adapter.run(task, context);
-      // Local execution is contract-first. runLocalWorkerTask performs the
-      // exact repo/worktree/base checks, test command execution, and parent
-      // recomputation of changes before exposing the result.
       validateTaskContract(task, { verifyGit: false });
       if (adapter?.config?.idleStopMs > 0) throw new DevExecRuntimeSelectionError("idleStopMs must be 0 for the leased local runtime", "IDLE_STOP_UNSUPPORTED");
-      // Journal, admission, and provider lease artifacts belong to the System
-      // package and remain outside the worker's worktree. A missing package is
-      // an explicit BLOCKED condition; the legacy source lifecycle is never a
-      // fallback.
       const recoveryDir = path.resolve(recoveryStateDir || defaultRecoveryStateDir(env));
       const leaseDir = path.resolve(leaseStateDir || defaultLeaseStateDir(env));
       const admissionDir = admissionStateDir ? path.resolve(admissionStateDir) : null;
@@ -151,10 +149,6 @@ export function createDevExecEntrypoint({
       assertExternalRuntimeStateDir(leaseDir, task.worktree, "lease state directory");
       if (admissionDir) assertExternalRuntimeStateDir(admissionDir, task.worktree, "admission state directory");
 
-      // The exact-pinned System facade is the only local lifecycle authority.
-      // There is deliberately no runtime/factory/options injection here: a
-      // caller cannot bypass materialization or re-introduce source-owned
-      // recovery, admission, or lease implementations.
       const runtime = await loadEphemeraRuntimePackage({ cacheDir: runtimeCacheDir || env?.EPHEMERA_RUNTIME_CACHE_DIR || undefined, worktree: task.worktree });
       if (!runtime || typeof runtime.createSystemLocalRuntimeLifecycle !== "function") {
         fail("materialized EPHEMERA runtime package is missing its lifecycle facade", "EPHEMERA_EXPORTS_MISMATCH");
@@ -164,8 +158,6 @@ export function createDevExecEntrypoint({
         leaseStateDir: leaseDir,
         ...(admissionDir ? { admissionStateDir: admissionDir } : {}),
         beforeProviderLease: async ({ signal }) => {
-          // This hook is the source-owned ordering seam: boundary validation
-          // and GPU policy run after System PREFLIGHT but before lease acquire.
           validateTaskBoundary(task);
           if (typeof adapter.gpuGate === "function") {
             const gpu = await adapter.gpuGate(signal);

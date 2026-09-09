@@ -39,6 +39,23 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 # $env:LOCAL_WORKER_PLANNER_TIMEOUT_MS = '75000'
 # $env:LOCAL_WORKER_PLANNER_ATTEMPTS = '2'
 
+# EPHEMERA local TaskContract worker — llama.cpp / Spark lane.
+# This is opt-in and does not stop or unload an existing GPU workload.
+# The model path must point at the already-verified local GGUF; keep the
+# machine-specific path outside Git.
+# $env:DEV_EXEC_RUNTIME = 'local'
+# $env:DEV_EXEC_PROVIDER = 'llamacpp'
+# $env:DEV_EXEC_LOCAL_ENABLED = '1'
+# $env:LLAMACPP_ENABLED = '1'
+# $env:LLAMACPP_MODEL = 'Spark-X2.5-4B-Q6_K.gguf'
+# $env:LLAMACPP_MODEL_PATH = 'C:\path\to\Spark-X2.5-4B-Q6_K.gguf'
+# $env:LLAMACPP_COMMAND = 'llama'
+# $env:LLAMACPP_SERVE_URL = 'http://127.0.0.1:18080'
+# $env:LLAMACPP_CONTEXT = '32768'
+# $env:LLAMACPP_DEVICE_INDEX = '0'
+# 64K is an explicit long-context lane after host qualification:
+# $env:LLAMACPP_CONTEXT = '65536'
+
 # Optional persistent browser profile override. Keep it outside this repository.
 # $env:CHATGPT_MCP_USER_DATA_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\user-data'
 # Optional visible Chrome CDP launcher overrides. The launcher never kills an
