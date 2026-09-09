@@ -19,72 +19,331 @@ function boundedString(value, name, max = 4096) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${name} must be a bounded string`);
   return value.trim();
 }
-function safeText(value, max = 1000) { return redactStructuredLog(typeof value === "string" ? value.slice(0, max) : String(value ?? ""), { maxString: max }); }
+
+function safeText(value, max = 1000) {
+  return redactStructuredLog(typeof value === "string" ? value.slice(0, max) : String(value ?? ""), { maxString: max });
+}
+
 function identityFor(selection, model = null) {
-  return sanitizeRuntimeProviderIdentity({ runtime: selection?.runtime || "default", provider: selection?.provider || "existing", ...(model ? { model: safeText(model, 256) } : {}) });
+  return sanitizeRuntimeProviderIdentity({
+    runtime: selection?.runtime || "default",
+    provider: selection?.provider || "existing",
+    ...(model ? { model: safeText(model, 256) } : {}),
+  });
 }
+
 function blockedResult(taskId, blocker, identity = { runtime: "default", provider: "existing" }) {
-  return { version: RESULT_CONTRACT_VERSION, task_id: SAFE_TASK_ID.test(String(taskId || "")) ? String(taskId) : "unknown", status: "BLOCKED", changed_files: [], tests: { status: "NOT_RUN", evidence_valid: false }, blocker: safeText(blocker, 4000), diff_availability: { available: false, files: [] }, runtime_metrics: { wall_time_ms: 0, adapter_status: "NOT_RUN" }, safety_metrics: { preflight: "BLOCKED", postflight: "NOT_RUN", base_commit_verified: false, changed_paths_recomputed: false, commit_detected: false, base_drift: false, result_claim_trusted: false }, runtime_provider_identity: identityFor(identity, identity?.model) };
+  return {
+    version: RESULT_CONTRACT_VERSION,
+    task_id: SAFE_TASK_ID.test(String(taskId || "")) ? String(taskId) : "unknown",
+    status: "BLOCKED",
+    changed_files: [],
+    tests: { status: "NOT_RUN", evidence_valid: false },
+    blocker: safeText(blocker, 4000),
+    diff_availability: { available: false, files: [] },
+    runtime_metrics: { wall_time_ms: 0, adapter_status: "NOT_RUN" },
+    safety_metrics: { preflight: "BLOCKED", postflight: "NOT_RUN", base_commit_verified: false, changed_paths_recomputed: false, commit_detected: false, base_drift: false, result_claim_trusted: false },
+    runtime_provider_identity: identityFor(identity, identity?.model),
+  };
 }
+
 function publicResult(result) {
   const tests = result?.tests || {};
   const safeTests = { status: typeof tests.status === "string" ? tests.status : "NOT_RUN", evidence_valid: tests.evidence_valid === true };
   for (const key of ["exit_code", "wall_time_ms"]) if (Number.isFinite(tests[key])) safeTests[key] = tests[key];
   for (const key of ["timed_out", "cancelled", "malformed", "invalid_evidence"]) if (typeof tests[key] === "boolean") safeTests[key] = tests[key];
   const safeIdentity = {};
-  for (const key of ["runtime", "provider", "model", "device_index"]) { const value = result?.runtime_provider_identity?.[key]; if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = key === "model" ? sanitizeRuntimeProviderIdentity({ model: value }).model : typeof value === "string" ? safeText(value, 256) : value; }
+  for (const key of ["runtime", "provider", "model", "device_index"]) {
+    const value = result?.runtime_provider_identity?.[key];
+    if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = key === "model" ? sanitizeRuntimeProviderIdentity({ model: value }).model : typeof value === "string" ? safeText(value, 256) : value;
+  }
   const ledger = result?.ledger && typeof result.ledger === "object" ? result.ledger : { status: "NOT_ATTEMPTED", code: null, path: null };
   const ledgerStatus = ["WRITTEN", "FAILED", "NOT_ATTEMPTED"].includes(ledger.status) ? ledger.status : "FAILED";
   const ledgerPath = typeof ledger.path === "string" && !/[\\/]/.test(ledger.path) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(ledger.path) ? ledger.path : null;
   const safeResources = {};
-  for (const name of ["ram_mb", "vram_mb", "gpu_utilization_pct"]) { const value = result?.resources?.[name]; if (!value || typeof value !== "object") continue; safeResources[name] = { before: Number.isFinite(value.before) ? value.before : null, peak: Number.isFinite(value.peak) ? value.peak : null, after: Number.isFinite(value.after) ? value.after : null, availability: ["AVAILABLE", "NOT_COLLECTED"].includes(value.availability) ? value.availability : "NOT_COLLECTED", available: value.available === true ? true : null }; }
-  return redactStructuredLog({ version: RESULT_CONTRACT_VERSION, run_id: String(result?.run_id || "unknown").slice(0, 200), task_id: String(result?.task_id || "unknown").slice(0, 200), status: ["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result?.status) ? result.status : "FAILED", changed_files: Array.isArray(result?.changed_files) ? result.changed_files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [], tests: safeTests, blocker: safeText(result?.blocker || "none", 4000), diff_availability: { available: result?.diff_availability?.available === true, files: Array.isArray(result?.diff_availability?.files) ? result.diff_availability.files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [] }, runtime_metrics: redactStructuredLog(result?.runtime_metrics || {}, { maxString: 256 }), resources: safeResources, safety_metrics: redactStructuredLog(result?.safety_metrics || {}, { maxString: 256 }), runtime_provider_identity: safeIdentity, ledger: { status: ledgerStatus, code: typeof ledger.code === "string" ? safeText(ledger.code, 128) : null, path: ledgerPath } }, { maxString: 4000 });
+  for (const name of ["ram_mb", "vram_mb", "gpu_utilization_pct"]) {
+    const value = result?.resources?.[name];
+    if (!value || typeof value !== "object") continue;
+    safeResources[name] = {
+      before: Number.isFinite(value.before) ? value.before : null,
+      peak: Number.isFinite(value.peak) ? value.peak : null,
+      after: Number.isFinite(value.after) ? value.after : null,
+      availability: ["AVAILABLE", "NOT_COLLECTED"].includes(value.availability) ? value.availability : "NOT_COLLECTED",
+      available: value.available === true ? true : null,
+    };
+  }
+  return redactStructuredLog({
+    version: RESULT_CONTRACT_VERSION,
+    run_id: String(result?.run_id || "unknown").slice(0, 200),
+    task_id: String(result?.task_id || "unknown").slice(0, 200),
+    status: ["DONE", "BLOCKED", "FAILED", "CANCELLED"].includes(result?.status) ? result.status : "FAILED",
+    changed_files: Array.isArray(result?.changed_files) ? result.changed_files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [],
+    tests: safeTests,
+    blocker: safeText(result?.blocker || "none", 4000),
+    diff_availability: { available: result?.diff_availability?.available === true, files: Array.isArray(result?.diff_availability?.files) ? result.diff_availability.files.slice(0, 256).map((x) => String(x).slice(0, 1024)) : [] },
+    runtime_metrics: redactStructuredLog(result?.runtime_metrics || {}, { maxString: 256 }),
+    resources: safeResources,
+    safety_metrics: redactStructuredLog(result?.safety_metrics || {}, { maxString: 256 }),
+    runtime_provider_identity: safeIdentity,
+    ledger: { status: ledgerStatus, code: typeof ledger.code === "string" ? safeText(ledger.code, 128) : null, path: ledgerPath },
+  }, { maxString: 4000 });
 }
+
 function atomicWrite(file, value) {
-  const target = path.resolve(boundedString(file, "output path", 4096)); const parent = path.dirname(target); fs.mkdirSync(parent, { recursive: true }); const encoded = JSON.stringify(value, null, 2) + "\n"; if (Buffer.byteLength(encoded, "utf8") > MAX_OUTPUT_BYTES) throw new Error("output exceeds evidence limit"); const temporary = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`; let fd = null; let owned = false;
-  try { fd = fs.openSync(temporary, "wx", 0o600); owned = true; const bytes = Buffer.from(encoded, "utf8"); let offset = 0; while (offset < bytes.length) { const written = fs.writeSync(fd, bytes, offset, bytes.length - offset); if (!Number.isInteger(written) || written <= 0) throw new Error("evidence write made no progress"); offset += written; } fs.fsyncSync(fd); const fdStat = fs.fstatSync(fd); fs.closeSync(fd); fd = null; const tempStat = fs.lstatSync(temporary); if (!tempStat.isFile() || tempStat.isSymbolicLink() || (Number.isInteger(tempStat.nlink) && tempStat.nlink > 1)) throw new Error("evidence temporary inode is unsafe"); if (Number.isInteger(fdStat.dev) && Number.isInteger(fdStat.ino) && Number.isInteger(tempStat.dev) && Number.isInteger(tempStat.ino) && (fdStat.dev !== tempStat.dev || fdStat.ino !== tempStat.ino)) throw new Error("evidence temporary inode changed"); fs.linkSync(temporary, target); fs.unlinkSync(temporary); owned = false; }
-  finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } if (owned) { try { fs.unlinkSync(temporary); } catch { try { fs.rmSync(temporary, { force: true }); } catch {} } } }
+  const target = path.resolve(boundedString(file, "output path", 4096));
+  const parent = path.dirname(target);
+  fs.mkdirSync(parent, { recursive: true });
+  const encoded = JSON.stringify(value, null, 2) + "\n";
+  if (Buffer.byteLength(encoded, "utf8") > MAX_OUTPUT_BYTES) throw new Error("output exceeds evidence limit");
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
+  let fd = null;
+  let owned = false;
+  try {
+    fd = fs.openSync(temporary, "wx", 0o600);
+    owned = true;
+    const bytes = Buffer.from(encoded, "utf8");
+    let offset = 0;
+    while (offset < bytes.length) { const written = fs.writeSync(fd, bytes, offset, bytes.length - offset); if (!Number.isInteger(written) || written <= 0) throw new Error("evidence write made no progress"); offset += written; }
+    fs.fsyncSync(fd);
+    const fdStat = fs.fstatSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    const tempStat = fs.lstatSync(temporary);
+    if (!tempStat.isFile() || tempStat.isSymbolicLink() || (Number.isInteger(tempStat.nlink) && tempStat.nlink > 1)) throw new Error("evidence temporary inode is unsafe");
+    if (Number.isInteger(fdStat.dev) && Number.isInteger(fdStat.ino) && Number.isInteger(tempStat.dev) && Number.isInteger(tempStat.ino) && (fdStat.dev !== tempStat.dev || fdStat.ino !== tempStat.ino)) throw new Error("evidence temporary inode changed");
+    fs.linkSync(temporary, target);
+    fs.unlinkSync(temporary);
+    owned = false;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* preserve original failure */ } }
+    if (owned) { try { fs.unlinkSync(temporary); } catch { try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ } } }
+  }
   return target;
 }
-function loadTaskFile(file) { const requested = boundedString(file, "task path", 4096); const target = path.resolve(requested); let stat; try { stat = fs.lstatSync(target); } catch { throw new Error("task file not found"); } if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("task path must be a regular file"); if (stat.size > MAX_TASK_FILE_BYTES) throw new Error(`task file exceeds ${MAX_TASK_FILE_BYTES} bytes`); let parsed; try { parsed = JSON.parse(fs.readFileSync(target, "utf8")); } catch { throw new Error("task file is not valid JSON"); } if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("task JSON must be an object"); return validateTaskContract(parsed, { verifyGit: false }); }
-async function loadInjectedAdapter(modulePath, context) { const requested = boundedString(modulePath, "adapter module", 4096); const target = path.resolve(requested); const stat = fs.lstatSync(target); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("adapter module must be a regular file"); const imported = await import(pathToFileURL(target).href); const candidate = imported.createAdapter || imported.default || imported.adapter; const adapter = typeof candidate === "function" ? await candidate(context) : candidate; if (!adapter || typeof adapter.run !== "function") throw new Error("injected adapter must expose run(task, context)"); return adapter; }
-function defaultEvidencePath(taskId) { const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"); const id = SAFE_TASK_ID.test(String(taskId || "")) ? taskId : "unknown"; return path.join(base, "ChatGPTMCPProbe", "devexec-runtime-evidence", `${id}-${Date.now()}.json`); }
-function defaultLedgerDir() { const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"); return path.join(base, "ChatGPTMCPProbe", "devexec-local-run-ledger"); }
-function defaultRecoveryStateDir() { const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"); return path.join(base, "ChatGPTMCPProbe", "devexec-local-recovery"); }
-function defaultLeaseStateDir() { const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"); return path.join(base, "ChatGPTMCPProbe", "devexec-local-lease"); }
-function errorText(error) { const code = typeof error?.code === "string" && error.code.trim() ? `${error.code}: ` : ""; return `${code}${error?.message || error}`; }
-function flagValue(args, names) { const wanted = new Set(names); for (let i = 0; i < args.length - 1; i += 1) if (wanted.has(args[i])) return args[i + 1]; return null; }
-export function exitCodeForResult(result) { if (result?.status === "DONE") return 0; if (result?.status === "FAILED") return 1; if (result?.status === "CANCELLED") return 130; return 2; }
+
+function loadTaskFile(file) {
+  const requested = boundedString(file, "task path", 4096);
+  const target = path.resolve(requested);
+  let stat;
+  try { stat = fs.lstatSync(target); } catch { throw new Error("task file not found"); }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("task path must be a regular file");
+  if (stat.size > MAX_TASK_FILE_BYTES) throw new Error(`task file exceeds ${MAX_TASK_FILE_BYTES} bytes`);
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(target, "utf8")); } catch { throw new Error("task file is not valid JSON"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("task JSON must be an object");
+  return validateTaskContract(parsed, { verifyGit: false });
+}
+
+async function loadInjectedAdapter(modulePath, context) {
+  const requested = boundedString(modulePath, "adapter module", 4096);
+  const target = path.resolve(requested);
+  const stat = fs.lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("adapter module must be a regular file");
+  const imported = await import(pathToFileURL(target).href);
+  const candidate = imported.createAdapter || imported.default || imported.adapter;
+  const adapter = typeof candidate === "function" ? await candidate(context) : candidate;
+  if (!adapter || typeof adapter.run !== "function") throw new Error("injected adapter must expose run(task, context)");
+  return adapter;
+}
+
+function defaultEvidencePath(taskId) {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  const id = SAFE_TASK_ID.test(String(taskId || "")) ? taskId : "unknown";
+  return path.join(base, "ChatGPTMCPProbe", "devexec-runtime-evidence", `${id}-${Date.now()}.json`);
+}
+
+function defaultLedgerDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-run-ledger");
+}
+function defaultRecoveryStateDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-recovery");
+}
+function defaultLeaseStateDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(base, "ChatGPTMCPProbe", "devexec-local-lease");
+}
+
+function errorText(error) {
+  const code = typeof error?.code === "string" && error.code.trim() ? `${error.code}: ` : "";
+  return `${code}${error?.message || error}`;
+}
+
+function flagValue(args, names) {
+  const wanted = new Set(names);
+  for (let i = 0; i < args.length - 1; i += 1) if (wanted.has(args[i])) return args[i + 1];
+  return null;
+}
+
+export function exitCodeForResult(result) {
+  if (result?.status === "DONE") return 0;
+  if (result?.status === "FAILED") return 1;
+  if (result?.status === "CANCELLED") return 130;
+  return 2;
+}
 
 async function runTask(args) {
-  const selection = {}; let taskPath = null; let evidencePath = null; let outputPath = null; let adapterModule = null; let ledgerDir = null; let recoveryStateDir = null; let leaseStateDir = null; let runtimeCacheDir = null; const freetoken = {}; const llamacpp = {};
+  const selection = {};
+  let taskPath = null;
+  let evidencePath = null;
+  let outputPath = null;
+  let adapterModule = null;
+  let ledgerDir = null;
+  let recoveryStateDir = null;
+  let leaseStateDir = null;
+  let runtimeCacheDir = null;
+  const freetoken = {};
+  const llamacpp = {};
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--llama-command", "--context", "--device-index", "--ledger-dir", "--recovery-dir", "--lease-dir", "--ephemera-cache-dir"].includes(arg)) {
-      const value = args[++i]; if (!value) throw new Error(`${arg} requires a value`);
+      const value = args[++i];
+      if (!value) throw new Error(`${arg} requires a value`);
       if (arg === "--runtime" || arg === "--provider") selection[arg.slice(2)] = value;
-      else if (arg === "--task") taskPath = value; else if (arg === "--evidence" || arg === "--log") evidencePath = value; else if (arg === "--output") outputPath = value; else if (arg === "--adapter-module") adapterModule = value; else if (arg === "--ledger-dir") ledgerDir = value; else if (arg === "--recovery-dir") recoveryStateDir = value; else if (arg === "--lease-dir") leaseStateDir = value; else if (arg === "--ephemera-cache-dir") runtimeCacheDir = value;
-      else if (arg === "--model") { freetoken.model = value; llamacpp.model = value; } else if (arg === "--model-path") { freetoken.modelPath = value; llamacpp.modelPath = value; } else if (arg === "--control-url") freetoken.controlUrl = value; else if (arg === "--serve-url") { freetoken.serveUrl = value; llamacpp.serveUrl = value; } else if (arg === "--llama-command") llamacpp.command = value; else if (arg === "--context") llamacpp.contextLength = Number(value); else if (arg === "--device-index") { freetoken.deviceIndex = Number(value); llamacpp.deviceIndex = Number(value); }
-    } else if (arg === "--enabled") selection.enabled = true; else if (arg === "--disabled") selection.enabled = false; else throw new Error(`Unknown runtime argument: ${arg}`);
+      else if (arg === "--task") taskPath = value;
+      else if (arg === "--evidence" || arg === "--log") evidencePath = value;
+      else if (arg === "--output") outputPath = value;
+      else if (arg === "--adapter-module") adapterModule = value;
+      else if (arg === "--ledger-dir") ledgerDir = value;
+      else if (arg === "--recovery-dir") recoveryStateDir = value;
+      else if (arg === "--lease-dir") leaseStateDir = value;
+      else if (arg === "--ephemera-cache-dir") runtimeCacheDir = value;
+      else if (arg === "--model") { freetoken.model = value; llamacpp.model = value; }
+      else if (arg === "--model-path") { freetoken.modelPath = value; llamacpp.modelPath = value; }
+      else if (arg === "--control-url") freetoken.controlUrl = value;
+      else if (arg === "--serve-url") { freetoken.serveUrl = value; llamacpp.serveUrl = value; }
+      else if (arg === "--llama-command") llamacpp.command = value;
+      else if (arg === "--context") llamacpp.contextLength = Number(value);
+      else if (arg === "--device-index") { freetoken.deviceIndex = Number(value); llamacpp.deviceIndex = Number(value); }
+    } else if (arg === "--enabled") selection.enabled = true;
+    else if (arg === "--disabled") selection.enabled = false;
+    else throw new Error(`Unknown runtime argument: ${arg}`);
   }
   if (!taskPath) throw new Error("runtime run requires --task <path>");
-  const task = loadTaskFile(taskPath); let selected;
+  const task = loadTaskFile(taskPath);
+  let selected;
   try { selected = resolveDevExecRuntimeSelection(selection, process.env); }
-  catch (error) { const result = blockedResult(task.task_id, error?.message || error); const publicValue = publicResult(result); atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_selection_blocked", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker } }); if (outputPath) atomicWrite(outputPath, publicValue); process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`); return exitCodeForResult(publicValue); }
+  catch (error) {
+    const result = blockedResult(task.task_id, error?.message || error);
+    const publicValue = publicResult(result);
+    atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_selection_blocked", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker } });
+    if (outputPath) atomicWrite(outputPath, publicValue);
+    process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
+    return exitCodeForResult(publicValue);
+  }
   const supportedLocal = selected.runtime === "local" && ["freetoken", "llamacpp"].includes(selected.provider) && selected.enabled === true;
-  if (!supportedLocal) { const result = blockedResult(task.task_id, "explicit supported local runtime is required; local execution was not started", selected); const publicValue = publicResult(result); atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_not_enabled", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } }); if (outputPath) atomicWrite(outputPath, publicValue); process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`); return exitCodeForResult(publicValue); }
-  const providerConfig = selected.provider === "llamacpp" ? llamacpp : freetoken; let adapter;
-  try { adapter = adapterModule ? await loadInjectedAdapter(adapterModule, { task, selection: selected }) : selected.provider === "llamacpp" ? createLlamaCppInferenceAdapter({ config: { enabled: true, ...llamacpp }, env: process.env, log: () => {} }) : createFreeTokenInferenceAdapter({ config: { enabled: true, ...freetoken }, env: process.env, log: () => {} }); }
-  catch (error) { const result = blockedResult(task.task_id, error?.message || error, identityFor(selected, providerConfig.model || null)); const publicValue = publicResult(result); atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_adapter_unavailable", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } }); if (outputPath) atomicWrite(outputPath, publicValue); process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`); return exitCodeForResult(publicValue); }
+  if (!supportedLocal) {
+    const result = blockedResult(task.task_id, "explicit supported local runtime is required; local execution was not started", selected);
+    const publicValue = publicResult(result);
+    atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_not_enabled", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } });
+    if (outputPath) atomicWrite(outputPath, publicValue);
+    process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
+    return exitCodeForResult(publicValue);
+  }
+
+  const providerConfig = selected.provider === "llamacpp" ? llamacpp : freetoken;
+  let adapter;
+  try {
+    adapter = adapterModule
+      ? await loadInjectedAdapter(adapterModule, { task, selection: selected })
+      : selected.provider === "llamacpp"
+        ? createLlamaCppInferenceAdapter({ config: { enabled: true, ...llamacpp }, env: process.env, log: () => {} })
+        : createFreeTokenInferenceAdapter({ config: { enabled: true, ...freetoken }, env: process.env, log: () => {} });
+  } catch (error) {
+    const result = blockedResult(task.task_id, error?.message || error, identityFor(selected, providerConfig.model || null));
+    const publicValue = publicResult(result);
+    atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_adapter_unavailable", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } });
+    if (outputPath) atomicWrite(outputPath, publicValue);
+    process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
+    return exitCodeForResult(publicValue);
+  }
   const adapters = selected.provider === "llamacpp" ? { llamacpp: adapter } : { freetoken: adapter };
-  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters, freetoken, llamacpp, recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(), leaseStateDir: leaseStateDir || defaultLeaseStateDir(), runtimeCacheDir: runtimeCacheDir || undefined });
-  const abort = new AbortController(); const onSignal = () => abort.abort(new Error("cancelled by caller")); process.once("SIGINT", onSignal); let outcome; try { outcome = await entrypoint.run(task, { signal: abort.signal, runLedgerDir: ledgerDir || defaultLedgerDir(), selection: selected }); } finally { process.removeListener("SIGINT", onSignal); }
-  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}), ...(outcome.ledger ? { ledger: outcome.ledger } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, providerConfig.model || null)); const publicValue = publicResult(rawResult); const log = redactStructuredLog({ event: "runtime_result", task_id: publicValue.task_id, status: publicValue.status, blocker: publicValue.blocker, changed_files: publicValue.changed_files, tests: { status: publicValue.tests.status, exit_code: publicValue.tests.exit_code ?? null }, runtime_provider_identity: publicValue.runtime_provider_identity, runtime_metrics: publicValue.runtime_metrics }, { maxString: 1000 }); atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log }); if (outputPath) atomicWrite(outputPath, publicValue); process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`); return exitCodeForResult(publicValue);
+  const entrypoint = createDevExecEntrypoint({
+    selection: selected,
+    adapters,
+    freetoken,
+    llamacpp,
+    recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(),
+    leaseStateDir: leaseStateDir || defaultLeaseStateDir(),
+    runtimeCacheDir: runtimeCacheDir || undefined,
+  });
+  const abort = new AbortController();
+  const onSignal = () => abort.abort(new Error("cancelled by caller"));
+  process.once("SIGINT", onSignal);
+  let outcome;
+  try { outcome = await entrypoint.run(task, { signal: abort.signal, runLedgerDir: ledgerDir || defaultLedgerDir(), selection: selected }); }
+  finally { process.removeListener("SIGINT", onSignal); }
+  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}), ...(outcome.ledger ? { ledger: outcome.ledger } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, providerConfig.model || null));
+  const publicValue = publicResult(rawResult);
+  const log = redactStructuredLog({ event: "runtime_result", task_id: publicValue.task_id, status: publicValue.status, blocker: publicValue.blocker, changed_files: publicValue.changed_files, tests: { status: publicValue.tests.status, exit_code: publicValue.tests.exit_code ?? null }, runtime_provider_identity: publicValue.runtime_provider_identity, runtime_metrics: publicValue.runtime_metrics }, { maxString: 1000 });
+  atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log });
+  if (outputPath) atomicWrite(outputPath, publicValue);
+  process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
+  return exitCodeForResult(publicValue);
 }
-function usage() { process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken|llamacpp>] [--enabled|--disabled]\n"); process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider <freetoken|llamacpp> [--model <id>] [--model-path <path>] [--serve-url <loopback-url>] [--llama-command <path>] [--context <tokens>] [--device-index <n>] [--recovery-dir <path>] [--lease-dir <path>] [--ephemera-cache-dir <path>] [--evidence <path>] [--output <path>]\n"); process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n"); process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir> [--ephemera-cache-dir <path>]\n"); }
-const args = process.argv.slice(2); const command = args.shift();
-if (command === "select") { const selection = {}; for (let i = 0; i < args.length; i += 1) { const arg = args[i]; if (arg === "--runtime" || arg === "--provider") { const value = args[++i]; if (!value) throw new Error(`${arg} requires a value`); selection[arg.slice(2)] = value; } else if (arg === "--enabled") selection.enabled = true; else if (arg === "--disabled") selection.enabled = false; else throw new Error(`Unknown runtime argument: ${arg}`); } try { process.stdout.write(`${JSON.stringify(resolveDevExecRuntimeSelection(selection), null, 2)}\n`); process.exitCode = 0; } catch (error) { process.stderr.write(`${String(error?.message || error)}\n`); process.exitCode = 2; } }
-else if (command === "run") { try { process.exitCode = await runTask(args); } catch (error) { const result = publicResult(blockedResult("unknown", errorText(error))); const evidencePath = flagValue(args, ["--evidence", "--log"]); const outputPath = flagValue(args, ["--output"]); try { atomicWrite(evidencePath || defaultEvidencePath("unknown"), { protocol: "devexec.runtime.evidence", schema_version: 1, result, log: { event: "runtime_input_blocked", task_id: result.task_id, status: result.status, blocker: result.blocker } }); } catch {} try { if (outputPath) atomicWrite(outputPath, result); } catch {} try { process.stdout.write(`${JSON.stringify(result, null, 2)}\n`); } catch { process.stderr.write("runtime run failed\n"); } process.exitCode = exitCodeForResult(result); } }
-else if (command === "metrics") { const subcommand = args.shift(); if (subcommand !== "summarize" || args.length !== 1) { usage(); process.exitCode = 2; } else { try { process.stdout.write(`${JSON.stringify(summarizeLocalRunRecords(args[0]), null, 2)}\n`); process.exitCode = 0; } catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; } } }
-else if (command === "recovery") { const subcommand = args.shift(); if (subcommand !== "scan") { usage(); process.exitCode = 2; } else { let stateDir = null; let runtimeCacheDir = null; for (let i = 0; i < args.length; i += 1) { if ((args[i] !== "--state-dir" && args[i] !== "--ephemera-cache-dir") || !args[i + 1]) throw new Error("recovery scan requires --state-dir <state-dir>"); if (args[i] === "--state-dir") stateDir = args[++i]; else runtimeCacheDir = args[++i]; } try { const runtime = await loadEphemeraRuntimePackage({ cacheDir: runtimeCacheDir || process.env.EPHEMERA_RUNTIME_CACHE_DIR || undefined, worktree: process.cwd() }); if (typeof runtime.scanRecoveryState !== "function") throw new Error("EPHEMERA_EXPORTS_MISMATCH: scanRecoveryState is unavailable"); process.stdout.write(`${JSON.stringify(runtime.scanRecoveryState(stateDir), null, 2)}\n`); process.exitCode = 0; } catch (error) { process.stderr.write(`${safeText(errorText(error), 1000)}\n`); process.exitCode = 2; } } }
+
+function usage() {
+ process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken|llamacpp>] [--enabled|--disabled]\n");
+ process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider <freetoken|llamacpp> [--model <id>] [--model-path <path>] [--serve-url <loopback-url>] [--llama-command <path>] [--context <tokens>] [--device-index <n>] [--recovery-dir <path>] [--lease-dir <path>] [--ephemera-cache-dir <path>] [--evidence <path>] [--output <path>]\n");
+ process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
+ process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir> [--ephemera-cache-dir <path>]\n");
+}
+const args = process.argv.slice(2);
+const command = args.shift();
+if (command === "select") {
+  const selection = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--runtime" || arg === "--provider") {
+      const value = args[++i];
+      if (!value) throw new Error(`${arg} requires a value`);
+      selection[arg.slice(2)] = value;
+    } else if (arg === "--enabled") selection.enabled = true;
+    else if (arg === "--disabled") selection.enabled = false;
+    else throw new Error(`Unknown runtime argument: ${arg}`);
+  }
+  try { process.stdout.write(`${JSON.stringify(resolveDevExecRuntimeSelection(selection), null, 2)}\n`); process.exitCode = 0; }
+  catch (error) { process.stderr.write(`${String(error?.message || error)}\n`); process.exitCode = 2; }
+}
+else if (command === "run") {
+  try { process.exitCode = await runTask(args); }
+  catch (error) {
+    const result = publicResult(blockedResult("unknown", errorText(error)));
+    const evidencePath = flagValue(args, ["--evidence", "--log"]);
+    const outputPath = flagValue(args, ["--output"]);
+    try { atomicWrite(evidencePath || defaultEvidencePath("unknown"), { protocol: "devexec.runtime.evidence", schema_version: 1, result, log: { event: "runtime_input_blocked", task_id: result.task_id, status: result.status, blocker: result.blocker } }); } catch { /* keep stdout truthful even when the requested evidence path is unavailable */ }
+    try { if (outputPath) atomicWrite(outputPath, result); } catch { /* output is optional */ }
+    try { process.stdout.write(`${JSON.stringify(result, null, 2)}\n`); } catch { process.stderr.write("runtime run failed\n"); }
+    process.exitCode = exitCodeForResult(result);
+  }
+}
+else if (command === "metrics") {
+  const subcommand = args.shift();
+  if (subcommand !== "summarize" || args.length !== 1) { usage(); process.exitCode = 2; }
+  else {
+    try { process.stdout.write(`${JSON.stringify(summarizeLocalRunRecords(args[0]), null, 2)}\n`); process.exitCode = 0; }
+    catch (error) { process.stderr.write(`${safeText(error?.message || error, 1000)}\n`); process.exitCode = 2; }
+  }
+}
+else if (command === "recovery") {
+  const subcommand = args.shift();
+  if (subcommand !== "scan") { usage(); process.exitCode = 2; }
+  else {
+    let stateDir = null;
+    let runtimeCacheDir = null;
+    for (let i = 0; i < args.length; i += 1) {
+      if ((args[i] !== "--state-dir" && args[i] !== "--ephemera-cache-dir") || !args[i + 1]) throw new Error("recovery scan requires --state-dir <state-dir>");
+      if (args[i] === "--state-dir") stateDir = args[++i];
+      else runtimeCacheDir = args[++i];
+    }
+    try {
+      const runtime = await loadEphemeraRuntimePackage({ cacheDir: runtimeCacheDir || process.env.EPHEMERA_RUNTIME_CACHE_DIR || undefined, worktree: process.cwd() });
+      if (typeof runtime.scanRecoveryState !== "function") throw new Error("EPHEMERA_EXPORTS_MISMATCH: scanRecoveryState is unavailable");
+      process.stdout.write(`${JSON.stringify(runtime.scanRecoveryState(stateDir), null, 2)}\n`);
+      process.exitCode = 0;
+    }
+    catch (error) { process.stderr.write(`${safeText(errorText(error), 1000)}\n`); process.exitCode = 2; }
+  }
+}
 else { usage(); process.exitCode = 2; }
