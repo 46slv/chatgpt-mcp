@@ -1,6 +1,9 @@
 # Dev Exec Closed Goal Loop — Operator Runbook
 
-Status: implemented with completion-driven semantic supervision and legacy bounded compatibility on branch `automation/devexec-codex-closed-goal-loop-20260902`.
+Status: implemented with completion-driven semantic supervision and the
+SHIRO-WS standard local lane: Spark-X2.5-4B Q6_K via llama.cpp Vulkan on
+localhost. Legacy bounded/cloud and explicitly selected provider lanes remain
+compatible.
 
 The current source of truth is the checked-in implementation and focused
 completion-driven tests; real runtime canary evidence must remain runtime-only
@@ -30,6 +33,30 @@ exact Codex turn completes
 ```
 
 The Local Model is deliberately not a task compiler or routing authority in this path. In `RELAY` mode it cannot rewrite the report or prompt, choose a ChatGPT target, choose a Codex thread, choose an executable, or issue arbitrary commands.
+
+## SHIRO-WS local primary
+
+The omitted local relay/worker configuration resolves to the qualified
+Spark-X2.5-4B-Q6_K GGUF served by llama.cpp Vulkan at
+`http://127.0.0.1:18080/v1`. The normal context is `32768` tokens. `65536` is
+an explicit long-context lane and must be selected with
+`start-spark-primary.ps1 -Context 65536` (or `LLAMACPP_CONTEXT=65536` for one
+bounded invocation).
+
+The launcher maps the physical GPU by the exact `nvidia-smi` device name
+`NVIDIA GeForce RTX 3070 Ti` to the llama.cpp Vulkan device before starting a
+server. It uses `--split-mode none`, `--main-gpu <mapped-runtime-index>`,
+`-ngl 99`, and `--fit off`; a missing identity mapping, competing listener, or
+CPU placement is a blocked start. The endpoint is loopback-only.
+
+On SHIRO-WS, the installed Startup wrapper under
+`%LOCALAPPDATA%\ChatGPTMCPProbe\control-launcher` runs the bounded Spark
+`Ensure` before invoking the existing DevExec control host. Its prior contents
+were backed up before this migration; no independent control plane was added.
+
+Qwen and LM Studio are retained only as explicitly named compatibility assets.
+They are never selected when the Spark server is unavailable, and the cloud
+escalation/fallback policy is unchanged.
 
 ## Contract and canary status
 
@@ -143,8 +170,8 @@ Run or inspect an admitted task:
 node .\tools\devexec.mjs closed-loop run `
   --admission <admission-id-or-absolute-manifest-path> `
   --until-complete `
-  --relay-url http://127.0.0.1:1234/v1 `
-  --relay-model qwen/qwen3.5-4b `
+  --relay-url http://127.0.0.1:18080/v1 `
+  --relay-model Spark-X2.5-4B-Q6_K.gguf `
   --mcp-config "$env:USERPROFILE\.lmstudio\mcp.json"
 
 node .\tools\devexec.mjs closed-loop inspect --admission <admission-id-or-absolute-manifest-path>

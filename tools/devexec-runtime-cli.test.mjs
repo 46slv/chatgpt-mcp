@@ -71,16 +71,14 @@ test("public runtime run refuses an explicit local task until the EPHEMERA packa
   assert.equal(JSON.stringify(saved).includes("source body"), false);
 });
 
-test("default and disabled selectors never load or invoke a local adapter", () => {
+test("disabled local selector fails closed without loading any compatibility adapter", () => {
   const f = fixture();
   const task = taskFile(f);
   const adapter = adapterFile(f, `throw new Error("local adapter must not load");`);
-  for (const flags of [[], ["--runtime", "local", "--provider", "freetoken", "--disabled"]]) {
-    const result = invoke(["--task", task, "--adapter-module", adapter, ...flags]);
-    assert.equal(result.status, 2, result.stderr);
-    assert.equal(result.parsed.status, "BLOCKED");
-    assert.match(result.parsed.blocker, /explicit local FreeToken runtime|required|not started/i);
-  }
+  const result = invoke(["--task", task, "--adapter-module", adapter, "--runtime", "local", "--provider", "llamacpp", "--disabled"]);
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.parsed.status, "BLOCKED");
+  assert.match(result.parsed.blocker, /explicit supported local runtime|required|not started/i);
 });
 
 test("malformed and unknown-field task files fail closed with truthful input evidence", () => {

@@ -16,7 +16,9 @@ npm run build
 npm test
 ```
 
-`npm test` runs the deterministic DevExec MJS suite, the portability checks, and the read-only preflight. A missing LM Studio or browser listener is reported by preflight but does not make installation perform side effects.
+`npm test` runs the deterministic DevExec MJS suite, the portability checks,
+and the read-only preflight. A missing Spark/llama.cpp or browser listener is
+reported by preflight but does not make installation perform side effects.
 
 ## 2. Prepare ChatGPT and Chrome CDP
 
@@ -107,20 +109,38 @@ node tools/devexec-goal.mjs --dry-run "describe the bounded task"
 
 Dry-run performs no worker start and writes no durable state. Keep `LOCAL_WORKER_ALLOW_WRITE=0` unless a separate, reviewed write work package explicitly requires otherwise.
 
-## 4. Optional local worker / LM Studio
+## 4. Standard local worker / Spark llama.cpp
 
-LocalExecutor and model files are separate dependencies; they are intentionally not bundled here. Provision LocalExecutor from its approved source in a separate directory, then point this checkout at it with environment variables. Start LM Studio's local server using its normal UI/CLI and confirm the model identifier before running a worker.
+The standard local lane is the qualified `Spark-X2.5-4B-Q6_K.gguf` model on
+llama.cpp Vulkan, served only on `127.0.0.1:18080` with a `32768`-token
+context. Set the exact, already-qualified model and executable paths outside
+the checkout; the launcher resolves the RTX 3070 Ti by device name and maps it
+to the Vulkan index at runtime.
 
 ```powershell
 . .\tools\devexec.env.example.ps1
-$env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
-$env:LOCAL_WORKER_MODEL = 'the-model-id-visible-in-lm-studio'
+$env:LLAMACPP_MODEL_PATH = 'C:\Users\<user>\.cache\huggingface\hub\models--abenzerps--Spark-X2.5-4B-GGUF\snapshots\<qualified-snapshot>\Spark-X2.5-4B-Q6_K.gguf'
+$env:LLAMACPP_COMMAND = 'C:\path\to\llama.exe'
 $env:LOCAL_WORKER_EXECUTOR_ROOT = "$env:USERPROFILE\Documents\LocalExecutorRepo"
 $env:LOCAL_WORKER_PROBE_ROOT = "$env:USERPROFILE\Documents\ChatGPTMCPProbe"
 $env:LOCAL_WORKER_ALLOW_WRITE = '0'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\start-spark-primary.ps1 -Mode Ensure
 ```
 
-Set `LOCAL_WORKER_PROFILE` to the external LocalExecutor read-only profile when the default profile discovery is not suitable. Other bounded controls (`LOCAL_WORKER_CONTEXT_WINDOW`, `LOCAL_WORKER_MAX_PLANNER_ROUNDS`, `LOCAL_WORKER_PLANNER_TIMEOUT_MS`, and `LOCAL_WORKER_PLANNER_ATTEMPTS`) are optional environment overrides. Never put `mcp.json`, model caches, executor credentials, or runtime state under this checkout.
+The installed Windows Startup wrapper at
+`%LOCALAPPDATA%\ChatGPTMCPProbe\control-launcher\DevExec Control Autostart.cmd`
+performs the same bounded `Ensure` first, then starts the existing DevExec
+control host. It does not install or start a second relay/control system.
+
+The launcher refuses a non-loopback endpoint, an ambiguous/missing GPU identity,
+a different model already using the port, or a server that reports CPU-only
+placement. `-Context 65536` is an explicit long-context run and must not be
+persisted as the normal default. A failed Spark start is `BLOCKED`; it never
+falls back to Qwen, LM Studio, or another local model.
+
+Qwen/LM Studio can still be used as a compatibility lane only by explicitly
+setting `LOCAL_WORKER_PROVIDER=lmstudio` and naming the model. Those values are
+not read by the standard Spark path.
 
 ## 5. Optional autonomous ordinary-text consultation
 
@@ -159,7 +179,8 @@ The normal external locations are:
 - Target registry: `%LOCALAPPDATA%\DevExec\targets.json`.
 - DevExec state/runs: `%LOCALAPPDATA%\ChatGPTMCPProbe\dev-exec-state` and `dev-exec-runs` (override with `DEV_EXEC_STATE_DIR` / `DEV_EXEC_RUNS_DIR`).
 - Consultation state: `%LOCALAPPDATA%\ChatGPTMCPProbe\consultation-state` (override with `DEV_EXEC_CONSULTATION_STATE_DIR`).
-- LM Studio MCP configuration: `%USERPROFILE%\.lmstudio\mcp.json`.
+- ChatGPT MCP compatibility configuration: `%USERPROFILE%\.lmstudio\mcp.json`
+  (transport configuration only; it does not select the local inference model).
 
 Keep these outside Git and back them up using the machine's normal protected backup mechanism. Do not commit `.env` files, copied PowerShell environment files, cookies, browser profiles, target registries, `mcp.json`, LocalExecutor trees, model weights, state, run logs, or generated reports. The tracked env file is an example only and contains no secrets.
 
@@ -175,10 +196,15 @@ It reports command availability, repository/build paths, existence and validity 
 
 - `TARGET_NOT_OPEN`: start the CDP Chrome profile on port 9222, open the exact captured `chatgpt.com/c/<id>` or `chatgpt.com/g/<slug>/c/<id>` URL, and run `node tools/devexec-target.mjs verify <alias>` again.
 - `403` when publishing: the GitHub identity lacks write permission to the upstream repository. Push to an authorized fork/remote or obtain permission; do not force-push or rewrite history.
-- Missing model / `MODEL_NOT_FOUND`: inspect the model id shown by LM Studio, set `LOCAL_WORKER_MODEL` exactly, ensure the LM Studio local server is listening on its configured port, and rerun preflight. No model is downloaded automatically.
+- Missing model / `MODEL_LOAD_FAILURE`: verify the exact `LLAMACPP_MODEL_PATH`
+  and `LLAMACPP_COMMAND`, then rerun the Spark launcher. No model is
+  downloaded automatically and no alternate model is selected.
+- `GPU_UNAVAILABLE` / `GPU_CONFLICT`: verify `nvidia-smi` exposes the named
+  RTX 3070 Ti and that the llama.cpp Vulkan device list contains the same name;
+  the numeric Vulkan index is resolved at runtime.
 - `CDP_UNAVAILABLE`: verify the port, profile, and Chrome process; do not broaden network exposure beyond localhost.
 - `browser_not_found`: set `CHATGPT_MCP_CHROME_PATH` to an existing Chrome executable or install Playwright Chromium with `npx playwright install chromium`. Use `-Plan` first; no browser is started in plan mode.
 - `early_exit` / `startup_timeout`: the browser was not terminated by the launcher. Check the reported executable/profile and existing process lock, then retry with a dedicated profile and bounded `-StartupTimeoutSeconds`.
 - Consultation remains disabled unless `DEV_EXEC_CHATGPT_CONSULT_ENABLED=1` and a valid `DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS` are present. `BLOCKED` and `DELIVERY_UNKNOWN` are expected fail-closed outcomes, not permission prompts to bypass.
 
-For a new machine, the bounded completion check is: `npm ci`, Playwright Chromium installed, `npm run build`, `npm test` passing, target captured and verified, then a dry-run with write disabled. Live ChatGPT or LM Studio success depends on external login and local services and should be recorded separately from deterministic repository tests.
+For a new machine, the bounded completion check is: `npm ci`, Playwright Chromium installed, `npm run build`, `npm test` passing, the Spark launcher health/model/GPU readback passing, target captured and verified, then a dry-run with write disabled. Live ChatGPT success depends on external login; local Spark evidence is recorded separately from deterministic repository tests.

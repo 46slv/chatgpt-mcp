@@ -3,12 +3,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
+import { createLlamaCppInferenceAdapter } from "./llamacpp-inference-adapter.mjs";
 import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devexec-runtime-selector.mjs";
 import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog, sanitizeRuntimeProviderIdentity } from "./local-worker-runtime.mjs";
 import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
 import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
+import {
+  SPARK_PRIMARY_MODEL,
+  SPARK_PRIMARY_PROVIDER,
+  SPARK_PRIMARY_RUNTIME,
+} from "./devexec-local-defaults.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -24,14 +30,17 @@ function safeText(value, max = 1000) {
 }
 
 function identityFor(selection, model = null) {
+  const runtime = selection?.runtime || SPARK_PRIMARY_RUNTIME;
+  const provider = selection?.provider || SPARK_PRIMARY_PROVIDER;
+  const effectiveModel = model || (runtime === SPARK_PRIMARY_RUNTIME && provider === SPARK_PRIMARY_PROVIDER ? SPARK_PRIMARY_MODEL : null);
   return sanitizeRuntimeProviderIdentity({
-    runtime: selection?.runtime || "default",
-    provider: selection?.provider || "existing",
-    ...(model ? { model: safeText(model, 256) } : {}),
+    runtime,
+    provider,
+    ...(effectiveModel ? { model: safeText(effectiveModel, 256) } : {}),
   });
 }
 
-function blockedResult(taskId, blocker, identity = { runtime: "default", provider: "existing" }) {
+function blockedResult(taskId, blocker, identity = { runtime: SPARK_PRIMARY_RUNTIME, provider: SPARK_PRIMARY_PROVIDER, model: SPARK_PRIMARY_MODEL }) {
   return {
     version: RESULT_CONTRACT_VERSION,
     task_id: SAFE_TASK_ID.test(String(taskId || "")) ? String(taskId) : "unknown",
@@ -52,7 +61,7 @@ function publicResult(result) {
   for (const key of ["exit_code", "wall_time_ms"]) if (Number.isFinite(tests[key])) safeTests[key] = tests[key];
   for (const key of ["timed_out", "cancelled", "malformed", "invalid_evidence"]) if (typeof tests[key] === "boolean") safeTests[key] = tests[key];
   const safeIdentity = {};
-  for (const key of ["runtime", "provider", "model", "device_index"]) {
+  for (const key of ["runtime", "provider", "model", "device_index", "device_name", "runtime_index", "context_length", "serve_url"]) {
     const value = result?.runtime_provider_identity?.[key];
     if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = key === "model" ? sanitizeRuntimeProviderIdentity({ model: value }).model : typeof value === "string" ? safeText(value, 256) : value;
   }
@@ -98,9 +107,6 @@ function atomicWrite(file, value) {
   let fd = null;
   let owned = false;
   try {
-    // Keep the exclusive descriptor through write+fsync.  Never reopen the
-    // temporary path: a replacement reparse point must not redirect evidence
-    // outside the requested destination.
     fd = fs.openSync(temporary, "wx", 0o600);
     owned = true;
     const bytes = Buffer.from(encoded, "utf8");
@@ -133,9 +139,6 @@ function loadTaskFile(file) {
   let parsed;
   try { parsed = JSON.parse(fs.readFileSync(target, "utf8")); } catch { throw new Error("task file is not valid JSON"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("task JSON must be an object");
-  // validateTaskContract owns the version and unknown-field allowlist. Do not
-  // use createTaskContract here: it intentionally projects fields and would
-  // hide a typo in a user-supplied TaskContract file.
   return validateTaskContract(parsed, { verifyGit: false });
 }
 
@@ -199,9 +202,10 @@ async function runTask(args) {
   let leaseStateDir = null;
   let runtimeCacheDir = null;
   const freetoken = {};
+  const llamacpp = {};
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--ledger-dir", "--recovery-dir", "--lease-dir", "--ephemera-cache-dir"].includes(arg)) {
+    if (["--runtime", "--provider", "--task", "--evidence", "--log", "--output", "--adapter-module", "--model", "--model-path", "--control-url", "--serve-url", "--llama-command", "--context", "--device-index", "--ledger-dir", "--recovery-dir", "--lease-dir", "--ephemera-cache-dir"].includes(arg)) {
       const value = args[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === "--runtime" || arg === "--provider") selection[arg.slice(2)] = value;
@@ -213,10 +217,13 @@ async function runTask(args) {
       else if (arg === "--recovery-dir") recoveryStateDir = value;
       else if (arg === "--lease-dir") leaseStateDir = value;
       else if (arg === "--ephemera-cache-dir") runtimeCacheDir = value;
-      else if (arg === "--model") freetoken.model = value;
-      else if (arg === "--model-path") freetoken.modelPath = value;
+      else if (arg === "--model") { freetoken.model = value; llamacpp.model = value; }
+      else if (arg === "--model-path") { freetoken.modelPath = value; llamacpp.modelPath = value; }
       else if (arg === "--control-url") freetoken.controlUrl = value;
-      else if (arg === "--serve-url") freetoken.serveUrl = value;
+      else if (arg === "--serve-url") { freetoken.serveUrl = value; llamacpp.serveUrl = value; }
+      else if (arg === "--llama-command") llamacpp.command = value;
+      else if (arg === "--context") llamacpp.contextLength = Number(value);
+      else if (arg === "--device-index") { freetoken.deviceIndex = Number(value); llamacpp.deviceIndex = Number(value); }
     } else if (arg === "--enabled") selection.enabled = true;
     else if (arg === "--disabled") selection.enabled = false;
     else throw new Error(`Unknown runtime argument: ${arg}`);
@@ -233,10 +240,9 @@ async function runTask(args) {
     process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
     return exitCodeForResult(publicValue);
   }
-  // A missing selector is deliberately a no-op. This keeps the established
-  // cloud/default path untouched and makes accidental local execution impossible.
-  if (selected.runtime !== "local" || selected.provider !== "freetoken" || selected.enabled !== true) {
-    const result = blockedResult(task.task_id, "explicit local FreeToken runtime is required; local execution was not started", selected);
+  const supportedLocal = selected.runtime === "local" && ["freetoken", "llamacpp"].includes(selected.provider) && selected.enabled === true;
+  if (!supportedLocal) {
+    const result = blockedResult(task.task_id, "explicit supported local runtime is required; local execution was not started", selected);
     const publicValue = publicResult(result);
     atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_not_enabled", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } });
     if (outputPath) atomicWrite(outputPath, publicValue);
@@ -244,27 +250,39 @@ async function runTask(args) {
     return exitCodeForResult(publicValue);
   }
 
+  const providerConfig = selected.provider === "llamacpp" ? llamacpp : freetoken;
   let adapter;
   try {
     adapter = adapterModule
       ? await loadInjectedAdapter(adapterModule, { task, selection: selected })
-      : createFreeTokenInferenceAdapter({ config: { enabled: true, ...freetoken }, env: process.env, log: () => {} });
+      : selected.provider === "llamacpp"
+        ? createLlamaCppInferenceAdapter({ config: { enabled: true, ...llamacpp }, env: process.env, log: () => {} })
+        : createFreeTokenInferenceAdapter({ config: { enabled: true, ...freetoken }, env: process.env, log: () => {} });
   } catch (error) {
-    const result = blockedResult(task.task_id, error?.message || error, identityFor(selected, freetoken.model || process.env.FREETOKEN_MODEL || null));
+    const result = blockedResult(task.task_id, error?.message || error, identityFor(selected, providerConfig.model || null));
     const publicValue = publicResult(result);
     atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log: { event: "runtime_adapter_unavailable", task_id: task.task_id, status: publicValue.status, blocker: publicValue.blocker, runtime_provider_identity: publicValue.runtime_provider_identity } });
     if (outputPath) atomicWrite(outputPath, publicValue);
     process.stdout.write(`${JSON.stringify(publicValue, null, 2)}\n`);
     return exitCodeForResult(publicValue);
   }
-  const entrypoint = createDevExecEntrypoint({ selection: selected, adapters: { freetoken: adapter }, freetoken, recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(), leaseStateDir: leaseStateDir || defaultLeaseStateDir(), runtimeCacheDir: runtimeCacheDir || undefined });
+  const adapters = selected.provider === "llamacpp" ? { llamacpp: adapter } : { freetoken: adapter };
+  const entrypoint = createDevExecEntrypoint({
+    selection: selected,
+    adapters,
+    freetoken,
+    llamacpp,
+    recoveryStateDir: recoveryStateDir || defaultRecoveryStateDir(),
+    leaseStateDir: leaseStateDir || defaultLeaseStateDir(),
+    runtimeCacheDir: runtimeCacheDir || undefined,
+  });
   const abort = new AbortController();
   const onSignal = () => abort.abort(new Error("cancelled by caller"));
   process.once("SIGINT", onSignal);
   let outcome;
   try { outcome = await entrypoint.run(task, { signal: abort.signal, runLedgerDir: ledgerDir || defaultLedgerDir(), selection: selected }); }
   finally { process.removeListener("SIGINT", onSignal); }
-  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}), ...(outcome.ledger ? { ledger: outcome.ledger } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, freetoken.model || null));
+  const rawResult = outcome?.result ? { ...outcome.result, ...(outcome.run_id ? { run_id: outcome.run_id } : {}), ...(outcome.ledger ? { ledger: outcome.ledger } : {}) } : blockedResult(task.task_id, "runtime returned no result", identityFor(selected, providerConfig.model || null));
   const publicValue = publicResult(rawResult);
   const log = redactStructuredLog({ event: "runtime_result", task_id: publicValue.task_id, status: publicValue.status, blocker: publicValue.blocker, changed_files: publicValue.changed_files, tests: { status: publicValue.tests.status, exit_code: publicValue.tests.exit_code ?? null }, runtime_provider_identity: publicValue.runtime_provider_identity, runtime_metrics: publicValue.runtime_metrics }, { maxString: 1000 });
   atomicWrite(evidencePath || defaultEvidencePath(task.task_id), { protocol: "devexec.runtime.evidence", schema_version: 1, result: publicValue, log });
@@ -274,8 +292,8 @@ async function runTask(args) {
 }
 
 function usage() {
- process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken>] [--enabled|--disabled]\n");
- process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider freetoken [--enabled|--disabled] [--recovery-dir <path>] [--lease-dir <path>] [--ephemera-cache-dir <path>] [--evidence <path>] [--output <path>]\n");
+ process.stderr.write("Usage: devexec runtime select [--runtime <default|cloud|local>] [--provider <existing|chatgpt|lmstudio|freetoken|llamacpp>] [--enabled|--disabled]\n");
+ process.stderr.write("       devexec runtime run --task <TaskContract.json> --runtime local --provider <freetoken|llamacpp> [--model <id>] [--model-path <path>] [--serve-url <loopback-url>] [--llama-command <path>] [--context <tokens>] [--device-index <n>] [--recovery-dir <path>] [--lease-dir <path>] [--ephemera-cache-dir <path>] [--evidence <path>] [--output <path>]\n");
  process.stderr.write("       devexec runtime metrics summarize <ledger-dir>\n");
  process.stderr.write("       devexec runtime recovery scan --state-dir <state-dir> [--ephemera-cache-dir <path>]\n");
 }

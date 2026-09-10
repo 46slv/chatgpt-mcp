@@ -16,7 +16,7 @@ const terminal=['COMPLETE','FAILED','NEEDS_HUMAN','CANCELLED'].includes(state.ph
 if(!terminal){console.log(JSON.stringify({executed:false,reason:'CURRENT_RUN_NOT_TERMINAL',phase:state.phase}));process.exit(0);}
 const ctx=path.join(root,'supervisor-context'); const plan=loadRotationPlan(ctx,mission); const cp=loadSupervisorCheckpoint(ctx,mission);
 const pack=buildSupervisorRehydratePack({checkpoint:cp,freshNotion:cp.notion_authority,freshGit:cp.git});
-const cfg=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.lmstudio','mcp.json'),'utf8')); const m=cfg.mcpServers?.['chatgpt-web-probe']; if(!m?.command)throw Error('chatgpt-web-probe unavailable');
+const cfg=JSON.parse(fs.readFileSync(process.env.DEV_EXEC_MCP_CONFIG||path.join(os.homedir(),'.lmstudio','mcp.json'),'utf8')); const m=cfg.mcpServers?.['chatgpt-web-probe']; if(!m?.command)throw Error('chatgpt-web-probe unavailable');
 const client=new Client({name:'devexec-supervisor-rotate',version:'0.1.0'}); const tr=new StdioClientTransport({command:m.command,args:m.args||[],env:{...process.env,...(m.env||{})}});
 try{await client.connect(tr);const registry=loadRegistry();const current=registry.targets[plan.current_target_id];if(!current)throw Error('current target missing');
 const result=await executeSupervisorRotationBoundary({plan,state_dir:ctx,registry,client,rehydrate_pack:pack,current_conversation_id:current.conversation_id,current_run_terminal:true,pending_execution:false,save_registry:r=>saveRegistry(r)});

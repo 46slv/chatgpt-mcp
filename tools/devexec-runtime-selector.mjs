@@ -1,12 +1,17 @@
 import { createFreeTokenInferenceAdapter } from "./freetoken-inference-adapter.mjs";
+import { createLlamaCppInferenceAdapter } from "./llamacpp-inference-adapter.mjs";
 import os from "node:os";
 import path from "node:path";
 import { runLocalWorkerTask, validateTaskContract, validateTaskBoundary } from "./local-worker-runtime.mjs";
 import { logicalModelId } from "./freetoken-inference-adapter.mjs";
 import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
+import {
+  SPARK_PRIMARY_PROVIDER,
+  SPARK_PRIMARY_RUNTIME,
+} from "./devexec-local-defaults.mjs";
 
 export const DEVEXEC_RUNTIME = Object.freeze({ DEFAULT: "default", CLOUD: "cloud", LOCAL: "local" });
-export const DEVEXEC_PROVIDER = Object.freeze({ EXISTING: "existing", CHATGPT: "chatgpt", LM_STUDIO: "lmstudio", FREETOKEN: "freetoken" });
+export const DEVEXEC_PROVIDER = Object.freeze({ EXISTING: "existing", CHATGPT: "chatgpt", LM_STUDIO: "lmstudio", FREETOKEN: "freetoken", LLAMA_CPP: "llamacpp" });
 
 export class DevExecRuntimeSelectionError extends Error {
   constructor(message, code = "INVALID_RUNTIME_SELECTION") {
@@ -19,30 +24,39 @@ export class DevExecRuntimeSelectionError extends Error {
 function fail(message, code) { throw new DevExecRuntimeSelectionError(message, code); }
 
 /**
- * Resolve an explicit runtime choice. The default is deliberately opaque and
- * keeps the caller's existing Cloud/LM Studio adapter untouched. Local
- * FreeToken is entered only when both runtime and provider are explicit.
+ * Resolve the runtime choice.  The omitted/default lane is the qualified
+ * Spark/llama.cpp provider.  Cloud and legacy providers remain available only
+ * when the caller names them; a disabled local lane is a hard stop rather than
+ * a silent Qwen/LM Studio fallback.
  */
 export function resolveDevExecRuntimeSelection(input = {}, env = process.env) {
   if (!input || typeof input !== "object" || Array.isArray(input)) fail("runtime selection must be an object");
   const hasExplicit = input.runtime !== undefined || input.provider !== undefined || input.enabled !== undefined;
-  const enabled = input.enabled ?? (hasExplicit ? true : env.DEV_EXEC_LOCAL_ENABLED === "1");
+  const envRuntime = env.DEV_EXEC_RUNTIME == null ? null : String(env.DEV_EXEC_RUNTIME).trim().toLowerCase();
+  const envProvider = env.DEV_EXEC_PROVIDER == null ? null : String(env.DEV_EXEC_PROVIDER).trim().toLowerCase();
+  const implicitSpark = !hasExplicit && !envRuntime && !envProvider;
+  const envDisabled = env.DEV_EXEC_LOCAL_ENABLED === "0";
+  const enabled = input.enabled ?? (envDisabled ? false : (hasExplicit || envRuntime || envProvider ? true : implicitSpark));
   if (typeof enabled !== "boolean") fail("enabled must be boolean");
-  const runtime = String(input.runtime ?? env.DEV_EXEC_RUNTIME ?? DEVEXEC_RUNTIME.DEFAULT).trim().toLowerCase();
-  const providerValue = input.provider ?? env.DEV_EXEC_PROVIDER;
+  const runtime = String(input.runtime ?? envRuntime ?? (implicitSpark ? SPARK_PRIMARY_RUNTIME : DEVEXEC_RUNTIME.DEFAULT)).trim().toLowerCase();
+  const providerValue = input.provider ?? envProvider ?? (implicitSpark ? SPARK_PRIMARY_PROVIDER : null);
   const provider = providerValue == null ? null : String(providerValue).trim().toLowerCase();
 
   if (!Object.values(DEVEXEC_RUNTIME).includes(runtime)) fail(`unsupported runtime: ${runtime}`, "UNSUPPORTED_RUNTIME");
-  // Disabled is an explicit fail-safe back to the established path. It never
-  // constructs or starts a local provider.
-  if (!enabled || runtime === DEVEXEC_RUNTIME.DEFAULT) {
-    return Object.freeze({ runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, explicit: hasExplicit, enabled: false });
+  // Disabled is a hard stop. It never constructs or starts a provider and does
+  // not route back to an old model implicitly.
+  if (!enabled) {
+    return Object.freeze({ runtime: runtime === DEVEXEC_RUNTIME.DEFAULT ? SPARK_PRIMARY_RUNTIME : runtime, provider: provider || SPARK_PRIMARY_PROVIDER, explicit: hasExplicit, enabled: false });
+  }
+  if (runtime === DEVEXEC_RUNTIME.DEFAULT) {
+    if (provider && provider !== DEVEXEC_PROVIDER.EXISTING) fail("default runtime accepts only the explicit existing compatibility provider", "UNSUPPORTED_PROVIDER");
+    return Object.freeze({ runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, explicit: hasExplicit, enabled: true });
   }
   if (runtime === DEVEXEC_RUNTIME.LOCAL) {
-    if (![DEVEXEC_PROVIDER.FREETOKEN, DEVEXEC_PROVIDER.LM_STUDIO].includes(provider)) {
+    if (![DEVEXEC_PROVIDER.FREETOKEN, DEVEXEC_PROVIDER.LM_STUDIO, DEVEXEC_PROVIDER.LLAMA_CPP].includes(provider)) {
       fail("local runtime requires an explicit supported provider", "UNSUPPORTED_PROVIDER");
     }
-    return Object.freeze({ runtime, provider, explicit: true, enabled: true });
+    return Object.freeze({ runtime, provider, explicit: hasExplicit || Boolean(envRuntime || envProvider), enabled: true });
   }
   if (runtime === DEVEXEC_RUNTIME.CLOUD) {
     if (provider && ![DEVEXEC_PROVIDER.CHATGPT, DEVEXEC_PROVIDER.EXISTING].includes(provider)) {
@@ -57,7 +71,7 @@ export const selectDevExecRuntime = resolveDevExecRuntimeSelection;
 export const resolveRuntimeSelector = resolveDevExecRuntimeSelection;
 
 function adapterFor(selection, adapters = {}, options = {}) {
-  if (selection.runtime === DEVEXEC_RUNTIME.DEFAULT || selection.provider === DEVEXEC_PROVIDER.EXISTING) {
+  if ((selection.runtime === DEVEXEC_RUNTIME.DEFAULT && selection.provider === DEVEXEC_PROVIDER.EXISTING) || selection.provider === DEVEXEC_PROVIDER.EXISTING) {
     if (!adapters.default || typeof adapters.default.run !== "function") fail("default adapter is required", "ADAPTER_MISSING");
     return adapters.default;
   }
@@ -69,6 +83,11 @@ function adapterFor(selection, adapters = {}, options = {}) {
   if (selection.provider === DEVEXEC_PROVIDER.FREETOKEN) {
     const adapter = adapters.freetoken || createFreeTokenInferenceAdapter(options.freetoken || {});
     if (!adapter || typeof adapter.run !== "function") fail("FreeToken adapter is required", "ADAPTER_MISSING");
+    return adapter;
+  }
+  if (selection.provider === DEVEXEC_PROVIDER.LLAMA_CPP) {
+    const adapter = adapters.llamacpp || createLlamaCppInferenceAdapter(options.llamacpp || {});
+    if (!adapter || typeof adapter.run !== "function") fail("llama.cpp adapter is required", "ADAPTER_MISSING");
     return adapter;
   }
   if (selection.provider === DEVEXEC_PROVIDER.LM_STUDIO) {
@@ -98,7 +117,7 @@ function providerLeaseRequest(adapter, provider = "freetoken") {
   try { servePort = Number(new URL(config.serveUrl || "http://127.0.0.1:1919").port || 1919); } catch { /* use fixed default */ }
   return {
     provider: String(adapter?.identity?.provider || provider || "freetoken"),
-    deviceIndex: Number.isInteger(config.deviceIndex) ? config.deviceIndex : 0,
+    deviceIndex: Number.isInteger(adapter?.resolvedDeviceIndex) ? adapter.resolvedDeviceIndex : Number.isInteger(config.deviceIndex) ? config.deviceIndex : 0,
     servePort,
     modelId: logicalModelId(String(config.model || adapter?.identity?.model || "unconfigured"), "unconfigured"),
   };
@@ -122,13 +141,14 @@ export function createDevExecEntrypoint({
   env = process.env,
   adapters = {},
   freetoken = {},
+  llamacpp = {},
   recoveryStateDir = null,
   leaseStateDir = null,
   admissionStateDir = null,
   runtimeCacheDir = null,
 } = {}) {
   const resolved = resolveDevExecRuntimeSelection(selection || {}, env);
-  const adapter = adapterFor(resolved, adapters, { freetoken });
+  const adapter = adapterFor(resolved, adapters, { freetoken, llamacpp });
   const local = resolved.runtime === DEVEXEC_RUNTIME.LOCAL;
   return Object.freeze({
     selection: resolved,

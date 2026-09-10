@@ -27,17 +27,40 @@ $env:LOCAL_WORKER_ALLOW_WRITE = '0'
 # $env:DEV_EXEC_CHATGPT_CONSULT_EVIDENCE_CHARS = '6000'
 # $env:DEV_EXEC_CHATGPT_CONSULT_TIMEOUT_MINUTES = '30'
 
+# SHIRO-WS standard local lane: Spark-X2.5-4B Q6_K through llama.cpp Vulkan.
+# These values are safe to dot-source; a missing model/command remains a
+# fail-closed startup error.  The model path is intentionally machine-local.
+$env:DEV_EXEC_RUNTIME = 'local'
+$env:DEV_EXEC_PROVIDER = 'llamacpp'
+$env:DEV_EXEC_LOCAL_ENABLED = '1'
+$env:LLAMACPP_ENABLED = '1'
+$env:LLAMACPP_MODEL = 'Spark-X2.5-4B-Q6_K.gguf'
+$env:LLAMACPP_SERVE_URL = 'http://127.0.0.1:18080'
+$env:LLAMACPP_CONTEXT = '32768'
+$env:LLAMACPP_DEVICE_NAME = 'NVIDIA GeForce RTX 3070 Ti'
+# Set this to the exact qualified GGUF path on the host:
+# $env:LLAMACPP_MODEL_PATH = 'C:\path\to\Spark-X2.5-4B-Q6_K.gguf'
+# Set the absolute llama.exe path used by the startup/worker launcher:
+# $env:LLAMACPP_COMMAND = 'C:\path\to\llama.exe'
+# 64K is an explicit long-context lane; do not make it the normal default:
+# $env:LLAMACPP_CONTEXT = '65536'
+
 # Optional overrides. The adapter has conservative defaults for omitted values.
-# $env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
-# $env:LOCAL_WORKER_MODEL = 'your-local-model-id'
 # $env:LOCAL_WORKER_EXECUTOR_ROOT = 'C:\Users\<user>\Documents\LocalExecutorRepo'
 # $env:LOCAL_WORKER_PROBE_ROOT = 'C:\Users\<user>\Documents\ChatGPTMCPProbe'
 # $env:LOCAL_WORKER_PROFILE = 'C:\Users\<user>\Documents\LocalExecutorRepo\profiles\chatgpt-mcp-probe-readonly.json'
 # $env:LOCAL_WORKER_PYTHON = 'python'
-# $env:LOCAL_WORKER_CONTEXT_WINDOW = '8192'
+# $env:LOCAL_WORKER_CONTEXT_WINDOW = '32768'
 # $env:LOCAL_WORKER_MAX_PLANNER_ROUNDS = '3'
 # $env:LOCAL_WORKER_PLANNER_TIMEOUT_MS = '75000'
 # $env:LOCAL_WORKER_PLANNER_ATTEMPTS = '2'
+
+# Explicit compatibility lane only. It never participates in implicit
+# fallback and must be selected by naming the provider/model.
+# $env:LOCAL_WORKER_PROVIDER = 'lmstudio'
+# $env:LOCAL_WORKER_LMS = 'C:\Path\To\lms.exe'
+# $env:LOCAL_WORKER_MODEL = 'the-explicit-compat-model-id'
+# $env:LOCAL_WORKER_CONTEXT_WINDOW = '8192'
 
 # Optional persistent browser profile override. Keep it outside this repository.
 # $env:CHATGPT_MCP_USER_DATA_DIR = 'C:\Users\<user>\AppData\Local\ChatGPTMCP\user-data'

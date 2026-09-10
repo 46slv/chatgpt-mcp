@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_CLOSED_LOOP_ADMISSION_ROOT,
   DEFAULT_LOCAL_RELAY_URL,
+  DEFAULT_LOCAL_RELAY_MODEL,
   DEFAULT_MCP_CONFIG_PATH,
   admitExistingCodexTask,
   closedLoopAdmissionPath,
@@ -146,7 +147,7 @@ async function run(values) {
     admissionReference: required(values, "admission"),
     admissionRoot: admissionRoot(values),
     relayUrl: values["relay-url"] || process.env.DEV_EXEC_LOCAL_RELAY_URL || DEFAULT_LOCAL_RELAY_URL,
-    relayModel: values["relay-model"] || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || "qwen/qwen3.5-4b",
+    relayModel: values["relay-model"] || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || DEFAULT_LOCAL_RELAY_MODEL,
     mcpConfigPath: values["mcp-config"] || process.env.DEV_EXEC_MCP_CONFIG || DEFAULT_MCP_CONFIG_PATH,
     mode: values.mode,
     until_complete: values["until-complete"] || values["completion-driven"] || false,
