@@ -489,7 +489,8 @@ Agents are replaceable reasoning runtimes selected through a narrow adapter cont
 
 Potential runtimes include:
 
-- current local Qwen/FreeToken path;
+- current local Spark/llama.cpp path (with Qwen/FreeToken retained only for
+  explicit compatibility);
 - future better-quantized local models;
 - Codex;
 - Pi or another Worker Harness;
@@ -796,7 +797,8 @@ No Mission schema or canonical state migration should be required merely to chan
 
 ### Phase 5 — Agent Adapter Registry
 
-- formalize local Qwen/FreeToken, Codex, and future harness adapters;
+- formalize the local Spark/llama.cpp adapter, while retaining explicit
+  Qwen/FreeToken compatibility and future harness adapters;
 - contract-test context, tool calls, cancellation, output schemas, and resource use;
 - route by capability/risk/resource policy rather than hard-coded model identity.
 

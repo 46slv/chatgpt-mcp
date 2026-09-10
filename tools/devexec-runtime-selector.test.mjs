@@ -74,16 +74,29 @@ function provider({ gpuStatus = "CLEAR", result = "PASS", events = [], runs = nu
   };
 }
 
-test("default and disabled selection retain the existing adapter path", async () => {
+test("omitted selection uses the Spark primary and disabled local selection never falls back", () => {
+  const spark = { identity: { runtime: "local", provider: "llamacpp", model: "Spark-X2.5-4B-Q6_K.gguf" }, config: { idleStopMs: 0 }, async run() { return { status: "PASS" }; } };
+  const defaultEntry = createDevExecEntrypoint({ env: {}, adapters: { llamacpp: spark } });
+  assert.deepEqual(defaultEntry.selection, { runtime: DEVEXEC_RUNTIME.LOCAL, provider: DEVEXEC_PROVIDER.LLAMA_CPP, explicit: false, enabled: true });
+  assert.equal(defaultEntry.identity.provider, "llamacpp");
+
   const existing = { async run(value) { return { path: value }; } };
-  const defaultEntry = createDevExecEntrypoint({ adapters: { default: existing } });
-  assert.deepEqual(defaultEntry.selection, { runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, explicit: false, enabled: false });
-  assert.deepEqual(await defaultEntry.run("cloud"), { path: "cloud" });
-  const disabled = createDevExecEntrypoint({
-    selection: { runtime: "local", provider: "freetoken", enabled: false },
-    adapters: { default: existing, freetoken: { async run() { throw new Error("must not route"); } } },
+  const compatibilityEntry = createDevExecEntrypoint({
+    selection: { runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, enabled: true },
+    adapters: { default: existing },
   });
-  assert.deepEqual(await disabled.run("existing"), { path: "existing" });
+  assert.deepEqual(compatibilityEntry.selection, { runtime: DEVEXEC_RUNTIME.DEFAULT, provider: DEVEXEC_PROVIDER.EXISTING, explicit: true, enabled: true });
+
+  const disabled = createDevExecEntrypoint({
+    selection: { runtime: DEVEXEC_RUNTIME.LOCAL, provider: DEVEXEC_PROVIDER.LLAMA_CPP, enabled: false },
+    adapters: { llamacpp: spark, default: existing },
+  });
+  assert.deepEqual(disabled.selection, { runtime: DEVEXEC_RUNTIME.LOCAL, provider: DEVEXEC_PROVIDER.LLAMA_CPP, explicit: true, enabled: false });
+  assert.equal(disabled.identity.provider, "llamacpp");
+
+  const envDisabled = createDevExecEntrypoint({ env: { DEV_EXEC_LOCAL_ENABLED: "0" }, adapters: { llamacpp: spark, default: existing } });
+  assert.deepEqual(envDisabled.selection, { runtime: DEVEXEC_RUNTIME.LOCAL, provider: DEVEXEC_PROVIDER.LLAMA_CPP, explicit: false, enabled: false });
+  assert.equal(envDisabled.identity.provider, "llamacpp");
 });
 
 test("explicit local selection uses the packed System lifecycle and preserves GPU/lease/worker ordering", { skip: !CACHE }, async () => {

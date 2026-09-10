@@ -37,6 +37,12 @@ import {
   createBoundChatGPTTransport,
   validateLocalRelayDecision,
 } from "./devexec-full-relay.mjs";
+import {
+  QWEN_COMPATIBILITY_MODEL,
+  SPARK_PRIMARY_CONTEXT_LENGTH,
+  SPARK_PRIMARY_MODEL,
+  SPARK_PRIMARY_RELAY_URL,
+} from "./devexec-local-defaults.mjs";
 
 export const CLOSED_LOOP_ADMISSION_PROTOCOL = "devexec.closed-loop-admission";
 export const CLOSED_LOOP_ADMISSION_SCHEMA_VERSION = 1;
@@ -45,7 +51,10 @@ export const DEFAULT_CLOSED_LOOP_ADMISSION_ROOT = path.join(
   "ChatGPTMCPProbe",
   "closed-loop-admissions",
 );
-export const DEFAULT_LOCAL_RELAY_URL = "http://127.0.0.1:1234/v1";
+export const DEFAULT_LOCAL_RELAY_URL = SPARK_PRIMARY_RELAY_URL;
+export const DEFAULT_LOCAL_RELAY_MODEL = SPARK_PRIMARY_MODEL;
+export const DEFAULT_LOCAL_RELAY_CONTEXT_LENGTH = SPARK_PRIMARY_CONTEXT_LENGTH;
+export const LEGACY_LOCAL_RELAY_MODEL = QWEN_COMPATIBILITY_MODEL;
 export const DEFAULT_MCP_CONFIG_PATH = path.join(os.homedir(), ".lmstudio", "mcp.json");
 export const DEFAULT_MCP_SERVER_NAME = "chatgpt-web-probe";
 
@@ -652,11 +661,12 @@ function responseContent(body) {
  * sees only the hash/action envelope; it never receives target, thread, path,
  * command, or prompt bytes.
  */
-export function createHttpLocalRelayAdapter({ baseUrl = DEFAULT_LOCAL_RELAY_URL, model, fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
+export function createHttpLocalRelayAdapter({ baseUrl = DEFAULT_LOCAL_RELAY_URL, model = DEFAULT_LOCAL_RELAY_MODEL, fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
   const url = localLoopbackUrl(baseUrl, "local relay URL");
   const selectedModel = requiredText(model, "local relay model", CLOSED_LOOP_FACADE_ERRORS.RELAY_INVALID);
   if (typeof fetchImpl !== "function") throw new ClosedLoopFacadeError("A fetch implementation is required for Local Model RELAY.", CLOSED_LOOP_FACADE_ERRORS.RELAY_INVALID);
   return Object.freeze({
+    identity: Object.freeze({ runtime: "local", provider: "llamacpp", model: selectedModel, serve_url: url, context_length: DEFAULT_LOCAL_RELAY_CONTEXT_LENGTH }),
     decide: async (input = {}) => {
       if (!isObject(input) || input.mode !== "RELAY" || typeof input.request_id !== "string" || typeof input.payload_sha256 !== "string" || typeof input.action_expected !== "string") {
         throw new ClosedLoopFacadeError("Local Model RELAY request shape is invalid.", CLOSED_LOOP_FACADE_ERRORS.RELAY_INVALID);
@@ -673,9 +683,9 @@ export function createHttpLocalRelayAdapter({ baseUrl = DEFAULT_LOCAL_RELAY_URL,
             model: selectedModel,
             temperature: 0,
             max_tokens: 256,
-            // LM Studio's OpenAI-compatible server accepts json_schema (not
-            // json_object) and Qwen 3.5 otherwise spends the whole bound on
-            // hidden reasoning without emitting the hash-only decision.
+            // llama.cpp's OpenAI-compatible server accepts json_schema.  The
+            // Spark server is started with thinking disabled so this bounded
+            // hash-only envelope remains a single short turn.
             reasoning_effort: "none",
             response_format: {
               type: "json_schema",
@@ -871,7 +881,7 @@ export async function runAdmittedClosedLoop({ admission: inputAdmission, admissi
         ...(suppliedContext.current_task === undefined && suppliedContext.currentTask === undefined ? { current_task: currentTask } : {}),
       };
     };
-  const resolvedLocalRelay = localRelay || localModel || createHttpLocalRelayAdapter({ baseUrl: relayUrl || process.env.DEV_EXEC_LOCAL_RELAY_URL || DEFAULT_LOCAL_RELAY_URL, model: relayModel || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || "qwen/qwen3.5-4b", timeoutMs: selectedLimits.local_relay_timeout_ms });
+  const resolvedLocalRelay = localRelay || localModel || createHttpLocalRelayAdapter({ baseUrl: relayUrl || process.env.DEV_EXEC_LOCAL_RELAY_URL || DEFAULT_LOCAL_RELAY_URL, model: relayModel || process.env.DEV_EXEC_LOCAL_RELAY_MODEL || DEFAULT_LOCAL_RELAY_MODEL, timeoutMs: selectedLimits.local_relay_timeout_ms });
   let chatConnection = null;
   let resolvedObserver = observer;
   let resolvedSender = codexSender;

@@ -89,7 +89,7 @@ All tools are blocking: the MCP call returns when ChatGPT has completed or the b
                 |                           |
         Closed Goal Loop              Local runtime
                 |                           |
-     persisted Codex thread       LM Studio / FreeToken
+      persisted Codex thread       llama.cpp / Spark
                 |                 bounded typed harness
         native Codex runtime
 
@@ -132,19 +132,29 @@ The legacy/general `devexec run` path and the Closed Goal Loop are related but n
 
 ## Local runtime
 
-Cloud/established paths remain available. A local provider is selected explicitly; it is not silently chosen:
+Cloud/established paths remain available. The standard local lane is the
+qualified Spark-X2.5-4B Q6_K model served by llama.cpp Vulkan on localhost
+with a normal 32K context. Cloud escalation and the explicit FreeToken/LM
+Studio compatibility lanes remain available without becoming fallback routes:
 
 ```powershell
-node tools/devexec.mjs runtime select --runtime local --provider freetoken --enabled
+node tools/devexec.mjs runtime select
 ```
 
 A local coding task is contract-first:
 
 ```powershell
 node tools/devexec.mjs runtime run --task .\task-contract.json `
-  --runtime local --provider freetoken `
+  --runtime local --provider llamacpp `
   --evidence "$env:TEMP\devexec-evidence.json"
 ```
+
+The implicit selection above resolves to `local/llamacpp` with
+`Spark-X2.5-4B-Q6_K.gguf`, `http://127.0.0.1:18080/v1`, and `32768` tokens.
+Use `start-spark-primary.ps1 -Context 65536` only for the explicit long-context
+lane. A Qwen model or LM Studio provider must be named explicitly for
+compatibility; an unavailable
+Spark server is a blocked run, never a silent model fallback.
 
 Local mutation is restricted by the TaskContract. The parent recomputes Git changes and test evidence before accepting a result. Provider/device/port leases, recovery journals, and bounded evidence prevent local-model execution from becoming an uncontrolled side channel.
 

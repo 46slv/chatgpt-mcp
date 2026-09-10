@@ -4,7 +4,7 @@ import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {loadRegistry,resolveTarget} from './target-registry.mjs';
-function mcpConfigPath(){return path.join(os.homedir(),'.lmstudio','mcp.json');}
+function mcpConfigPath(){return process.env.DEV_EXEC_MCP_CONFIG||path.join(os.homedir(),'.lmstudio','mcp.json');}
 function loadServer(name){const cfg=JSON.parse(fs.readFileSync(mcpConfigPath(),'utf8')); const s=cfg.mcpServers?.[name]; if(!s?.command)throw new Error('MCP server unavailable: '+name); return s;}
 function extract(result){if(result?.isError)throw new Error('chatgpt_reply MCP error'); const blocks=(result?.content||[]).filter(x=>x.type==='text').map(x=>x.text); if(blocks.length!==1)throw new Error('chatgpt_reply expected one text block'); const v=JSON.parse(blocks[0]); if(typeof v.error==='string'&&v.error.trim())throw new Error(v.error.trim()); if(typeof v.response!=='string'||!v.response.trim())throw new Error('chatgpt_reply empty response'); return v.response;}
 export async function replyHeartbeatViaBridge(i={}){

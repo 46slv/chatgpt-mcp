@@ -10,6 +10,11 @@ import { createDevExecEntrypoint, resolveDevExecRuntimeSelection } from "./devex
 import { RESULT_CONTRACT_VERSION, validateTaskContract, redactStructuredLog, sanitizeRuntimeProviderIdentity } from "./local-worker-runtime.mjs";
 import { summarizeLocalRunRecords } from "./local-run-ledger.mjs";
 import { loadEphemeraRuntimePackage } from "./ephemera-runtime-materialize.mjs";
+import {
+  SPARK_PRIMARY_MODEL,
+  SPARK_PRIMARY_PROVIDER,
+  SPARK_PRIMARY_RUNTIME,
+} from "./devexec-local-defaults.mjs";
 
 const MAX_TASK_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
@@ -25,14 +30,17 @@ function safeText(value, max = 1000) {
 }
 
 function identityFor(selection, model = null) {
+  const runtime = selection?.runtime || SPARK_PRIMARY_RUNTIME;
+  const provider = selection?.provider || SPARK_PRIMARY_PROVIDER;
+  const effectiveModel = model || (runtime === SPARK_PRIMARY_RUNTIME && provider === SPARK_PRIMARY_PROVIDER ? SPARK_PRIMARY_MODEL : null);
   return sanitizeRuntimeProviderIdentity({
-    runtime: selection?.runtime || "default",
-    provider: selection?.provider || "existing",
-    ...(model ? { model: safeText(model, 256) } : {}),
+    runtime,
+    provider,
+    ...(effectiveModel ? { model: safeText(effectiveModel, 256) } : {}),
   });
 }
 
-function blockedResult(taskId, blocker, identity = { runtime: "default", provider: "existing" }) {
+function blockedResult(taskId, blocker, identity = { runtime: SPARK_PRIMARY_RUNTIME, provider: SPARK_PRIMARY_PROVIDER, model: SPARK_PRIMARY_MODEL }) {
   return {
     version: RESULT_CONTRACT_VERSION,
     task_id: SAFE_TASK_ID.test(String(taskId || "")) ? String(taskId) : "unknown",
@@ -53,7 +61,7 @@ function publicResult(result) {
   for (const key of ["exit_code", "wall_time_ms"]) if (Number.isFinite(tests[key])) safeTests[key] = tests[key];
   for (const key of ["timed_out", "cancelled", "malformed", "invalid_evidence"]) if (typeof tests[key] === "boolean") safeTests[key] = tests[key];
   const safeIdentity = {};
-  for (const key of ["runtime", "provider", "model", "device_index"]) {
+  for (const key of ["runtime", "provider", "model", "device_index", "device_name", "runtime_index", "context_length", "serve_url"]) {
     const value = result?.runtime_provider_identity?.[key];
     if (typeof value === "string" || Number.isInteger(value)) safeIdentity[key] = key === "model" ? sanitizeRuntimeProviderIdentity({ model: value }).model : typeof value === "string" ? safeText(value, 256) : value;
   }

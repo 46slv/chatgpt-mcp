@@ -24,7 +24,8 @@ test("llama.cpp config is explicit, loopback-only, and defaults to 32K single-de
     modelPath: "C:\\models\\Spark-X2.5-4B-Q6_K.gguf",
   }, {});
   assert.equal(config.contextLength, 32768);
-  assert.equal(config.deviceIndex, 0);
+  assert.equal(config.deviceIndex, null);
+  assert.equal(config.deviceName, "NVIDIA GeForce RTX 3070 Ti");
   assert.equal(config.serveUrl, "http://127.0.0.1:18080");
   assert.equal(config.disableThinking, true);
   assert.throws(() => createLlamaCppConfig({ enabled: true, modelPath: "x.gguf", serveUrl: "http://0.0.0.0:18080" }, {}), /loopback/);
@@ -71,9 +72,10 @@ test("Spark chat requests disable thinking explicitly without discarding existin
   assert.equal(body.chat_template_kwargs.custom, 1);
 });
 
-test("matching external llama.cpp server is reusable and does not trigger a GPU-conflict probe", async () => {
+test("matching external Spark llama.cpp server is reusable and does not trigger a GPU-conflict probe", async () => {
   let gpuChecks = 0;
   const adapter = createLlamaCppInferenceAdapter({
+    env: {},
     config: {
       enabled: true,
       model: "Spark-X2.5-4B-Q6_K.gguf",
@@ -81,6 +83,12 @@ test("matching external llama.cpp server is reusable and does not trigger a GPU-
     },
     gpuProbe: () => { gpuChecks += 1; return { status: "CONFLICT" }; },
     request: async () => ({ status: 200, body: { data: [{ id: "Spark-X2.5-4B-Q6_K.gguf" }] } }),
+    execFileSyncImpl: (command, args) => {
+      if (command === "nvidia-smi") return "0, NVIDIA GeForce RTX 3070 Ti\n1, NVIDIA GeForce GTX 1650\n";
+      assert.equal(command, "llama");
+      assert.deepEqual(args, ["serve", "--list-devices"]);
+      return "Vulkan0: NVIDIA GeForce GTX 1650 (4096 MiB)\nVulkan1: NVIDIA GeForce RTX 3070 Ti (8192 MiB)\n";
+    },
   });
   const gate = await adapter.gpuGate();
   assert.equal(gate.status, "CLEAR");
@@ -131,7 +139,7 @@ test("owned llama.cpp startup maps the physical RTX to the runtime index and cle
   assert.equal(killed, child);
 });
 
-test("Dev Exec selection exposes llama.cpp as an explicit local provider without changing default routing", async () => {
+test("Dev Exec selection exposes Spark llama.cpp as the implicit local provider", async () => {
   assert.deepEqual(
     resolveDevExecRuntimeSelection({ runtime: "local", provider: "llamacpp", enabled: true }),
     { runtime: "local", provider: "llamacpp", explicit: true, enabled: true },
@@ -150,6 +158,6 @@ test("Dev Exec selection exposes llama.cpp as an explicit local provider without
   assert.equal(entry.identity.provider, "llamacpp");
   assert.deepEqual(await entry.health(), { status: "READY" });
   const existing = { async run(value) { return value; } };
-  const defaultEntry = createDevExecEntrypoint({ adapters: { default: existing } });
-  assert.equal(defaultEntry.selection.provider, "existing");
+  const defaultEntry = createDevExecEntrypoint({ env: {}, adapters: { default: existing } });
+  assert.deepEqual(defaultEntry.selection, { runtime: "local", provider: "llamacpp", explicit: false, enabled: true });
 });

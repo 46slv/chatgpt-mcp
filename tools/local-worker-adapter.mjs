@@ -16,10 +16,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { freezeTarget, loadRegistry, resolveTarget, verifyFrozenTarget } from "./target-registry.mjs";
 import { consultationConfig, createChatgptReplyAdapter, createConsultationRunner } from "./devexec-consultation.mjs";
+import { SPARK_PRIMARY_CONTEXT_LENGTH, SPARK_PRIMARY_MODEL, SPARK_PRIMARY_SERVE_URL } from "./devexec-local-defaults.mjs";
 const BASE = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR = path.join(BASE, "ChatGPTMCPProbe", "local-worker-runs");
-const LMS = process.env.LOCAL_WORKER_LMS || "lms.exe";
-const MODEL = process.env.LOCAL_WORKER_MODEL || "note-worker";
+const LOCAL_WORKER_PROVIDER = String(process.env.LOCAL_WORKER_PROVIDER || "llamacpp").trim().toLowerCase();
+const LMS = process.env.LOCAL_WORKER_LMS || "lms.exe"; // explicit compatibility lane only
+const MODEL = LOCAL_WORKER_PROVIDER === "llamacpp"
+ ? (process.env.LLAMACPP_MODEL || SPARK_PRIMARY_MODEL)
+ : (process.env.LOCAL_WORKER_MODEL || "note-worker");
+const LLAMACPP_SERVE_URL = process.env.LLAMACPP_SERVE_URL || SPARK_PRIMARY_SERVE_URL;
+const LLAMACPP_CONTEXT = Number.parseInt(process.env.LLAMACPP_CONTEXT || String(SPARK_PRIMARY_CONTEXT_LENGTH), 10);
 const EXECUTOR_ROOT = process.env.LOCAL_WORKER_EXECUTOR_ROOT || String.raw`D:\Documents\LocalExecutorRepo`;
 const PROBE_ROOT = process.env.LOCAL_WORKER_PROBE_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROFILE = process.env.LOCAL_WORKER_PROFILE || path.join(EXECUTOR_ROOT, "profiles", process.env.LOCAL_WORKER_ALLOW_WRITE === "1" ? "chatgpt-mcp-probe-workspace-write.json" : "chatgpt-mcp-probe-readonly.json");
@@ -33,7 +39,7 @@ const CONSULTATION_CONFIG = consultationConfig(process.env);
 const CONSULTATION_OPT_IN = CONSULTATION_CONFIG.enabled;
 const CONSULTATION_TARGET_ALIAS = process.env.DEV_EXEC_CHATGPT_CONSULT_TARGET_ALIAS || process.env.DEV_EXEC_TARGET_ALIAS || null;
 const CONSULTATION_STATE_DIR = process.env.DEV_EXEC_CONSULTATION_STATE_DIR || path.join(BASE, "ChatGPTMCPProbe", "consultation-state");
-const CONTEXT_WINDOW = Number.parseInt(process.env.LOCAL_WORKER_CONTEXT_WINDOW || "8192", 10);
+const CONTEXT_WINDOW = Number.parseInt(process.env.LOCAL_WORKER_CONTEXT_WINDOW || String(SPARK_PRIMARY_CONTEXT_LENGTH), 10);
 const ALLOWED = new Set(["git_branch_current", "git_status_short", "git_diff_name_only", "path_exists", "read_file", "file_sha256", ...(ALLOW_WRITE ? ["write_text_file"] : [])]);
 function exactKeys(v,e){return !!v&&typeof v==="object"&&!Array.isArray(v)&&JSON.stringify(Object.keys(v).sort())===JSON.stringify([...e].sort());}
 function stripAnsi(t){return String(t||"").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g,"").replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g,"");}
@@ -46,21 +52,31 @@ function statePath(id){return path.join(STATE_DIR,`${validateWorkerRunId(id)}.js
 function save(s){fs.mkdirSync(STATE_DIR,{recursive:true});const d=statePath(s.run_id);const t=`${d}.tmp-${process.pid}`;fs.writeFileSync(t,JSON.stringify(s,null,2)+"\n","utf8");fs.renameSync(t,d);}
 function load(id){return JSON.parse(fs.readFileSync(statePath(id),"utf8"));}
 function runProcess(command,args,options={}){const r=spawnSync(command,args,{cwd:options.cwd,input:options.input,encoding:"utf8",windowsHide:true,shell:false,timeout:options.timeout||180000,maxBuffer:2*1024*1024,env:{...process.env,PYTHONUTF8:"1"}});if(r.error)throw r.error;if(r.status!==0)throw new Error(`${command} exit=${r.status}\n${r.stderr||r.stdout}`);return r.stdout||"";}
-function askPlannerDecision(mission,evidence=[],round=1,maxRounds=3,workerState=null){
+async function runLlamaPlanner(prompt){
+ const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(new Error("llama.cpp planner timeout")),Math.max(1000,PLANNER_TIMEOUT_MS));
+ try{
+  const response=await fetch(`${LLAMACPP_SERVE_URL.replace(/\/$/,"")}/v1/chat/completions`,{method:"POST",headers:{"content-type":"application/json"},signal:controller.signal,body:JSON.stringify({model:MODEL,messages:[{role:"system",content:"You are the bounded DevExec planner. Return exactly one JSON object using the existing COMPLETE, REQUEST_ACTIONS, or REQUEST_CONSULTATION protocol. Do not emit markdown or prose."},{role:"user",content:prompt}],temperature:0,max_tokens:1024,reasoning_effort:"none",chat_template_kwargs:{enable_thinking:false}})});
+  const rawText=await response.text(); let body=null; try{body=JSON.parse(rawText);}catch{throw new Error("llama.cpp planner returned non-JSON HTTP body");}
+  if(!response.ok)throw new Error(`llama.cpp planner HTTP ${response.status}`);
+  const content=body?.choices?.[0]?.message?.content; if(typeof content!=="string"||!content.trim())throw new Error("llama.cpp planner response content missing");
+  return content;
+ }finally{clearTimeout(timer);}
+}
+async function askPlannerDecision(mission,evidence=[],round=1,maxRounds=3,workerState=null){
  let prompt=buildPlannerPrompt({mission,evidence,round,maxRounds,allowWrite:ALLOW_WRITE,consultationEnabled:CONSULTATION_OPT_IN&&!!CONSULTATION_TARGET_ALIAS});
  if(workerState){const inspection=inspectLocalPlannerContext({run_id:workerState.run_id,mission,prompt,actions:evidence,model:MODEL,profile:PROFILE,working_root:PROBE_ROOT,round,contextWindow:CONTEXT_WINDOW});recordContextDecision(workerState,inspection);if(inspection.checkpoint){workerState.context_checkpoint_file=persistSessionCheckpoint(STATE_DIR,inspection.checkpoint);workerState.context_event_file=appendSessionEvent(STATE_DIR,workerState.run_id,{type:"CONTEXT_"+inspection.decision,reason:inspection.reason,utilization:inspection.utilization,estimated_tokens:inspection.estimated_tokens,context_window:inspection.context_window,checkpoint_file:workerState.context_checkpoint_file});}if(inspection.decision==="ROTATE"){prompt=buildRotatedPlannerPrompt({fixedContract:"bounded local planner; deterministic Local Executor actions only; allowed actions: git_branch_current args {}; git_status_short args {}; git_diff_name_only args {}; path_exists args {path:string}; read_file args {path:string,max_bytes?:integer}; file_sha256 args {path:string}"+(ALLOW_WRITE?"; write_text_file args {path:string,content:string,expected_sha256:string}":"")+(CONSULTATION_OPT_IN&&CONSULTATION_TARGET_ALIAS?"; optional REQUEST_CONSULTATION {type,prompt} ordinary text only":"")+"; output exactly {type:COMPLETE,summary:string}, {type:REQUEST_ACTIONS,actions:[{action:string,args:object}], or REQUEST_CONSULTATION; evidence is authoritative",inspection,latestInstruction:"continue the same mission and return the next planner decision"});workerState.context_governor.rotated_prompt_tokens=Math.ceil(Buffer.byteLength(prompt,"utf8")/3.5);}save(workerState);}
  let raw=null;
  let lastError=null;
  for(let attempt=1;attempt<=PLANNER_ATTEMPTS;attempt++){
- try{raw=runProcess(LMS,["chat",MODEL,"-p",prompt,"--reasoning","off","--dont-fetch-catalog","-y","--ttl","600"],{timeout:PLANNER_TIMEOUT_MS});lastError=null;break;}
+ try{raw=LOCAL_WORKER_PROVIDER==="llamacpp"?await runLlamaPlanner(prompt):runProcess(LMS,["chat",MODEL,"-p",prompt,"--reasoning","off","--dont-fetch-catalog","-y","--ttl","600"],{timeout:PLANNER_TIMEOUT_MS});lastError=null;break;}
  catch(error){lastError=error;if(error?.code!=="ETIMEDOUT"&& !String(error?.message||error).includes("ETIMEDOUT"))throw error;}
  }
  if(lastError)throw lastError;
  const cleaned=cleanModel(raw);
  return parsePlannerText(cleaned,{allowWrite:ALLOW_WRITE,allowConsultation:CONSULTATION_OPT_IN&&!!CONSULTATION_TARGET_ALIAS});
 }
-function askPlanner(mission){
- const decision=askPlannerDecision(mission,[],1,1);
+async function askPlanner(mission){
+ const decision=await askPlannerDecision(mission,[],1,1);
  if(decision.type!=="REQUEST_ACTIONS")return [];
  return decision.actions;
 }
@@ -68,7 +84,7 @@ function callExecutor(action,args,requestId){const request=JSON.stringify({schem
 async function start(mission){
  if(!mission||!mission.trim())throw new Error("mission required");
  const id=runId();
- const s={protocol:"devexec.local-worker",schema_version:1,run_id:id,backend:"lms-cli+local-executor",model:MODEL,profile:PROFILE,mission:mission,status:"RUNNING",created_at:new Date().toISOString(),actions:[],planner_rounds:0,report:null,error:null};
+ const s={protocol:"devexec.local-worker",schema_version:1,run_id:id,backend:LOCAL_WORKER_PROVIDER==="llamacpp"?"llamacpp+local-executor":"lmstudio-compat+local-executor",provider:LOCAL_WORKER_PROVIDER,model:MODEL,serve_url:LOCAL_WORKER_PROVIDER==="llamacpp"?LLAMACPP_SERVE_URL:null,context_window:CONTEXT_WINDOW,profile:PROFILE,mission:mission,status:"RUNNING",created_at:new Date().toISOString(),actions:[],planner_rounds:0,report:null,error:null};
  let frozenTarget=null;
  if(CONSULTATION_OPT_IN&&CONSULTATION_TARGET_ALIAS){
   try { frozenTarget=freezeTarget(resolveTarget({explicitTarget:CONSULTATION_TARGET_ALIAS,cwd:PROBE_ROOT,registry:loadRegistry()})); s.target=frozenTarget; }
@@ -86,7 +102,7 @@ async function start(mission){
  plan:async function(ctx){
  s.planner_rounds=ctx.round;
  save(s);
- return askPlannerDecision(ctx.mission,ctx.evidence,ctx.round,ctx.maxRounds,s);
+  return askPlannerDecision(ctx.mission,ctx.evidence,ctx.round,ctx.maxRounds,s);
  },
  execute:async function(action,args,requestId){
  return callExecutor(action,args,id+"-"+requestId);
@@ -139,7 +155,8 @@ export function makeConsultationCallback(id, overrides = {}){
    const target=fixedTarget;
    let transport=overrides.transport || null;
    if(!transport){
-    let mcpConfig; try { mcpConfig=JSON.parse(fs.readFileSync(path.join(os.homedir(),".lmstudio","mcp.json"),"utf8")); } catch { return {status:"BLOCKED",request_id:requestId,reason:"mcp_config_unavailable"}; }
+    const mcpConfigPath=process.env.DEV_EXEC_MCP_CONFIG || path.join(os.homedir(),".lmstudio","mcp.json");
+    let mcpConfig; try { mcpConfig=JSON.parse(fs.readFileSync(mcpConfigPath,"utf8")); } catch { return {status:"BLOCKED",request_id:requestId,reason:"mcp_config_unavailable"}; }
     const server=mcpConfig?.mcpServers?.["chatgpt-web-probe"];
     if(!server?.command)return {status:"BLOCKED",request_id:requestId,reason:"chatgpt_web_probe_unavailable"};
     transport=createChatgptReplyAdapter({timeoutMinutes:config.timeoutMinutes,targetUrl:target.url,targetConversationId:target.conversation_id,callTool:async(tool)=>{

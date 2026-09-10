@@ -64,7 +64,11 @@ const MAX_TIMEOUT_SEC = Number.parseInt(
 const DOCS = process.env.DEV_EXEC_DOCS_ROOT || path.join(os.homedir(), "Documents");
 const PROBE_ROOT = path.join(DOCS, "ChatGPTMCPProbe");
 const EXPERIMENT_LOG = path.join(PROBE_ROOT, "EXPERIMENT_LOG.md");
-const MCP_CONFIG = path.join(os.homedir(), ".lmstudio", "mcp.json");
+// The MCP file is a transport compatibility configuration, not a model
+// selector.  Keep its existing location unless the caller supplies an
+// explicit path so the Spark migration does not rewrite the bridge/control
+// plane.
+const MCP_CONFIG = process.env.DEV_EXEC_MCP_CONFIG || path.join(os.homedir(), ".lmstudio", "mcp.json");
 
 const DEV_EXEC_MISSION_ESCALATION_FILE = process.env.DEV_EXEC_MISSION_ESCALATION_FILE || null;
 const DEV_EXEC_OPS_SYNC_FILE = process.env.DEV_EXEC_OPS_SYNC_FILE || null;

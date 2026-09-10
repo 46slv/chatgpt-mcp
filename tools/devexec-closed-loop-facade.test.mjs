@@ -144,6 +144,23 @@ test("Local Model RELAY adapter sends only the hash/action envelope", async () =
   assert.equal(requestBody.model, "qwen/test");
 });
 
+test("Local Model RELAY omitted configuration is the Spark 32K loopback primary", async () => {
+  let requestBody = null;
+  const adapter = createHttpLocalRelayAdapter({
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ protocol: "devexec.local-relay-decision", schema_version: 1, request_id: "relay-spark", payload_sha256: `sha256:${"b".repeat(64)}`, action: "FORWARD_REPORT" }) } }] }),
+      };
+    },
+  });
+  assert.deepEqual(adapter.identity, { runtime: "local", provider: "llamacpp", model: "Spark-X2.5-4B-Q6_K.gguf", serve_url: "http://127.0.0.1:18080/v1", context_length: 32768 });
+  await adapter.decide({ protocol: "devexec.local-relay-decision", schema_version: 1, mode: "RELAY", request_id: "relay-spark", payload_sha256: `sha256:${"b".repeat(64)}`, action_expected: "FORWARD_REPORT" });
+  assert.equal(requestBody.model, "Spark-X2.5-4B-Q6_K.gguf");
+});
+
 test("runAdmittedClosedLoop wires two real relay rounds to the admitted thread", async () => {
   const root = tempRoot("run");
   const input = baseInput(root);

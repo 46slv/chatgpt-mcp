@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [int]$CdpPort = 9222,
+    [int]$LlamaCppPort = 18080,
     [int]$LmStudioPort = 1234
 )
 
@@ -33,6 +34,12 @@ function Test-LocalListener([int]$Port) {
 
 function Get-PathReport([string]$Path) {
     return [ordered]@{ path = $Path; exists = [bool](Test-Path -LiteralPath $Path) }
+}
+
+function Get-EnvOrDefault([string]$Name, [string]$Default) {
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
+    return $value
 }
 
 function Get-ConfigReport([string]$Path, [string]$Kind) {
@@ -70,7 +77,8 @@ $runsDir = [Environment]::GetEnvironmentVariable('DEV_EXEC_RUNS_DIR')
 if ([string]::IsNullOrWhiteSpace($runsDir)) { $runsDir = Join-Path $localAppData 'ChatGPTMCPProbe\dev-exec-runs' }
 $userDataDir = [Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR')
 if ([string]::IsNullOrWhiteSpace($userDataDir)) { $userDataDir = Join-Path $userHome '.chatgpt-mcp\user-data' }
-$mcpConfig = Join-Path $userHome '.lmstudio\mcp.json'
+$configuredMcp = [Environment]::GetEnvironmentVariable('DEV_EXEC_MCP_CONFIG')
+$mcpConfig = if ([string]::IsNullOrWhiteSpace($configuredMcp)) { Join-Path $userHome '.lmstudio\mcp.json' } else { $configuredMcp }
 $targetRegistry = Join-Path $localAppData 'DevExec\targets.json'
 $consultationStateDir = [Environment]::GetEnvironmentVariable('DEV_EXEC_CONSULTATION_STATE_DIR')
 if ([string]::IsNullOrWhiteSpace($consultationStateDir)) { $consultationStateDir = Join-Path $localAppData 'ChatGPTMCPProbe\consultation-state' }
@@ -116,6 +124,9 @@ $report = [ordered]@{
         git = Get-CommandReport 'git'
         powershell = Get-CommandReport 'powershell'
         python = Get-CommandReport 'python'
+        nvidia_smi = Get-CommandReport 'nvidia-smi'
+        llama = Get-CommandReport 'llama'
+        lms_compatibility = Get-CommandReport 'lms'
         lms = Get-CommandReport 'lms'
     }
     paths = [ordered]@{
@@ -124,18 +135,32 @@ $report = [ordered]@{
         devexec_state = Get-PathReport $stateDir
         devexec_runs = Get-PathReport $runsDir
         consultation_state = Get-PathReport $consultationStateDir
-        lmstudio_mcp = Get-ConfigReport $mcpConfig 'mcp'
+        chatgpt_mcp = Get-ConfigReport $mcpConfig 'mcp'
+        lmstudio_mcp_compatibility = Get-ConfigReport (Join-Path $userHome '.lmstudio\mcp.json') 'mcp'
+        lmstudio_mcp = Get-ConfigReport (Join-Path $userHome '.lmstudio\mcp.json') 'mcp'
         local_executor_root = [Environment]::GetEnvironmentVariable('LOCAL_WORKER_EXECUTOR_ROOT')
         cdp_launcher_profile = $userDataDir
     }
     listeners = [ordered]@{
         cdp_127_0_0_1 = [ordered]@{ port = $CdpPort; listening = (Test-LocalListener $CdpPort) }
+        llama_cpp_primary_127_0_0_1 = [ordered]@{ port = $LlamaCppPort; listening = (Test-LocalListener $LlamaCppPort) }
+        lmstudio_compatibility_127_0_0_1 = [ordered]@{ port = $LmStudioPort; listening = (Test-LocalListener $LmStudioPort) }
         lmstudio_127_0_0_1 = [ordered]@{ port = $LmStudioPort; listening = (Test-LocalListener $LmStudioPort) }
     }
     environment = [ordered]@{
+        devexec_runtime = Get-EnvOrDefault 'DEV_EXEC_RUNTIME' 'local'
+        devexec_provider = Get-EnvOrDefault 'DEV_EXEC_PROVIDER' 'llamacpp'
+        devexec_local_enabled = Get-EnvOrDefault 'DEV_EXEC_LOCAL_ENABLED' '1'
         local_worker_allow_write = ([Environment]::GetEnvironmentVariable('LOCAL_WORKER_ALLOW_WRITE') -eq '1')
+        local_worker_provider = Get-EnvOrDefault 'LOCAL_WORKER_PROVIDER' 'llamacpp'
         local_worker_model_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_MODEL'))
         local_worker_lms_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LOCAL_WORKER_LMS'))
+        spark_model_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LLAMACPP_MODEL'))
+        spark_model_path_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LLAMACPP_MODEL_PATH'))
+        spark_command_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('LLAMACPP_COMMAND'))
+        spark_serve_url = Get-EnvOrDefault 'LLAMACPP_SERVE_URL' 'http://127.0.0.1:18080'
+        spark_context = Get-EnvOrDefault 'LLAMACPP_CONTEXT' '32768'
+        spark_device_name = Get-EnvOrDefault 'LLAMACPP_DEVICE_NAME' 'NVIDIA GeForce RTX 3070 Ti'
         chatgpt_mcp_user_data_dir_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_USER_DATA_DIR'))
         chatgpt_mcp_chrome_path_override = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHROME_PATH'))
         chatgpt_mcp_chat_url_set = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('CHATGPT_MCP_CHAT_URL'))

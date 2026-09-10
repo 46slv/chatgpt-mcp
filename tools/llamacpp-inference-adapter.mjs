@@ -8,8 +8,16 @@ import {
   logicalModelId,
   FREETOKEN_FAILURES,
 } from "./freetoken-inference-adapter.mjs";
+import {
+  SPARK_PRIMARY_CONTEXT_LENGTH,
+  SPARK_PRIMARY_DEVICE_NAME,
+  SPARK_PRIMARY_MODEL,
+  SPARK_PRIMARY_SERVE_URL,
+} from "./devexec-local-defaults.mjs";
 
-export const LLAMACPP_DEFAULT_SERVE_URL = "http://127.0.0.1:18080";
+export const LLAMACPP_DEFAULT_SERVE_URL = SPARK_PRIMARY_SERVE_URL;
+export const LLAMACPP_DEFAULT_MODEL = SPARK_PRIMARY_MODEL;
+export const LLAMACPP_DEFAULT_DEVICE_NAME = SPARK_PRIMARY_DEVICE_NAME;
 export const LLAMACPP_FAILURES = FREETOKEN_FAILURES;
 
 function boundedString(value, name, max = 4096) {
@@ -25,6 +33,11 @@ function boundedInteger(value, fallback, min, max, name) {
   }
   if (parsed < min || parsed > max) throw new Error(`${name} outside safe bounds`);
   return parsed;
+}
+
+function optionalBoundedInteger(value, min, max, name) {
+  if (value === undefined || value === null || value === "") return null;
+  return boundedInteger(value, null, min, max, name);
 }
 
 function loopbackUrl(value, name) {
@@ -55,11 +68,16 @@ export function createLlamaCppConfig(input = {}, env = process.env) {
   const enabled = input.enabled ?? (env.LLAMACPP_ENABLED === "1");
   if (typeof enabled !== "boolean") throw new Error("enabled must be boolean");
   const modelPath = input.modelPath ?? env.LLAMACPP_MODEL_PATH ?? "";
-  const model = input.model ?? env.LLAMACPP_MODEL ?? (modelPath ? logicalModelId(String(modelPath), "spark-x2.5-4b-q6_k") : "spark-x2.5-4b-q6_k");
+  const model = input.model ?? env.LLAMACPP_MODEL ?? (modelPath ? logicalModelId(String(modelPath), LLAMACPP_DEFAULT_MODEL) : LLAMACPP_DEFAULT_MODEL);
   const command = input.command ?? env.LLAMACPP_COMMAND ?? "llama";
   const serveUrl = loopbackUrl(input.serveUrl ?? env.LLAMACPP_SERVE_URL ?? LLAMACPP_DEFAULT_SERVE_URL, "serveUrl");
-  const contextLength = boundedInteger(input.contextLength ?? env.LLAMACPP_CONTEXT ?? 32768, 32768, 1024, 1_048_576, "contextLength");
-  const deviceIndex = boundedInteger(input.deviceIndex ?? env.LLAMACPP_DEVICE_INDEX ?? 0, 0, 0, 16, "deviceIndex");
+  const contextLength = boundedInteger(input.contextLength ?? env.LLAMACPP_CONTEXT ?? SPARK_PRIMARY_CONTEXT_LENGTH, SPARK_PRIMARY_CONTEXT_LENGTH, 1024, 1_048_576, "contextLength");
+  // The physical device is selected by identity.  A numeric index remains an
+  // explicit compatibility override for already-pinned callers, but is never
+  // assumed by the standard Spark lane.
+  const deviceName = input.deviceName ?? env.LLAMACPP_DEVICE_NAME ?? LLAMACPP_DEFAULT_DEVICE_NAME;
+  boundedString(String(deviceName), "deviceName", 256);
+  const deviceIndex = optionalBoundedInteger(input.deviceIndex ?? env.LLAMACPP_DEVICE_INDEX, 0, 16, "deviceIndex");
   const readyTimeoutMs = boundedInteger(input.readyTimeoutMs ?? env.LLAMACPP_READY_TIMEOUT_MS ?? 300000, 300000, 1000, 600000, "readyTimeoutMs");
   const inferenceRequestTimeoutMs = boundedInteger(input.inferenceRequestTimeoutMs ?? env.LLAMACPP_INFERENCE_REQUEST_TIMEOUT_MS ?? 180000, 180000, 1000, 600000, "inferenceRequestTimeoutMs");
   const requestTimeoutMs = boundedInteger(input.requestTimeoutMs ?? env.LLAMACPP_REQUEST_TIMEOUT_MS ?? 10000, 10000, 500, 120000, "requestTimeoutMs");
@@ -78,6 +96,7 @@ export function createLlamaCppConfig(input = {}, env = process.env) {
     command: String(command),
     serveUrl,
     contextLength,
+    deviceName: String(deviceName),
     deviceIndex,
     readyTimeoutMs,
     inferenceRequestTimeoutMs,
@@ -116,9 +135,16 @@ function sameGpuName(a, b) {
   return !!left && !!right && (left === right || left.includes(right) || right.includes(left));
 }
 
-export function resolveLlamaRuntimeDevice(runtimeDevices, nvidiaGpus, deviceIndex = 0) {
-  const physical = nvidiaGpus.find((gpu) => gpu.index === deviceIndex);
-  if (!physical) throw new Error(`nvidia-smi device ${deviceIndex} is unavailable`);
+export function resolveLlamaRuntimeDevice(runtimeDevices, nvidiaGpus, target = {}) {
+  const selection = Number.isInteger(target) ? { deviceIndex: target } : (target || {});
+  const requestedName = selection.deviceName || selection.gpuName || null;
+  const requestedIndex = Number.isInteger(selection.deviceIndex) ? selection.deviceIndex : null;
+  const physical = requestedName
+    ? nvidiaGpus.find((gpu) => sameGpuName(gpu.name, requestedName))
+    : requestedIndex === null
+      ? null
+      : nvidiaGpus.find((gpu) => gpu.index === requestedIndex);
+  if (!physical) throw new Error(requestedName ? `nvidia-smi GPU '${requestedName}' is unavailable` : `nvidia-smi device ${requestedIndex} is unavailable`);
   const runtime = runtimeDevices.find((device) => sameGpuName(device.name, physical.name));
   if (!runtime || !Number.isInteger(runtime.runtime_index)) throw new Error(`could not map NVIDIA GPU '${physical.name}' to llama.cpp runtime device`);
   return Object.freeze({ physical, runtime });
@@ -201,19 +227,31 @@ export function createLlamaCppInferenceAdapter(options = {}) {
   const execFileSyncImpl = options.execFileSyncImpl || execFileSync;
   const spawnImpl = options.spawnImpl || spawn;
   const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const gpuProbe = options.gpuProbe || (() => defaultGpuConflictProbe(config.deviceIndex, { execFileSyncImpl }));
+  const gpuProbe = options.gpuProbe || (() => {
+    try {
+      const text = execFileSyncImpl("nvidia-smi", ["--query-gpu=index,name", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
+      const physical = parseNvidiaGpuList(text).find((gpu) => sameGpuName(gpu.name, config.deviceName));
+      if (!physical) throw new Error(`nvidia-smi GPU '${config.deviceName}' is unavailable`);
+      return defaultGpuConflictProbe(physical.index, { execFileSyncImpl });
+    } catch {
+      return { status: "UNAVAILABLE", reason: "target_gpu_identity_unavailable", device_name: config.deviceName, device_index: config.deviceIndex };
+    }
+  });
   const killProcessTree = options.killProcessTree || ((child) => killOwnedProcessTree(child, options));
   const log = options.log || (() => {});
   let ownedProcess = null;
   let owned = false;
   let stderrTail = "";
   let stdoutTail = "";
+  let resolvedMapping = null;
 
   const identity = Object.freeze({
     runtime: "local",
     provider: "llamacpp",
     model: logicalModelId(config.model || config.modelPath, "unconfigured"),
     device_index: config.deviceIndex,
+    device_name: config.deviceName,
+    context_length: config.contextLength,
     serve_url: config.serveUrl,
   });
 
@@ -240,7 +278,8 @@ export function createLlamaCppInferenceAdapter(options = {}) {
     const nvidiaText = execFileSyncImpl("nvidia-smi", ["--query-gpu=index,name", "--format=csv,noheader,nounits"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
     const listArgs = combinedCommand(config.command) ? ["serve", "--list-devices"] : ["--list-devices"];
     const llamaText = execFileSyncImpl(config.command, listArgs, { encoding: "utf8", windowsHide: true, timeout: 15000 });
-    return resolveLlamaRuntimeDevice(parseLlamaDeviceList(llamaText), parseNvidiaGpuList(nvidiaText), config.deviceIndex);
+    resolvedMapping = resolveLlamaRuntimeDevice(parseLlamaDeviceList(llamaText), parseNvidiaGpuList(nvidiaText), { deviceName: config.deviceName, deviceIndex: config.deviceIndex });
+    return resolvedMapping;
   }
 
   async function waitReady(signal = null) {
@@ -298,9 +337,17 @@ export function createLlamaCppInferenceAdapter(options = {}) {
 
   async function gpuGate(signal = null) {
     const current = await health(signal);
-    if (current.status === "READY") return { status: "CLEAR", reason: "matching_llamacpp_server_ready", device_index: config.deviceIndex };
-    if (current.status === "CONFLICT") return { status: "CONFLICT", code: FREETOKEN_FAILURES.PORT_COLLISION, reason: current.reason, device_index: config.deviceIndex };
-    return Promise.resolve(gpuProbe());
+    if (current.status === "CONFLICT") return { status: "CONFLICT", code: FREETOKEN_FAILURES.PORT_COLLISION, reason: current.reason, device_name: config.deviceName, device_index: config.deviceIndex };
+    // Resolve the runtime device by name on every admission.  This is both the
+    // placement proof and the source of the lease's physical index; no Vulkan
+    // index is assumed to match nvidia-smi ordering.
+    try { runtimeDevice(); } catch (error) { return { status: "UNAVAILABLE", reason: String(error?.message || error), device_name: config.deviceName, device_index: config.deviceIndex }; }
+    if (current.status === "READY") {
+      return { status: "CLEAR", reason: "matching_llamacpp_server_ready", device_name: config.deviceName, device_index: resolvedMapping?.physical?.index ?? config.deviceIndex, runtime_index: resolvedMapping?.runtime?.runtime_index ?? null };
+    }
+    const gate = await Promise.resolve(gpuProbe());
+    if (!gate || gate.status !== "CLEAR") return gate || { status: "UNAVAILABLE", reason: "target_gpu_probe_unavailable" };
+    return { ...gate, device_name: config.deviceName, device_index: resolvedMapping?.physical?.index ?? config.deviceIndex, runtime_index: resolvedMapping?.runtime?.runtime_index ?? null };
   }
 
   async function stop() {
@@ -362,7 +409,19 @@ export function createLlamaCppInferenceAdapter(options = {}) {
     }
   }
 
-  return Object.freeze({ identity, config, health, start, run, stop, waitReady, gpuGate });
+  return Object.freeze({
+    identity,
+    config,
+    health,
+    start,
+    run,
+    stop,
+    waitReady,
+    gpuGate,
+    get resolvedDeviceIndex() { return resolvedMapping?.physical?.index ?? config.deviceIndex; },
+    get resolvedRuntimeIndex() { return resolvedMapping?.runtime?.runtime_index ?? null; },
+    get resolvedDeviceName() { return resolvedMapping?.physical?.name ?? config.deviceName; },
+  });
 }
 
 export default createLlamaCppInferenceAdapter;
