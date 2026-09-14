@@ -186,7 +186,7 @@ function validateCycle(cycle, index, expected) {
   if (cycle.ephemeral !== true || cycle.transcripts_forwarded !== false) throw new Error("OUTER_CYCLE_EPHEMERAL_INVARIANT_VIOLATION");
 }
 
-function validateReceipt(receipt, expected) {
+export function validateReceipt(receipt, expected) {
   requireObject(receipt, "OUTER_RECEIPT");
   rejectUnknown(receipt, RECEIPT_KEYS, "OUTER_RECEIPT");
   requireFields(receipt, RECEIPT_KEYS, "OUTER_RECEIPT");
