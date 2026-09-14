@@ -423,6 +423,34 @@ export async function runSideEffectWithFingerprintGuard({
     attempt_count: 1,
   }, now);
 
+  // Re-read control at the last guard-owned boundary before the external
+  // mutation callback. Authority may be revoked while equivalence ownership,
+  // record persistence, and native precondition checks are being prepared.
+  let executionControl;
+  try {
+    executionControl = validateControlState(await readControlIdentity());
+  } catch (error) {
+    record = update(file, record, claimToken, {
+      status: "STOPPED",
+      reason_code: "CONTROL_REVALIDATION_FAILED",
+      diagnostic: String(error?.message || error).slice(0, MAX_TEXT),
+    }, now);
+    return { decision: "STOP", reason_code: "CONTROL_REVALIDATION_FAILED", record };
+  }
+  if (executionControl.identity !== action.control_identity) {
+    record = update(file, record, claimToken, {
+      status: "STOPPED",
+      reason_code: "STALE_CONTROL",
+      diagnostic: `observed=${executionControl.identity}`,
+    }, now);
+    return { decision: "STOP", reason_code: "STALE_CONTROL", record };
+  }
+  if (executionControl.decision !== "ALLOW") {
+    const reason = executionControl.decision === "FROZEN" ? "FROZEN" : "CONTROL_STOP";
+    record = update(file, record, claimToken, { status: "STOPPED", reason_code: reason }, now);
+    return { decision: "STOP", reason_code: reason, record };
+  }
+
   let execution;
   let thrown = null;
   try {
