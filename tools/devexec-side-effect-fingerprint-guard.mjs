@@ -451,6 +451,32 @@ export async function runSideEffectWithFingerprintGuard({
     return { decision: "STOP", reason_code: reason, record };
   }
 
+  // Re-read the target identity after control revalidation and immediately
+  // before crossing the external side-effect boundary. This closes target
+  // drift during guard bookkeeping. It is still a sequential check, not an
+  // atomic compare-and-swap: strict atomicity must come from the connector or
+  // target API when such a primitive exists.
+  let executionPrecondition;
+  try {
+    executionPrecondition = bounded(await readPrecondition(), "precondition identity");
+  } catch (error) {
+    record = update(file, record, claimToken, {
+      status: "STOPPED",
+      reason_code: "PRECONDITION_REVALIDATION_FAILED",
+      diagnostic: String(error?.message || error).slice(0, MAX_TEXT),
+    }, now);
+    return { decision: "STOP", reason_code: "PRECONDITION_REVALIDATION_FAILED", record };
+  }
+  if (executionPrecondition !== action.expected_precondition) {
+    record = update(file, record, claimToken, {
+      status: "STOPPED",
+      reason_code: "PRECONDITION_CHANGED",
+      precondition_identity: executionPrecondition,
+      diagnostic: `initial=${precondition}`,
+    }, now);
+    return { decision: "STOP", reason_code: "PRECONDITION_CHANGED", record };
+  }
+
   let execution;
   let thrown = null;
   try {
