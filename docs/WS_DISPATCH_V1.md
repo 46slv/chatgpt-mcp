@@ -98,13 +98,18 @@ Already cloud-verified in this slice:
 - interrupted active job becomes `AMBIGUOUS` and is not requeued;
 - OpenCode argv/prompt is compiled from the bounded contract.
 
+Additional cloud-prebuilt pieces:
+
+- single-instance dispatcher lock with safe stale-owner replacement;
+- generic `dispatchNextJob` terminalization with runner exceptions converted to FAILED receipts;
+- OpenCode process adapter with explicit Windows `opencode.cmd`, shell disabled, and local stdout/stderr evidence capture.
+
 Still requires SHIRO-WS after PR #24 work is no longer blocking:
 
-1. choose/install machine-local dispatch root;
-2. add dispatcher process/service lifecycle and single-instance guard;
-3. run one disposable read-only Muse job with real `opencode --format json` evidence;
-4. run one disposable workspace-write read/edit/test/repair job;
-5. verify Remote Commander needs only job submission, not process polling;
-6. connect terminal result to qualified checkpoint REPORT;
-7. prove end-to-end `one remote submission -> local execution -> automatic exact-chat report`;
-8. only then add/re-qualify Codex/Luna and deterministic `auto` routing.
+1. choose/install machine-local dispatch root and scheduled/service lifecycle;
+2. run one disposable read-only Muse job with real `opencode --format json` evidence;
+3. run one disposable workspace-write read/edit/test/repair job;
+4. verify Remote Commander needs only job submission, not process polling;
+5. connect terminal result to qualified checkpoint REPORT;
+6. prove end-to-end `one remote submission -> local execution -> automatic exact-chat report`;
+7. only then add/re-qualify Codex/Luna and deterministic `auto` routing.
