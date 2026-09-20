@@ -32,6 +32,7 @@ Default host root is expected to be a machine-local path under `%LOCALAPPDATA%`;
   inbox/       newly submitted immutable jobs
   active/      atomically claimed jobs
   results/     write-once terminal receipts
+  archive/     immutable claimed jobs after terminalization
   evidence/    JSONL/log/evidence artifacts referenced by results
 ```
 
@@ -40,6 +41,8 @@ Submission becomes visible only after a temp-file durable write and rename. Clai
 A `job_id` is globally unique within one dispatch root. If the same id already appears in queue, active state, or terminal results, submission fails closed.
 
 ## Crash / ambiguity contract
+
+A terminal receipt is persisted before the active job is moved to `archive/`. If a crash leaves both `active/<job>.json` and a terminal result, restart recovery archives the active copy without rerunning it.
 
 An `active/<job>.json` without a matching terminal result after dispatcher restart is **not requeued**. Recovery writes one `AMBIGUOUS` terminal result:
 
