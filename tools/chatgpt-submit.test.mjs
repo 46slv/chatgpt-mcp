@@ -16,7 +16,11 @@ const TARGET_URL = "https://chatgpt.com/c/prepared-submit-1";
 const PROMPT = "Reply with exactly DIAG3-OK";
 
 function submitFake(options = {}) {
-  const turns = (options.turns ?? ["first user", "first assistant"]).map((text, index) => ({ testid: "conversation-turn-" + (index + 1), text }));
+  const turns = (options.turns ?? ["first user", "first assistant"]).map((entry, index) => ({
+    testid: "conversation-turn-" + (index + 1),
+    text: typeof entry === "string" ? entry : entry.text,
+    role: typeof entry === "string" ? (index % 2 === 0 ? "user" : "assistant") : entry.role,
+  }));
   const state = {
     sent: false,
     sentText: options.sentTurnText !== undefined ? options.sentTurnText : PROMPT,
@@ -28,10 +32,17 @@ function submitFake(options = {}) {
     urlCalls: 0,
   };
   const doSend = () => { state.sent = true; state.composer = ""; };
-  const count = () => turns.length + (state.sent ? 1 : 0);
+  const freshAssistant = options.freshAssistantBeforeSent ?? null;
+  const count = () => turns.length + (state.sent ? (freshAssistant ? 2 : 1) : 0);
   const turnAt = (i) => {
     if (i < turns.length) return turns[i];
-    if (i === turns.length && state.sent) return { testid: "conversation-turn-" + (i + 1), text: state.sentText };
+    if (state.sent && freshAssistant && i === turns.length) {
+      return { testid: "conversation-turn-" + (i + 1), text: freshAssistant, role: "assistant" };
+    }
+    const sentIndex = turns.length + (freshAssistant ? 1 : 0);
+    if (i === sentIndex && state.sent) {
+      return { testid: "conversation-turn-" + (i + 1), text: state.sentText, role: "user" };
+    }
     throw new Error("no such turn");
   };
   const page = {
@@ -45,6 +56,12 @@ function submitFake(options = {}) {
         focus: async () => { state.focusCalls += 1; },
         innerText: async () => state.composer,
         click: async () => {},
+        getAttribute: async (name) => {
+          if (name !== "data-message-author-role") return null;
+          const match = /conversation-turn-(\d+)/u.exec(selector);
+          if (!match) return null;
+          return turnAt(Number.parseInt(match[1], 10) - 1).role ?? null;
+        },
       }),
       nth: (i) => ({
         click: async () => {
@@ -54,7 +71,13 @@ function submitFake(options = {}) {
         },
         isVisible: async () => true,
         innerText: async () => turnAt(i).text,
-        getAttribute: async (name) => (name === "data-testid" ? turnAt(i).testid : null),
+        getAttribute: async (name) => (
+          name === "data-testid"
+            ? turnAt(i).testid
+            : name === "data-message-author-role"
+              ? turnAt(i).role ?? null
+              : null
+        ),
       }),
       count: async () => count(),
     }),
@@ -131,6 +154,20 @@ test("new user turn text mismatch fails closed", async () => {
   const { page, state } = submitFake({ clickSends: true, sentTurnText: "something else entirely" });
   const baseline = await captureSendBaseline(page);
   await assert.rejects(submitComposedPrompt(page, PROMPT, baseline, FAST), /does not match/);
+  assert.equal(state.enterPresses, 0);
+});
+
+test("late fresh assistant turn is ignored while exact fresh user turn acknowledges send", async () => {
+  const { page, state } = submitFake({
+    clickSends: true,
+    freshAssistantBeforeSent: "late prior assistant response",
+  });
+  const baseline = await captureSendBaseline(page);
+  const ack = await submitComposedPrompt(page, PROMPT, baseline, FAST);
+  assert.equal(ack.userTurnIndex, 3);
+  assert.equal(ack.userTurnSeq, 4);
+  assert.equal(ack.ackTurnCount, 4);
+  assert.equal(ack.userTurnText, PROMPT);
   assert.equal(state.enterPresses, 0);
 });
 
@@ -251,15 +288,15 @@ test("turn seq parsing", () => {
 
 test("ack survives a virtualized window slide (positions shift, seqs grow)", async () => {
   const win = [
-    { testid: "conversation-turn-48", text: "old answer" },
-    { testid: "conversation-turn-49", text: "old question" },
-    { testid: "conversation-turn-50", text: "old response" },
+    { testid: "conversation-turn-48", text: "old answer", role: "assistant" },
+    { testid: "conversation-turn-49", text: "old question", role: "user" },
+    { testid: "conversation-turn-50", text: "old response", role: "assistant" },
   ];
   const st = { composer: PROMPT, enterPresses: 0 };
   const send = () => {
     st.composer = "";
     win.splice(0, 2);
-    win.push({ testid: "conversation-turn-51", text: PROMPT });
+    win.push({ testid: "conversation-turn-51", text: PROMPT, role: "user" });
   };
   const node = (i) => {
     if (i < 0 || i >= win.length) throw new Error("no such turn");
@@ -267,17 +304,30 @@ test("ack survives a virtualized window slide (positions shift, seqs grow)", asy
   };
   const page = {
     url: () => TARGET_URL,
-    locator: () => ({
+    locator: (selector) => ({
       first: () => ({
         focus: async () => {},
         innerText: async () => st.composer,
         click: async () => {},
+        getAttribute: async (name) => {
+          if (name !== "data-message-author-role") return null;
+          const match = /conversation-turn-(\d+)/u.exec(selector);
+          if (!match) return null;
+          const seq = Number.parseInt(match[1], 10);
+          return win.find((entry) => entry.testid === `conversation-turn-${seq}`)?.role ?? null;
+        },
       }),
       nth: (i) => ({
         click: async () => { send(); },
         isVisible: async () => true,
         innerText: async () => node(i).text,
-        getAttribute: async (name) => (name === "data-testid" ? node(i).testid : null),
+        getAttribute: async (name) => (
+          name === "data-testid"
+            ? node(i).testid
+            : name === "data-message-author-role"
+              ? node(i).role ?? null
+              : null
+        ),
       }),
       count: async () => win.length,
     }),

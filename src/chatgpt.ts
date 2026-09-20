@@ -495,7 +495,7 @@ export function decidePollCompletion(prev: PollProgress, obs: FreshTurnSnapshot)
 export interface ComposerSubmitPage {
   url(): string;
   locator(selector: string): {
-    first(): { focus(): Promise<void>; innerText(): Promise<string>; click(options?: unknown): Promise<void> };
+    first(): { focus(): Promise<void>; innerText(): Promise<string>; click(options?: unknown): Promise<void>; getAttribute(name: string): Promise<string | null> };
     nth(index: number): {
       click(options?: unknown): Promise<void>;
       isVisible(): Promise<boolean>;
@@ -567,10 +567,10 @@ export function turnSeqFromTestId(value: unknown): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-/** Window positions plus stable global sequences, in document order. */
-async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number }>> {
+/** Window positions plus stable global sequences/author roles, in document order. */
+async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number; role: string | null }>> {
   const total = await page.locator(COMPOSER_TURN_SELECTOR).count();
-  const entries: Array<{ seq: number; index: number }> = [];
+  const entries: Array<{ seq: number; index: number; role: string | null }> = [];
   for (let index = 0; index < total; index++) {
     let testid: string | null = null;
     try {
@@ -579,7 +579,17 @@ async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: numb
       testid = null;
     }
     const seq = turnSeqFromTestId(testid);
-    if (seq !== null) entries.push({ seq, index });
+    if (seq === null) continue;
+    let role: string | null = null;
+    try {
+      role = await page
+        .locator(`[data-testid="${testid}"] [data-message-author-role]`)
+        .first()
+        .getAttribute('data-message-author-role');
+    } catch {
+      role = null;
+    }
+    entries.push({ seq, index, role });
   }
   return entries;
 }
@@ -623,7 +633,11 @@ async function observeSubmission(page: ComposerSubmitPage, prompt: string, basel
       throw new Error('Target URL changed during submit; refusing to correlate turns across conversations.');
     }
     const seqs = await readTurnSeqs(page);
-    const fresh = seqs.filter((entry) => entry.seq > baseline.maxSeq);
+    // Only a newly posted USER turn can acknowledge our send. Assistant turns
+    // may appear/remount after the baseline (especially when a prior response
+    // settles late); treating one as the submitted user turn creates a false
+    // mismatch and can strand a successfully delivered CONSULT as UNKNOWN.
+    const fresh = seqs.filter((entry) => entry.seq > baseline.maxSeq && entry.role === 'user');
     if (fresh.length > 0) {
       const first = fresh[0];
       const rawText = await readTurnText(page, first.index);
