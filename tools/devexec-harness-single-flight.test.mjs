@@ -206,3 +206,78 @@ test("malformed pre-existing lease is ambiguous and blocks receipt mutation or l
   assert.equal(launches, 0);
   assert.equal(fs.existsSync(f.receiptFile), false);
 });
+
+test("foreign owner replacement during release is preserved and keeps the lease fail-closed", { concurrency: false }, async (t) => {
+  const f = fixture(t, "release-replacement");
+  const originalRename = fs.renameSync;
+  let launches = 0;
+  let injected = false;
+  let foreign = null;
+
+  fs.renameSync = function patchedRename(source, destination, ...args) {
+    const sourcePath = path.resolve(String(source));
+    const destinationPath = path.resolve(String(destination));
+    if (
+      !injected
+      && sourcePath === path.resolve(f.ownerFile)
+      && path.dirname(destinationPath) === path.resolve(f.leaseDirectory)
+      && path.basename(destinationPath).startsWith("owner.release-")
+    ) {
+      injected = true;
+      const current = JSON.parse(fs.readFileSync(f.ownerFile, "utf8"));
+      foreign = {
+        ...current,
+        owner_token: "foreign-release-replacement",
+        process_id: current.process_id + 1000,
+      };
+      fs.writeFileSync(f.ownerFile, `${JSON.stringify(foreign, null, 2)}\n`, "utf8");
+    }
+    return originalRename.call(fs, source, destination, ...args);
+  };
+
+  try {
+    await assert.rejects(
+      () => runOuterCycles({
+        ...options(f),
+        launchCycle: async (request) => {
+          launches += 1;
+          return {
+            status: "DONE",
+            evidence: {
+              second_cycle: "NOT_RUN",
+              input_state_hash: request.expected_previous_state_hash,
+              resulting_state_hash: "a".repeat(64),
+              next_action: "STOP",
+            },
+          };
+        },
+      }),
+      (error) => error?.code === "OUTER_RUN_LEASE_OWNERSHIP_LOST",
+    );
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(injected, true);
+  assert.equal(launches, 1);
+  assert.equal(fs.existsSync(f.leaseDirectory), true);
+  assert.equal(fs.existsSync(f.ownerFile), false);
+  const entries = fs.readdirSync(f.leaseDirectory);
+  assert.equal(entries.length, 1);
+  assert.match(entries[0], /^owner\.release-.+\.json$/);
+  const preserved = JSON.parse(fs.readFileSync(path.join(f.leaseDirectory, entries[0]), "utf8"));
+  assert.deepEqual(preserved, foreign);
+
+  let retryLaunches = 0;
+  await assert.rejects(
+    () => runOuterCycles({
+      ...options(f),
+      launchCycle: async () => {
+        retryLaunches += 1;
+        return {};
+      },
+    }),
+    (error) => error?.code === "OUTER_RUN_LEASE_AMBIGUOUS",
+  );
+  assert.equal(retryLaunches, 0);
+});
