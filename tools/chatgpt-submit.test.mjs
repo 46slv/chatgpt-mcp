@@ -9,6 +9,7 @@ import {
   ensureExactComposer,
   turnSeqFromTestId,
   stripPostedChrome,
+  DEFAULT_SUBMIT_BUDGETS,
 } from "../dist/chatgpt.js";
 
 const TARGET_URL = "https://chatgpt.com/c/prepared-submit-1";
@@ -69,6 +70,12 @@ function submitFake(options = {}) {
 }
 
 const FAST = { clickAckMs: 5, enterAckMs: 5 };
+
+test("default submit observation budgets allow slow live composer acknowledgement", () => {
+  assert.equal(DEFAULT_SUBMIT_BUDGETS.clickAckMs, 15000);
+  assert.equal(DEFAULT_SUBMIT_BUDGETS.enterAckMs, 30000);
+  assert.ok(DEFAULT_SUBMIT_BUDGETS.enterAckMs > 15000);
+});
 
 test("baseline captures exact url, turn count, and last turn testid", async () => {
   const { page } = submitFake();

@@ -673,13 +673,21 @@ export interface SubmitBudgets {
   enterAckMs?: number;
 }
 
+// ChatGPT can acknowledge a submitted turn only after a slow composer remount
+// or navigation settles. Keep the fail-closed two-attempt contract, but give
+// each observation window enough time for that live UI path to materialize.
+export const DEFAULT_SUBMIT_BUDGETS = Object.freeze({
+  clickAckMs: 15_000,
+  enterAckMs: 30_000,
+});
+
 export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgets?: SubmitBudgets): Promise<SendAcknowledgment> {
   if (page.url() !== baseline.url) {
     throw new Error('Submit started on a different conversation than the send baseline.');
   }
   await clickFirstVisible(page, SELECTORS.sendButton);
-  const clickAckMs = budgets?.clickAckMs ?? 8000;
-  const enterAckMs = budgets?.enterAckMs ?? 15000;
+  const clickAckMs = budgets?.clickAckMs ?? DEFAULT_SUBMIT_BUDGETS.clickAckMs;
+  const enterAckMs = budgets?.enterAckMs ?? DEFAULT_SUBMIT_BUDGETS.enterAckMs;
   const ack = await observeSubmission(page, prompt, baseline, clickAckMs);
   if (ack) { console.error(`[submit] click-path acknowledged userTurnIndex=${ack.userTurnIndex}`); return ack; }
   if (normalizeComposedText(prompt).length === 0
