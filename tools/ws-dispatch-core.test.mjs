@@ -100,3 +100,28 @@ test('unknown fields and unsafe authority expansion fail closed', () => {
   assert.throws(() => submitJob({ root, job: { ...job(), authority: 'full-machine' } }), /authority is invalid/);
   assert.throws(() => submitJob({ root, job: { ...job(), surprise: true } }), /unknown field/);
 });
+
+
+import { acquireDispatcherLock, dispatchNextJob, releaseDispatcherLock } from './ws-dispatch-core.mjs';
+
+test('dispatcher lock refuses a live owner and replaces a stale owner only', () => {
+  const root = tempRoot();
+  const first = acquireDispatcherLock({ root, pid: 111, started_at: '2026-09-21T00:00:00.000Z', isPidAlive: (pid) => pid === 111 });
+  assert.throws(() => acquireDispatcherLock({ root, pid: 222, isPidAlive: (pid) => pid === 111 }), /already active/);
+  assert.equal(releaseDispatcherLock(first), true);
+  const stale = acquireDispatcherLock({ root, pid: 333, isPidAlive: () => false });
+  assert.equal(releaseDispatcherLock(stale), true);
+});
+
+test('dispatchNextJob terminalizes one job and converts runner exceptions to FAILED', async () => {
+  const root = tempRoot();
+  submitJob({ root, job: job({ job_id: 'job-005' }) });
+  const ok = await dispatchNextJob({ root, now: (() => { const v=['2026-09-21T00:00:01.000Z','2026-09-21T00:00:02.000Z']; return () => v.shift(); })(), runner: async () => ({ summary: 'worker pass', evidence_refs: ['evidence/job-005.jsonl'] }) });
+  assert.equal(ok.state, 'COMPLETED');
+  assert.equal(ok.summary, 'worker pass');
+
+  submitJob({ root, job: job({ job_id: 'job-006' }) });
+  const failed = await dispatchNextJob({ root, runner: async () => { throw new Error('boom'); } });
+  assert.equal(failed.state, 'FAILED');
+  assert.match(failed.error, /boom/);
+});
