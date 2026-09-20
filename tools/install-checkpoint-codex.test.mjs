@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildHookConfig, buildMcpRegistration, ensureMcpRegistration, install, isTemporaryRoot, mergeHooks } from './install-checkpoint-codex.mjs';
+import { buildHookConfig, buildMcpRegistration, codexCliCommand, ensureMcpRegistration, install, isTemporaryRoot, mergeHooks } from './install-checkpoint-codex.mjs';
 
 test('hook merge preserves existing hooks and is idempotent', () => {
   const commands=buildHookConfig({repoRoot:'C:\\repo'});
@@ -34,6 +34,8 @@ test('actual install refuses a temporary checkout and dry run exposes MCP plan',
   assert.throws(()=>install({repoRoot:fakeRepo,home:path.join(temp,'home')}),/temporary checkout/);
 });
 test('MCP registration is idempotent and refuses drift', () => {
+  assert.equal(codexCliCommand('win32'),'codex.exe');
+  assert.equal(codexCliCommand('linux'),'codex');
   const registration=buildMcpRegistration({repoRoot:'C:\\repo',nodePath:'C:\\node.exe'});
   const calls=[];
   const missing=(cmd,args)=>{
@@ -42,6 +44,7 @@ test('MCP registration is idempotent and refuses drift', () => {
     return '';
   };
   assert.equal(ensureMcpRegistration(registration,{run:missing}).status,'REGISTERED');
+  assert.equal(calls[0][0],codexCliCommand());
   assert.equal(calls.at(-1)[1][1],'add');
 
   const same=()=>JSON.stringify({transport:{type:'stdio',command:'C:\\node.exe',args:['C:\\repo\\dist\\index.js']}});

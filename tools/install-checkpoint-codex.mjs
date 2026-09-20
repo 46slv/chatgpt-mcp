@@ -26,10 +26,17 @@ export function isTemporaryRoot(repoRoot, tempRoot = os.tmpdir()) {
 export function buildMcpRegistration({ repoRoot, nodePath = process.execPath, name = 'checkpoint_autoreport' }) {
   return { name, command: nodePath, args: [path.join(path.resolve(repoRoot), 'dist', 'index.js')] };
 }
+export function codexCliCommand(platform = process.platform) {
+  // The Windows PowerShell/cmd shims split an executable path containing
+  // spaces when they receive `mcp add -- <command> ...`.  Call the native
+  // executable directly so Codex preserves the intended stdio command.
+  return platform === 'win32' ? 'codex.exe' : 'codex';
+}
 export function ensureMcpRegistration(registration, { run = execFileSync } = {}) {
-  const opts = { encoding:'utf8', stdio:['ignore','pipe','pipe'], shell: process.platform === 'win32' };
+  const opts = { encoding:'utf8', stdio:['ignore','pipe','pipe'], shell: false };
+  const codex = codexCliCommand();
   let current = null;
-  try { current = JSON.parse(run('codex', ['mcp','get',registration.name,'--json'], opts)); } catch {}
+  try { current = JSON.parse(run(codex, ['mcp','get',registration.name,'--json'], opts)); } catch {}
   if (current) {
     const transport = current.transport;
     const sameType = transport?.type === 'stdio';
@@ -38,7 +45,7 @@ export function ensureMcpRegistration(registration, { run = execFileSync } = {})
     if (!sameType || !sameCommand || !sameArgs) throw new Error(`Codex MCP ${registration.name} already exists with a different transport/command/args`);
     return { status:'ALREADY_REGISTERED', registration };
   }
-  run('codex', ['mcp','add',registration.name,'--',registration.command,...registration.args], opts);
+  run(codex, ['mcp','add',registration.name,'--',registration.command,...registration.args], opts);
   return { status:'REGISTERED', registration };
 }
 export function mergeHooks(existing, commands) {
