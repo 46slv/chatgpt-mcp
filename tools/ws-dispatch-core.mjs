@@ -67,13 +67,14 @@ export function layout(root) {
     inbox: path.join(base, 'inbox'),
     active: path.join(base, 'active'),
     results: path.join(base, 'results'),
+    archive: path.join(base, 'archive'),
     evidence: path.join(base, 'evidence'),
   });
 }
 
 export function ensureLayout(root) {
   const dirs = layout(root);
-  for (const dir of [dirs.root, dirs.inbox, dirs.active, dirs.results, dirs.evidence]) fs.mkdirSync(dir, { recursive: true });
+  for (const dir of [dirs.root, dirs.inbox, dirs.active, dirs.results, dirs.archive, dirs.evidence]) fs.mkdirSync(dir, { recursive: true });
   return dirs;
 }
 
@@ -124,6 +125,9 @@ export function writeResult({ root, result }) {
   validateResult(valid, job.job_id);
   const resultPath = path.join(dirs.results, `${valid.job_id}.json`);
   durableWriteNew(resultPath, valid);
+  const archived = path.join(dirs.archive, `${valid.job_id}.json`);
+  try { fs.renameSync(active, archived); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
   return resultPath;
 }
 
@@ -132,8 +136,14 @@ export function recoverInterruptedJobs({ root, now = new Date().toISOString() } 
   const recovered = [];
   for (const name of fs.readdirSync(dirs.active).filter((x) => x.endsWith('.json')).sort()) {
     const job = validateJob(JSON.parse(fs.readFileSync(path.join(dirs.active, name), 'utf8')));
+    const activePath = path.join(dirs.active, name);
     const resultPath = path.join(dirs.results, `${job.job_id}.json`);
-    if (fs.existsSync(resultPath)) continue;
+    if (fs.existsSync(resultPath)) {
+      const archived = path.join(dirs.archive, `${job.job_id}.json`);
+      if (!fs.existsSync(archived)) fs.renameSync(activePath, archived);
+      else fs.rmSync(activePath, { force: true });
+      continue;
+    }
     const result = {
       protocol: WS_DISPATCH_RESULT_PROTOCOL,
       schema_version: WS_DISPATCH_SCHEMA_VERSION,
@@ -147,6 +157,8 @@ export function recoverInterruptedJobs({ root, now = new Date().toISOString() } 
       error: 'Prior execution outcome is unknown; reconcile workspace/runtime state before any retry.',
     };
     durableWriteNew(resultPath, validateResult(result, job.job_id));
+    const archived = path.join(dirs.archive, `${job.job_id}.json`);
+    fs.renameSync(activePath, archived);
     recovered.push(job.job_id);
   }
   return Object.freeze(recovered);
