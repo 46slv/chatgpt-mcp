@@ -433,6 +433,9 @@ export async function dispatchCheckpoint({ event, send, stateRoot = defaultState
     report_id: event.report_id,
     mode: event.mode,
     delivery_state: deliveryState,
+    delivery_proof: deliveryState === 'DELIVERED'
+      ? (event.mode === 'REPORT' ? 'USER_TURN_ACK' : 'ASSISTANT_REPLY_READBACK')
+      : null,
     target: event.report_target,
     delivered_at: now(),
     response_sha256: result?.response ? sha256(String(result.response)) : null,
@@ -472,8 +475,19 @@ export function evaluateStopGuard({ workspace, session_id, stop_hook_active = fa
     if (stop_hook_active) return { continue: true, systemMessage: 'Required CONSULT checkpoint is not confirmed delivered; manual reconciliation may be required.' };
     return { decision: 'block', reason: 'The latest checkpoint requires CONSULT, but its ChatGPT delivery/readback is not confirmed. Inspect checkpoint_status and resolve it before stopping.' };
   }
-  if (!status.latest_receipt && latest.mode === 'REPORT') {
-    return { continue: true, systemMessage: `Checkpoint ${latest.sequence} is durably queued for background ChatGPT reporting.` };
+  if (latest.mode === 'REPORT' && status.latest_receipt?.delivery_state !== 'DELIVERED') {
+    const delivery = status.latest_receipt?.delivery_state
+      || (status.pending?.find((item) => item.checkpoint_id === latest.checkpoint_id)?.claim ? 'IN_FLIGHT_AMBIGUOUS' : 'PENDING');
+    if (stop_hook_active) {
+      return {
+        continue: true,
+        systemMessage: `Checkpoint ${latest.sequence} REPORT remains ${delivery}. State is durable; do not blind-resend an ambiguous report.`,
+      };
+    }
+    return {
+      decision: 'block',
+      reason: `Checkpoint autoreport is waiting for REPORT ${latest.sequence} delivery confirmation (${delivery}). Inspect checkpoint_status once; if DELIVERED, stop again. If the state is ambiguous/unknown, do not resend blindly; a second stop attempt may leave the durable unresolved state for later reconciliation.`,
+    };
   }
   return { continue: true };
 }

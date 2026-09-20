@@ -17,8 +17,9 @@ Codex/Astra
   -> checkpoint_save(REPORT)
        -> immutable checkpoint event = durable outbox
        -> return to Astra immediately
-       -> background exact-bound ChatGPT dispatch
-       -> terminal report receipt
+       -> background exact-bound ChatGPT send
+       -> exact new user-turn acknowledgement
+       -> terminal report receipt (`USER_TURN_ACK`)
   -> continue autonomously
 
 material judgment boundary
@@ -55,16 +56,19 @@ A claim is created before external send. If a process dies after remote acceptan
 
 ## Codex local installation
 
-After this candidate is checked out and built on the real Windows host:
-
-```powershell
-node .\tools\install-checkpoint-codex.mjs --dry-run
-node .\tools\install-checkpoint-codex.mjs
-```
+After this candidate is checked out into a durable directory and built on the real Windows host, first inspect the dry-run plan.
 
 The installer preserves existing `~/.codex/hooks.json`, makes a backup when replacing it, adds only the SessionStart/Stop handlers, and links/copies the reusable skill into `$HOME/.agents/skills/checkpoint-autoreport`.
 
-Codex must review/trust the new hook definitions before they run. Restart Codex if the skill is not discovered immediately.
+Do not install from an OS temporary checkout. Keep the exact candidate in a durable directory, run `npm run build`, then review the dry-run plan. `--register-mcp` additionally registers the exact built `dist/index.js` as the user-level Codex MCP server `checkpoint_autoreport`; an existing different registration is refused instead of overwritten.
+
+```powershell
+node .\tools\install-checkpoint-codex.mjs --dry-run
+node .\tools\install-checkpoint-codex.mjs --register-mcp
+codex mcp get checkpoint_autoreport --json
+```
+
+Codex must review/trust the new hook definitions before they run. Restart Codex after installing hooks/MCP/Skill so one fresh session sees one coherent configuration.
 
 ## Pre-host checks included in candidate
 
@@ -89,10 +93,10 @@ Do not claim this candidate usable until all rows below are executed on SHIRO-WS
 5. Prepared exact ChatGPT target alias resolves to the intended conversation.
 6. New Codex session records a session marker.
 7. `checkpoint_bind` binds one test workspace/Mission to that exact conversation.
-8. First `checkpoint_save(REPORT)` returns without waiting for the ChatGPT answer; checkpoint event exists immediately.
-9. The exact ChatGPT conversation receives exactly one report containing the matching `report_id`; receipt becomes `DELIVERED` with matching conversation identity.
+8. First `checkpoint_save(REPORT)` returns without waiting for a ChatGPT answer; checkpoint event exists immediately.
+9. The exact ChatGPT conversation receives exactly one report containing the matching `report_id`; receipt becomes `DELIVERED` with `delivery_proof=USER_TURN_ACK` after the exact posted user turn is acknowledged. No assistant-response wait is required for REPORT.
 10. A second material REPORT advances sequence exactly once and does not resend the first.
-11. Attempting to stop an active fresh Codex session before any checkpoint causes exactly one Stop continuation; saving a checkpoint then allows stop.
+11. Attempting to stop an active fresh Codex session before any checkpoint causes exactly one Stop continuation. A final REPORT that is not yet confirmed also gets one bounded continuation so the background user-turn acknowledgement can finish; a second stop never loops forever and preserves unresolved ambiguity without blind resend.
 12. `checkpoint_save(CONSULT)` waits for the same-conversation reply, records the receipt, and returns the bounded reply to Codex.
 13. A simulated ambiguous/in-flight claim is not automatically resent; `checkpoint_status` exposes the unresolved state.
 14. No existing Codex hooks/skills, target registry entries, or unrelated ChatGPT conversations are modified.

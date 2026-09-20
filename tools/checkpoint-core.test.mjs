@@ -46,7 +46,7 @@ test('delivery receipts dedupe and ambiguous claims prevent blind resend', async
   const e = saveCheckpoint({ workspace: f.workspace, next: 'Continue', approach: 'Keep going.', stateRoot: f.local });
   let sends = 0;
   const first = await dispatchCheckpoint({ event: e, stateRoot: f.local, send: async () => { sends += 1; return { chat_id: 'checkpoint-test', response: 'ack' }; } });
-  assert.equal(first.status, 'DELIVERED'); assert.equal(sends, 1);
+  assert.equal(first.status, 'DELIVERED'); assert.equal(first.receipt.delivery_proof, 'USER_TURN_ACK'); assert.equal(sends, 1);
   const second = await dispatchCheckpoint({ event: e, stateRoot: f.local, send: async () => { sends += 1; return { chat_id: 'checkpoint-test', response: 'again' }; } });
   assert.equal(second.status, 'CACHED'); assert.equal(sends, 1); assert.equal(pendingCheckpoints({ workspace: f.workspace, stateRoot: f.local }).length, 0);
 });
@@ -71,14 +71,17 @@ test('stop guard enforces one checkpoint per active Codex session and CONSULT co
   assert.equal(before.decision, 'block');
   const report = saveCheckpoint({ workspace: f.workspace, next: 'Next', approach: 'Proceed.', stateRoot: f.local });
   const queued = evaluateStopGuard({ workspace: f.workspace, session_id: 'thr-stop', stateRoot: f.local });
-  assert.equal(queued.continue, true); assert.match(queued.systemMessage, /queued/);
-  await dispatchCheckpoint({ event: report, stateRoot: f.local, send: async () => ({ chat_id: 'checkpoint-test', response: 'ok' }) });
+  assert.equal(queued.decision, 'block'); assert.match(queued.reason, /waiting for REPORT/);
+  const repeated = evaluateStopGuard({ workspace: f.workspace, session_id: 'thr-stop', stop_hook_active: true, stateRoot: f.local });
+  assert.equal(repeated.continue, true); assert.match(repeated.systemMessage, /PENDING/);
+  await dispatchCheckpoint({ event: report, stateRoot: f.local, send: async () => ({ chat_id: 'checkpoint-test', response: '' }) });
   assert.deepEqual(evaluateStopGuard({ workspace: f.workspace, session_id: 'thr-stop', stateRoot: f.local }), { continue: true });
 
   const consult = saveCheckpoint({ workspace: f.workspace, next: 'Decide', approach: 'Ask once.', mode: 'CONSULT', question: 'Proceed?', stateRoot: f.local });
   const pending = evaluateStopGuard({ workspace: f.workspace, session_id: 'thr-stop', stateRoot: f.local });
   assert.equal(pending.decision, 'block');
-  await dispatchCheckpoint({ event: consult, stateRoot: f.local, send: async () => ({ chat_id: 'checkpoint-test', response: 'CONTINUE' }) });
+  const consultResult = await dispatchCheckpoint({ event: consult, stateRoot: f.local, send: async () => ({ chat_id: 'checkpoint-test', response: 'CONTINUE' }) });
+  assert.equal(consultResult.receipt.delivery_proof, 'ASSISTANT_REPLY_READBACK');
   assert.deepEqual(evaluateStopGuard({ workspace: f.workspace, session_id: 'thr-stop', stateRoot: f.local }), { continue: true });
 });
 

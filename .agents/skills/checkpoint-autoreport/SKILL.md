@@ -33,13 +33,13 @@ Use `CONSULT` only for a material architecture/product/authority decision, serio
 
 Do not checkpoint every command/test/read. Good boundaries include a coherent work unit closing, a material design decision, context rollover, a delegated read that changes direction, or a pre-terminal/final state.
 
-After a REPORT checkpoint, continue immediately when the Mission authority permits. ChatGPT does not own the next task.
+After a REPORT checkpoint, continue immediately when the Mission authority permits. REPORT delivery means the exact posted user turn was acknowledged in the bound conversation; it does not wait for an assistant answer. ChatGPT does not own the next task.
 
 ## Before stopping
 
 The installed Stop hook checks that an active bound workspace has at least one checkpoint from the current Codex session. If it asks for a checkpoint, create one meaningful checkpoint; do not create dummy text merely to silence the hook.
 
-If the latest checkpoint is CONSULT, do not stop until its exact ChatGPT delivery/readback is confirmed or the Stop hook has already continued once and reports an unresolved reconciliation condition.
+If the latest REPORT is still pending at stop time, the Stop hook may continue once so its exact user-turn acknowledgement can finish. If the latest checkpoint is CONSULT, do not stop until its exact ChatGPT delivery/readback is confirmed or the Stop hook has already continued once and reports an unresolved reconciliation condition.
 
 Use `checkpoint_status` when delivery state is unclear. Never blind-resend `DELIVERY_UNKNOWN` or an event with an existing claim.
 

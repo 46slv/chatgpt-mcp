@@ -1246,6 +1246,71 @@ export async function blockingReply(
   }
 }
 
+/**
+ * sendOnlyReply - exact-target report transport that returns after the new
+ * user turn is acknowledged in the intended conversation. It deliberately
+ * does not wait for an assistant reply; CONSULT keeps using blockingReply.
+ */
+export async function sendOnlyReply(
+  prompt: string,
+  options: BlockingReplyOptions = {},
+): Promise<AskResult> {
+  let stage = 'target-resolution';
+  let stageConversationId: string | null = null;
+  const startedAt = Date.now();
+  try {
+    const target = resolveReplyTarget(options);
+    if (!target) throw new Error('sendOnlyReply requires an exact target_url.');
+
+    stage = 'target-resolved';
+    stageConversationId = target.conversationId;
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    await ensureSession(target);
+    stage = 'session-ensured';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    await ensureReplyTarget(target);
+    stage = 'target-ensured';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    stage = 'submit-begin';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+    await sendPromptText(prompt, target.url);
+    stage = 'user-turn-acknowledged';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    const page = await getPage(target.url);
+    const finalTarget = parseChatGPTTargetUrl(page.url());
+    if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
+      throw new Error('Target conversation identity mismatch after report send.');
+    }
+    sessionState.conversationId = finalTarget.conversationId;
+    stage = 'target-reverified';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    return {
+      response: '',
+      elapsed_seconds: (Date.now() - startedAt) / 1000,
+      model: sessionState.currentModel,
+      chat_id: sessionState.conversationId,
+      poll_count: 0,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[report] stage=${stage} error=${message}`);
+    appendStageEvent({ scope: 'report', stage, status: 'failed', conversation_id: stageConversationId, error: message });
+    return {
+      response: '',
+      elapsed_seconds: (Date.now() - startedAt) / 1000,
+      model: null,
+      chat_id: null,
+      poll_count: 0,
+      error: message,
+    };
+  }
+}
+
 // ============================================
 // File upload
 // ============================================

@@ -25,8 +25,9 @@ test('SessionStart records identity and Stop blocks until current session checkp
   bindWorkspace({workspace:f.workspace,mission_id:'M-HOOK',stateRoot:f.stateRoot,registryPath:f.registryPath});
   assert.equal(handleStop({cwd:f.workspace,session_id:'s1',stop_hook_active:false},env).decision,'block');
   const event=saveCheckpoint({workspace:f.workspace,next:'n',approach:'a',stateRoot:f.stateRoot});
-  assert.equal(handleStop({cwd:f.workspace,session_id:'s1',stop_hook_active:false},env).continue,true);
-  await dispatchCheckpoint({event,stateRoot:f.stateRoot,send:async()=>({chat_id:'hook-target',response:'ok'})});
+  assert.equal(handleStop({cwd:f.workspace,session_id:'s1',stop_hook_active:false},env).decision,'block');
+  assert.equal(handleStop({cwd:f.workspace,session_id:'s1',stop_hook_active:true},env).continue,true);
+  await dispatchCheckpoint({event,stateRoot:f.stateRoot,send:async()=>({chat_id:'hook-target',response:''})});
   assert.deepEqual(handleStop({cwd:f.workspace,session_id:'s1',stop_hook_active:false},env),{continue:true});
 });
 

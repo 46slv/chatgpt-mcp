@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { blockingReply } from './chatgpt.js';
+import { blockingReply, sendOnlyReply } from './chatgpt.js';
 
 const CORE_MODULE = '../tools/checkpoint-core.mjs';
 const dispatchChains = new Map<string, Promise<unknown>>();
@@ -16,11 +16,16 @@ async function dispatchOne(event: any): Promise<any> {
   const c = await core();
   return c.dispatchCheckpoint({
     event,
-    send: async ({ packet, target, event: current }: any) => blockingReply(
-      packet,
-      current.mode === 'CONSULT' ? 60 : 30,
-      { target_url: target.chat_url, expected_conversation_id: target.conversation_id },
-    ),
+    send: async ({ packet, target, event: current }: any) => current.mode === 'CONSULT'
+      ? blockingReply(
+          packet,
+          60,
+          { target_url: target.chat_url, expected_conversation_id: target.conversation_id },
+        )
+      : sendOnlyReply(
+          packet,
+          { target_url: target.chat_url, expected_conversation_id: target.conversation_id },
+        ),
   });
 }
 
