@@ -103,6 +103,20 @@ function validateLeaseOwner(owner, expected, receiptFile) {
   return owner;
 }
 
+function cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile) {
+  try {
+    if (fs.existsSync(ownerFile)) {
+      const stat = fs.lstatSync(ownerFile);
+      if (stat.isDirectory()) return false;
+      fs.unlinkSync(ownerFile);
+    }
+    fs.rmdirSync(leaseDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function acquireOuterLease(expected) {
   const canonicalReceipt = canonicalReceiptPath(expected.receiptFile);
   const leaseDirectory = `${canonicalReceipt}.lease`;
@@ -148,8 +162,10 @@ function acquireOuterLease(expected) {
       fs.closeSync(fd);
     }
   } catch (error) {
+    const residueCleaned = cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile);
     const failed = new Error("OUTER_RUN_LEASE_INITIALIZATION_FAILED");
     failed.code = "OUTER_RUN_LEASE_INITIALIZATION_FAILED";
+    failed.lease_residue_cleaned = residueCleaned;
     failed.cause = error;
     throw failed;
   }
