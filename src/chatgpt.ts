@@ -677,8 +677,8 @@ export interface SubmitBudgets {
 // or navigation settles. Keep the fail-closed two-attempt contract, but give
 // each observation window enough time for that live UI path to materialize.
 export const DEFAULT_SUBMIT_BUDGETS = Object.freeze({
-  clickAckMs: 15_000,
-  enterAckMs: 30_000,
+  clickAckMs: 30_000,
+  enterAckMs: 45_000,
 });
 
 export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgets?: SubmitBudgets): Promise<SendAcknowledgment> {

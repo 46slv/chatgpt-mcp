@@ -72,9 +72,9 @@ function submitFake(options = {}) {
 const FAST = { clickAckMs: 5, enterAckMs: 5 };
 
 test("default submit observation budgets allow slow live composer acknowledgement", () => {
-  assert.equal(DEFAULT_SUBMIT_BUDGETS.clickAckMs, 15000);
-  assert.equal(DEFAULT_SUBMIT_BUDGETS.enterAckMs, 30000);
-  assert.ok(DEFAULT_SUBMIT_BUDGETS.enterAckMs > 15000);
+  assert.equal(DEFAULT_SUBMIT_BUDGETS.clickAckMs, 30000);
+  assert.equal(DEFAULT_SUBMIT_BUDGETS.enterAckMs, 45000);
+  assert.ok(DEFAULT_SUBMIT_BUDGETS.enterAckMs > DEFAULT_SUBMIT_BUDGETS.clickAckMs);
 });
 
 test("baseline captures exact url, turn count, and last turn testid", async () => {
