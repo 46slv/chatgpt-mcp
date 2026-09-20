@@ -103,13 +103,44 @@ function validateLeaseOwner(owner, expected, receiptFile) {
   return owner;
 }
 
-function cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile) {
+function readPrivateLeaseOwner(ownerFile, expected, canonicalReceipt) {
+  const stat = fs.lstatSync(ownerFile);
+  if (!stat.isFile() || stat.isSymbolicLink?.() || stat.isReparsePoint?.() || (Number.isInteger(stat.nlink) && stat.nlink !== 1)) {
+    throw new Error("OUTER_RUN_LEASE_OWNER_UNSAFE");
+  }
+  return validateLeaseOwner(readJson(ownerFile), expected, canonicalReceipt);
+}
+
+function cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile, expected, canonicalReceipt, expectedOwner) {
   try {
-    if (fs.existsSync(ownerFile)) {
-      const stat = fs.lstatSync(ownerFile);
-      if (stat.isDirectory()) return false;
-      fs.unlinkSync(ownerFile);
+    const leaseStat = fs.lstatSync(leaseDirectory);
+    if (!leaseStat.isDirectory() || leaseStat.isSymbolicLink?.() || leaseStat.isReparsePoint?.()) return false;
+
+    if (!fs.existsSync(ownerFile)) {
+      if (fs.readdirSync(leaseDirectory).length !== 0) return false;
+      fs.rmdirSync(leaseDirectory);
+      return true;
     }
+
+    // Capture the currently published owner path before deciding whether it is
+    // ours. This closes the validate-then-unlink race: if another actor replaces
+    // owner.json after the capture, the replacement remains in the lease and
+    // rmdir fails closed. Foreign/unreadable captured evidence is preserved in
+    // the nonce-bound proof path for operator adjudication.
+    const cleanupProof = path.join(leaseDirectory, `owner.cleanup-${expectedOwner.owner_token}.json`);
+    if (fs.existsSync(cleanupProof)) return false;
+    fs.renameSync(ownerFile, cleanupProof);
+
+    let observed;
+    try {
+      observed = readPrivateLeaseOwner(cleanupProof, expected, canonicalReceipt);
+    } catch {
+      return false;
+    }
+    if (observed.owner_token !== expectedOwner.owner_token || observed.process_id !== expectedOwner.process_id) return false;
+
+    fs.unlinkSync(cleanupProof);
+    if (fs.readdirSync(leaseDirectory).length !== 0) return false;
     fs.rmdirSync(leaseDirectory);
     return true;
   } catch {
@@ -162,7 +193,7 @@ function acquireOuterLease(expected) {
       fs.closeSync(fd);
     }
   } catch (error) {
-    const residueCleaned = cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile);
+    const residueCleaned = cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile, expected, canonicalReceipt, owner);
     const failed = new Error("OUTER_RUN_LEASE_INITIALIZATION_FAILED");
     failed.code = "OUTER_RUN_LEASE_INITIALIZATION_FAILED";
     failed.lease_residue_cleaned = residueCleaned;
