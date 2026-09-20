@@ -189,3 +189,73 @@ export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-cont
   args.push(prompt);
   return Object.freeze({ command: 'opencode', args: Object.freeze(args), cwd: valid.workspace });
 }
+
+
+export function defaultIsPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+export function acquireDispatcherLock({ root, pid = process.pid, started_at = new Date().toISOString(), isPidAlive = defaultIsPidAlive } = {}) {
+  const dirs = ensureLayout(root);
+  const lockPath = path.join(dirs.root, 'dispatcher.lock');
+  const payload = { protocol: 'ws-dispatch.lock', schema_version: 1, pid, started_at };
+  const attempt = () => {
+    const fd = fs.openSync(lockPath, 'wx');
+    try { fs.writeFileSync(fd, `${JSON.stringify(payload)}\n`, 'utf8'); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    return Object.freeze({ path: lockPath, pid, started_at });
+  };
+  try { return attempt(); }
+  catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    let prior = null;
+    try { prior = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch {}
+    if (prior && isPidAlive(prior.pid)) throw new Error(`dispatcher already active: pid ${prior.pid}`);
+    fs.rmSync(lockPath, { force: true });
+    return attempt();
+  }
+}
+
+export function releaseDispatcherLock(lock) {
+  if (!lock?.path || !Number.isInteger(lock.pid)) throw new Error('valid dispatcher lock is required');
+  if (!fs.existsSync(lock.path)) return false;
+  let current = null;
+  try { current = JSON.parse(fs.readFileSync(lock.path, 'utf8')); } catch {}
+  if (!current || current.pid !== lock.pid) throw new Error('dispatcher lock ownership changed');
+  fs.rmSync(lock.path, { force: true });
+  return true;
+}
+
+export async function dispatchNextJob({ root, runner, now = () => new Date().toISOString() } = {}) {
+  if (typeof runner !== 'function') throw new Error('runner function is required');
+  const claim = claimNextJob({ root });
+  if (!claim) return null;
+  const started_at = now();
+  let outcome;
+  try {
+    outcome = await runner({ job: claim.job, evidence_dir: ensureLayout(root).evidence });
+  } catch (error) {
+    outcome = { state: 'FAILED', summary: 'Worker runner threw before a terminal success receipt.', evidence_refs: [], error: error?.stack || error?.message || String(error) };
+  }
+  const state = outcome?.state || 'COMPLETED';
+  const result = {
+    protocol: WS_DISPATCH_RESULT_PROTOCOL,
+    schema_version: WS_DISPATCH_SCHEMA_VERSION,
+    job_id: claim.job.job_id,
+    state,
+    lane: claim.job.lane,
+    started_at,
+    finished_at: now(),
+    summary: outcome?.summary || `Worker finished with state ${state}.`,
+    evidence_refs: Array.isArray(outcome?.evidence_refs) ? outcome.evidence_refs : [],
+    error: outcome?.error ?? null,
+  };
+  writeResult({ root, result });
+  return getJobStatus({ root, job_id: claim.job.job_id }).result;
+}
