@@ -66,7 +66,9 @@ test('terminal result is write-once and correlated to active job', () => {
   };
   writeResult({ root, result });
   assert.equal(getJobStatus({ root, job_id: 'job-003' }).result.state, 'COMPLETED');
-  assert.throws(() => writeResult({ root, result }), /already exists/);
+  assert.equal(fs.existsSync(path.join(root, 'active', 'job-003.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'archive', 'job-003.json')), true);
+  assert.throws(() => writeResult({ root, result }), /active job missing|already exists/);
 });
 
 test('restart recovery marks active/no-receipt jobs AMBIGUOUS and never requeues them', () => {
@@ -78,6 +80,8 @@ test('restart recovery marks active/no-receipt jobs AMBIGUOUS and never requeues
   const status = getJobStatus({ root, job_id: 'job-004' });
   assert.equal(status.state, 'TERMINAL');
   assert.equal(status.result.state, 'AMBIGUOUS');
+  assert.equal(fs.existsSync(path.join(root, 'active', 'job-004.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'archive', 'job-004.json')), true);
   assert.equal(claimNextJob({ root }), null);
   assert.deepEqual([...recoverInterruptedJobs({ root, now: '2026-09-21T00:11:00.000Z' })], []);
 });
