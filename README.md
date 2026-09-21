@@ -56,9 +56,12 @@ Current implementation modules:
 
 The first-class `devexec closed-loop ...` CLI/facade admits an existing
 persisted Codex task/thread and exposes `admit`, completion-driven `run`, and
-`inspect` operations. Admission requires exact task/thread/turn identity, the
-canonical ChatGPT URL, an absolute native runtime, and an absolute worktree.
-It does not route through the older mutable-target fallback path.
+`inspect` operations. Admission requires exact task/thread/turn identity, an
+absolute native runtime, and an absolute worktree. Use either an explicit
+canonical ChatGPT URL (`--chat-url`) or the durable automatic lane
+(`--auto-chat`); the latter creates/reuses one immutable TaskChatBinding
+without consulting current-chat, registry defaults, browser focus, or project
+state. It does not route through the older mutable-target fallback path.
 
 ## ChatGPT MCP tools
 
@@ -69,6 +72,8 @@ It does not route through the older mutable-target fallback path.
 | `chatgpt_upload` | Upload files with an optional prompt and wait for response |
 | `chatgpt_select_project` | Navigate to a ChatGPT Project by name |
 | `chatgpt_new_chat` | Start a fresh conversation |
+| `task_chat_admit` | Provision/reuse one immutable ChatGPT conversation for a durable mission/task |
+| `task_chat_admission_status` | Inspect automatic Task-chat admission state without browser/registry routing |
 
 All tools are blocking: the MCP call returns when ChatGPT has completed or the bounded timeout is reached.
 
@@ -186,6 +191,13 @@ node .\tools\devexec.mjs closed-loop admit --mission-id <id> --task-id <id> `
   --thread-id <persisted-thread-uuid> --initial-turn-id <completed-turn-uuid> `
   --chat-url https://chatgpt.com/c/<conversation-id> `
   --runtime-path 'C:\Users\<user>\AppData\Local\OpenAI\Codex\bin\<revision>\codex.exe' `
+  --working-directory 'D:\Documents\<dedicated-worktree>' `
+  --until-complete --goal '<goal text>' --current-task '<current task text>'
+
+# Or provision/reuse one fresh Task-bound conversation automatically:
+node .\tools\devexec.mjs closed-loop admit --mission-id <id> --task-id <id> `
+  --thread-id <persisted-thread-uuid> --initial-turn-id <completed-turn-uuid> `
+  --auto-chat --runtime-path 'C:\Users\<user>\AppData\Local\OpenAI\Codex\bin\<revision>\codex.exe' `
   --working-directory 'D:\Documents\<dedicated-worktree>' `
   --until-complete --goal '<goal text>' --current-task '<current task text>'
 

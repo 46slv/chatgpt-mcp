@@ -18,6 +18,7 @@ import {
 } from './chatgpt.js';
 import { closeBrowser } from './browser.js';
 import { registerCheckpointTools } from './checkpoint-tools.js';
+import { registerTaskChatAdmissionTools } from './task-chat-admission-tools.js';
 
 const server = new McpServer({
   name: 'chatgpt-mcp',
@@ -25,6 +26,7 @@ const server = new McpServer({
 });
 
 registerCheckpointTools(server);
+registerTaskChatAdmissionTools(server);
 
 // =============================================================================
 // Tool: chatgpt_ask

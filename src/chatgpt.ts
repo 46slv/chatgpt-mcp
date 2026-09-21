@@ -140,7 +140,10 @@ async function ensureReplyTarget(target: ChatGPTTargetIdentity): Promise<void> {
 /**
  * Auto-start session on first call. Not exposed as a tool.
  */
-export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<void> {
+export async function ensureSession(
+  target?: ChatGPTTargetIdentity,
+  options: { skipDefaultProject?: boolean } = {},
+): Promise<void> {
   if (sessionInitialized && isBrowserRunning()) {
     if (target) {
       const currentPage = await getPage(target.url);
@@ -189,7 +192,7 @@ export async function ensureSession(target?: ChatGPTTargetIdentity): Promise<voi
   await saveStorageState();
 
   // Auto-select default project on first launch
-  if (!target && CONFIG.defaultProject && !sessionState.currentProjectUrl) {
+  if (!target && !options.skipDefaultProject && CONFIG.defaultProject && !sessionState.currentProjectUrl) {
     const result = await selectProject(CONFIG.defaultProject);
     if (result.success) {
       console.error(`[session] Auto-selected default project: ${CONFIG.defaultProject}`);
@@ -628,12 +631,43 @@ async function readTurnText(page: ComposerSubmitPage, testid: string): Promise<s
   }
 }
 
-async function observeSubmission(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgetMs: number): Promise<SendAcknowledgment | null> {
+function isCanonicalConversationUrl(value: string): boolean {
+  try { parseChatGPTTargetUrl(value); return true; }
+  catch { return false; }
+}
+
+function isAdmissionNavigationUrl(value: string): boolean {
+  if (isCanonicalConversationUrl(value)) return true;
+  // The live composer briefly exposes an internal provisioning route before
+  // replacing it with the canonical conversation id.  Treat only the exact
+  // UUID-shaped WEB marker as transient; it can never become a binding.
+  if (/^https:\/\/chatgpt\.com\/c\/WEB:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) return true;
+  // ChatGPT may briefly normalize the home route (including a UI query
+  // parameter) while provisioning the conversation.  This is still the
+  // explicitly selected home surface; no conversation identity is inferred
+  // until the strict /c/<id> parser succeeds after USER_TURN_ACK.
+  try {
+    const parsed = new URL(value);
+    return parsed.origin === 'https://chatgpt.com' && (parsed.pathname === '' || parsed.pathname === '/');
+  } catch {
+    return false;
+  }
+}
+
+async function observeSubmission(
+  page: ComposerSubmitPage,
+  prompt: string,
+  baseline: SendBaseline,
+  budgetMs: number,
+  allowConversationNavigation = false,
+): Promise<SendAcknowledgment | null> {
   const expected = normalizeComposedText(prompt);
   const deadline = Date.now() + Math.max(1, budgetMs);
   let sawMismatchedFreshUserTurn = false;
   for (;;) {
-    if (page.url() !== baseline.url) {
+    const observedUrl = page.url();
+    const canonicalConversationReady = isCanonicalConversationUrl(observedUrl);
+    if (observedUrl !== baseline.url && (!allowConversationNavigation || !isAdmissionNavigationUrl(observedUrl))) {
       throw new Error('Target URL changed during submit; refusing to correlate turns across conversations.');
     }
     const seqs = await readTurnSeqs(page);
@@ -656,8 +690,12 @@ async function observeSubmission(page: ComposerSubmitPage, prompt: string, basel
         sawMismatchedFreshUserTurn = true;
       } else {
         const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
-        if (normalized.length > 0 || composerEmpty) {
-          return { url: baseline.url, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
+        // In automatic admission the new user turn may render while the
+        // home route is still normalizing.  Do not acknowledge until the
+        // canonical /c/<id> identity is observable; otherwise the caller
+        // could persist a binding without a proven conversation target.
+        if ((normalized.length > 0 || composerEmpty) && (!allowConversationNavigation || canonicalConversationReady)) {
+          return { url: observedUrl, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
         }
       }
     }
@@ -710,14 +748,20 @@ export const DEFAULT_SUBMIT_BUDGETS = Object.freeze({
   enterAckMs: 45_000,
 });
 
-export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgets?: SubmitBudgets): Promise<SendAcknowledgment> {
+export async function submitComposedPrompt(
+  page: ComposerSubmitPage,
+  prompt: string,
+  baseline: SendBaseline,
+  budgets?: SubmitBudgets,
+  allowConversationNavigation = false,
+): Promise<SendAcknowledgment> {
   if (page.url() !== baseline.url) {
     throw new Error('Submit started on a different conversation than the send baseline.');
   }
   await clickFirstVisible(page, SELECTORS.sendButton);
   const clickAckMs = budgets?.clickAckMs ?? DEFAULT_SUBMIT_BUDGETS.clickAckMs;
   const enterAckMs = budgets?.enterAckMs ?? DEFAULT_SUBMIT_BUDGETS.enterAckMs;
-  const ack = await observeSubmission(page, prompt, baseline, clickAckMs);
+  const ack = await observeSubmission(page, prompt, baseline, clickAckMs, allowConversationNavigation);
   if (ack) { console.error(`[submit] click-path acknowledged userTurnIndex=${ack.userTurnIndex}`); return ack; }
   if (normalizeComposedText(prompt).length === 0
     || normalizeComposedText(await readComposerText(page)) !== normalizeComposedText(prompt)) {
@@ -726,7 +770,7 @@ export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: str
   await page.locator(SELECTORS.promptTextarea[0]).first().focus();
   await page.keyboard.press('Enter');
   console.error(`[submit] enter-fallback submitted once, awaiting acknowledgment`);
-  const retry = await observeSubmission(page, prompt, baseline, enterAckMs);
+  const retry = await observeSubmission(page, prompt, baseline, enterAckMs, allowConversationNavigation);
   if (retry) { console.error(`[submit] enter-fallback acknowledged userTurnIndex=${retry.userTurnIndex}`); return retry; }
   throw new Error('Prompt submission was not observed after send click and one keyboard submit.');
 }
@@ -766,7 +810,7 @@ export async function ensureExactComposer(
  * acknowledgment so the response poll can anchor on turns that strictly
  * follow the new user turn instead of stale pre-send content.
  */
-async function sendPromptText(prompt: string, targetUrl?: string): Promise<SendAcknowledgment> {
+async function sendPromptText(prompt: string, targetUrl?: string, allowConversationNavigation = false): Promise<SendAcknowledgment> {
   const page = await getPage(targetUrl);
   const baseline = await captureSendBaseline(page);
   console.error('[send] baseline-captured composer-typing-begin');
@@ -780,7 +824,7 @@ async function sendPromptText(prompt: string, targetUrl?: string): Promise<SendA
 
   console.error('[send] composer-holds-exact-prompt submit-begin');
   appendStageEvent({ scope: 'send', stage: 'composer-verified-submit-begin' });
-  const ack = await submitComposedPrompt(page, prompt, baseline);
+  const ack = await submitComposedPrompt(page, prompt, baseline, undefined, allowConversationNavigation);
 
   await wait(1000);
 
@@ -1122,6 +1166,89 @@ export async function newConversation(): Promise<SimpleResult> {
       message: `Failed to start new conversation: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/**
+ * Prepare the browser for automatic durable Task-chat admission.  This phase
+ * deliberately performs no composer mutation or send: the admission journal
+ * records SEND_INTENT immediately before the separate send primitive runs.
+ * The home URL is selected explicitly so ambient current-chat/project state
+ * can never become the provisioning target.
+ */
+export async function prepareTaskChatAdmission(): Promise<{ home_url: string }> {
+  await ensureSession(undefined, { skipDefaultProject: true });
+  // Automatic admission is intentionally home-scoped in v1.  Clear any
+  // project alias retained by an earlier interactive call before navigating.
+  sessionState.currentProjectUrl = null;
+  const navigated = await navigateTo(CONFIG.chatgptUrl);
+  if (!navigated) throw new Error('Failed to navigate to ChatGPT home for Task-chat admission.');
+  await wait(1500);
+  const page = await getPage();
+  const current = page.url();
+  let parsed: URL;
+  try { parsed = new URL(current); } catch { throw new Error('ChatGPT home navigation returned an invalid URL.'); }
+  if (parsed.origin !== 'https://chatgpt.com' || (parsed.pathname !== '' && parsed.pathname !== '/')) {
+    throw new Error('ChatGPT home navigation did not remain on the canonical home surface.');
+  }
+  let composerReady = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    composerReady = await checkLoginStatusOnPage(page);
+    if (composerReady) break;
+    await wait(1000);
+  }
+  if (!composerReady) {
+    throw new Error('ChatGPT session is not logged in or the home composer is not ready.');
+  }
+  return { home_url: current };
+}
+
+/**
+ * Send exactly one bounded Task-admission seed and return its exact posted
+ * user-turn acknowledgement plus the canonical conversation identity.  No
+ * assistant response is awaited here; the durable admission core owns the
+ * no-blind-retry decision after this call starts.
+ */
+export async function sendTaskChatAdmissionSeed(seed: string): Promise<{
+  chat_url: string;
+  conversation_id: string;
+  acknowledgement: {
+    status: 'USER_TURN_ACK';
+    user_turn_seq: number;
+    user_turn_index: number;
+    ack_turn_count: number;
+    user_turn_text: string | null;
+    acked_at: string;
+  };
+}> {
+  if (typeof seed !== 'string' || seed.length === 0 || seed.trim() !== seed) {
+    throw new Error('Task-chat admission seed must be an exact non-empty string.');
+  }
+  // Admission starts on the ChatGPT home page and intentionally creates the
+  // target conversation on first send.  Allow only that canonical
+  // home-to-/c/<id> transition; all other URL drift remains fail-closed.
+  const ack = await sendPromptText(seed, undefined, true);
+  const page = await getPage();
+  let target: ChatGPTTargetIdentity;
+  try {
+    target = parseChatGPTTargetUrl(page.url());
+  } catch (error) {
+    throw new Error(`Task-chat admission did not expose a canonical conversation URL after USER_TURN_ACK: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (ack.userTurnSeq < 0 || !Number.isInteger(ack.userTurnSeq)) {
+    throw new Error('Task-chat admission acknowledgement has no exact user-turn sequence.');
+  }
+  return {
+    chat_url: target.url,
+    conversation_id: target.conversationId,
+    acknowledgement: {
+      status: 'USER_TURN_ACK',
+      user_turn_seq: ack.userTurnSeq,
+      user_turn_index: ack.userTurnIndex,
+      ack_turn_count: ack.ackTurnCount,
+      user_turn_text: ack.userTurnText,
+      acked_at: new Date().toISOString(),
+    },
+  };
 }
 
 // ============================================

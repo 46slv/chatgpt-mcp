@@ -15,6 +15,7 @@ import {
   runAdmittedClosedLoop,
 } from "./devexec-closed-loop-facade.mjs";
 import { createCodexPromptResponse, createLocalRelayDecision, hashJson } from "./devexec-full-relay.mjs";
+import { createTaskChatBinding } from "./devexec-task-chat-binding.mjs";
 
 function tempRoot(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `devexec-facade-${label}-`));
@@ -57,6 +58,38 @@ function baseInput(root) {
     max_rounds: 2,
   };
 }
+
+test("automatic Closed Goal Loop admission accepts a binding from task_chat_admit and is replay-safe", async () => {
+  const root = tempRoot("auto-chat");
+  const input = baseInput(root);
+  let calls = 0;
+  const taskChatAdmit = async ({ mission_id, task_id }) => {
+    calls += 1;
+    return createTaskChatBinding({
+      mission_id,
+      task_id,
+      chat_url: "https://chatgpt.com/c/auto-chat-conversation",
+      source: "auto-task-admission",
+      source_alias: "admit-test",
+      bound_at: "2026-09-22T01:00:00.000Z",
+    });
+  };
+  const { chat_url: _manualChatUrl, ...autoInput } = input;
+  const first = await admitExistingCodexTask({ ...autoInput, auto_chat: true, task_chat_admit: taskChatAdmit });
+  assert.equal(first.created, true);
+  assert.equal(first.admission.task_chat_binding.source, "auto-task-admission");
+  assert.equal(first.admission.task_chat_binding.conversation_id, "auto-chat-conversation");
+  const second = await admitExistingCodexTask({ ...autoInput, auto_chat: true, task_chat_admit: taskChatAdmit });
+  assert.equal(second.created, false);
+  assert.equal(second.admission.task_chat_binding.binding_id, first.admission.task_chat_binding.binding_id);
+  assert.equal(calls, 2);
+});
+
+test("automatic and explicit chat URL admission modes are mutually exclusive", async () => {
+  const root = tempRoot("auto-chat-conflict");
+  const input = baseInput(root);
+  await assert.rejects(() => admitExistingCodexTask({ ...input, auto_chat: true, chat_url: input.chat_url, task_chat_admit: async () => { throw new Error("must not call"); } }), (error) => error.code === "CLOSED_LOOP_ADMISSION_CONFLICT");
+});
 
 test("admitExistingCodexTask persists exact identities and is idempotent", async () => {
   const root = tempRoot("admit");
