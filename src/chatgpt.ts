@@ -628,6 +628,7 @@ async function readTurnText(page: ComposerSubmitPage, index: number): Promise<st
 async function observeSubmission(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgetMs: number): Promise<SendAcknowledgment | null> {
   const expected = normalizeComposedText(prompt);
   const deadline = Date.now() + Math.max(1, budgetMs);
+  let sawMismatchedFreshUserTurn = false;
   for (;;) {
     if (page.url() !== baseline.url) {
       throw new Error('Target URL changed during submit; refusing to correlate turns across conversations.');
@@ -644,15 +645,26 @@ async function observeSubmission(page: ComposerSubmitPage, prompt: string, basel
       const text = rawText === null ? null : stripPostedChrome(rawText);
       const normalized = text === null ? '' : normalizeComposedText(text);
       if (normalized.length > 0 && expected.length > 0 && normalized !== expected) {
-        throw new Error('New user turn text does not match the submitted prompt; refusing to claim this send.');
-      }
-      const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
-      if (normalized.length > 0 || composerEmpty) {
-        return { url: baseline.url, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
+        // A freshly posted long turn can be observed while ChatGPT is still
+        // hydrating/collapsing its DOM. The first innerText snapshot may be a
+        // transient prefix/partial render even though the final posted turn is
+        // exact. Keep observing the SAME first fresh user turn for the bounded
+        // submit window; never skip to a later turn and never claim a mismatch.
+        sawMismatchedFreshUserTurn = true;
+      } else {
+        const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
+        if (normalized.length > 0 || composerEmpty) {
+          return { url: baseline.url, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
+        }
       }
     }
-    if (Date.now() >= deadline) return null;
-    await wait(500);
+    if (Date.now() >= deadline) {
+      if (sawMismatchedFreshUserTurn) {
+        throw new Error('New user turn text does not match the submitted prompt after the bounded observation window; refusing to claim this send.');
+      }
+      return null;
+    }
+    await wait(Math.min(500, Math.max(1, deadline - Date.now())));
   }
 }
 

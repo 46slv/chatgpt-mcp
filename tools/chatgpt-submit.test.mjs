@@ -30,6 +30,7 @@ function submitFake(options = {}) {
     clicks: 0,
     driftAfterCalls: options.driftAfterCalls ?? -1,
     urlCalls: 0,
+    sentTextReads: 0,
   };
   const doSend = () => { state.sent = true; state.composer = ""; };
   const freshAssistant = options.freshAssistantBeforeSent ?? null;
@@ -70,7 +71,15 @@ function submitFake(options = {}) {
           if (options.clickSends) doSend();
         },
         isVisible: async () => true,
-        innerText: async () => turnAt(i).text,
+        innerText: async () => {
+          const sentIndex = turns.length + (freshAssistant ? 1 : 0);
+          if (state.sent && i === sentIndex && Array.isArray(options.sentTurnTextSequence)) {
+            const index = Math.min(state.sentTextReads, options.sentTurnTextSequence.length - 1);
+            state.sentTextReads += 1;
+            return options.sentTurnTextSequence[index];
+          }
+          return turnAt(i).text;
+        },
         getAttribute: async (name) => (
           name === "data-testid"
             ? turnAt(i).testid
@@ -155,6 +164,21 @@ test("new user turn text mismatch fails closed", async () => {
   const baseline = await captureSendBaseline(page);
   await assert.rejects(submitComposedPrompt(page, PROMPT, baseline, FAST), /does not match/);
   assert.equal(state.enterPresses, 0);
+});
+
+test("transient partial render of the same fresh user turn is re-read before claiming mismatch", async () => {
+  const { page, state } = submitFake({
+    clickSends: true,
+    sentTurnTextSequence: [
+      PROMPT.slice(0, 12),
+      PROMPT + " \u8868\u793a\u3092\u5897\u3084\u3059",
+    ],
+  });
+  const baseline = await captureSendBaseline(page);
+  const ack = await submitComposedPrompt(page, PROMPT, baseline, { clickAckMs: 50, enterAckMs: 5 });
+  assert.equal(ack.userTurnText, PROMPT);
+  assert.equal(state.enterPresses, 0);
+  assert.ok(state.sentTextReads >= 2);
 });
 
 test("late fresh assistant turn is ignored while exact fresh user turn acknowledges send", async () => {
