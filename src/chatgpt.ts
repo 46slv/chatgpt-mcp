@@ -568,9 +568,9 @@ export function turnSeqFromTestId(value: unknown): number | null {
 }
 
 /** Window positions plus stable global sequences/author roles, in document order. */
-async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number; role: string | null }>> {
+async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number; testid: string; role: string | null }>> {
   const total = await page.locator(COMPOSER_TURN_SELECTOR).count();
-  const entries: Array<{ seq: number; index: number; role: string | null }> = [];
+  const entries: Array<{ seq: number; index: number; testid: string; role: string | null }> = [];
   for (let index = 0; index < total; index++) {
     let testid: string | null = null;
     try {
@@ -579,7 +579,7 @@ async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: numb
       testid = null;
     }
     const seq = turnSeqFromTestId(testid);
-    if (seq === null) continue;
+    if (seq === null || testid === null) continue;
     let role: string | null = null;
     try {
       role = await page
@@ -589,7 +589,7 @@ async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: numb
     } catch {
       role = null;
     }
-    entries.push({ seq, index, role });
+    entries.push({ seq, index, testid, role });
   }
   return entries;
 }
@@ -617,9 +617,12 @@ export async function readComposerText(page: ComposerSubmitPage): Promise<string
     return '';
   }
 }
-async function readTurnText(page: ComposerSubmitPage, index: number): Promise<string | null> {
+async function readTurnText(page: ComposerSubmitPage, testid: string): Promise<string | null> {
   try {
-    return await page.locator(COMPOSER_TURN_SELECTOR).nth(index).innerText();
+    // The rendered turn window can slide or remount between the metadata scan
+    // and this text read. Bind the read to the stable global test id rather
+    // than reusing the stale positional index from that scan.
+    return await page.locator(`[data-testid="${testid}"]`).first().innerText();
   } catch {
     return null;
   }
@@ -641,7 +644,7 @@ async function observeSubmission(page: ComposerSubmitPage, prompt: string, basel
     const fresh = seqs.filter((entry) => entry.seq > baseline.maxSeq && entry.role === 'user');
     if (fresh.length > 0) {
       const first = fresh[0];
-      const rawText = await readTurnText(page, first.index);
+      const rawText = await readTurnText(page, first.testid);
       const text = rawText === null ? null : stripPostedChrome(rawText);
       const normalized = text === null ? '' : normalizeComposedText(text);
       if (normalized.length > 0 && expected.length > 0 && normalized !== expected) {

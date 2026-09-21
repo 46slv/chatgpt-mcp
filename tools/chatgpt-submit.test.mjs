@@ -55,7 +55,18 @@ function submitFake(options = {}) {
     locator: (selector) => ({
       first: () => ({
         focus: async () => { state.focusCalls += 1; },
-        innerText: async () => state.composer,
+        innerText: async () => {
+          const stableMatch = /data-testid="conversation-turn-(\d+)"/u.exec(selector);
+          if (!stableMatch) return state.composer;
+          const index = Number.parseInt(stableMatch[1], 10) - 1;
+          const sentIndex = turns.length + (freshAssistant ? 1 : 0);
+          if (state.sent && index === sentIndex && Array.isArray(options.sentTurnTextSequence)) {
+            const sequenceIndex = Math.min(state.sentTextReads, options.sentTurnTextSequence.length - 1);
+            state.sentTextReads += 1;
+            return options.sentTurnTextSequence[sequenceIndex];
+          }
+          return turnAt(index).text;
+        },
         click: async () => {},
         getAttribute: async (name) => {
           if (name !== "data-message-author-role") return null;
@@ -95,6 +106,89 @@ function submitFake(options = {}) {
         if (key !== "Enter") throw new Error("unexpected key " + key);
         state.enterPresses += 1;
         if (options.enterSends !== false) doSend();
+      },
+    },
+  };
+  return { page, state };
+}
+
+// The live ChatGPT turn window can remount between the metadata scan and the
+// text read. This fake keeps the exact fresh user turn under the same stable
+// test id while moving an unrelated assistant node into the old positional
+// slot on every scan. A positional read therefore never acknowledges; an
+// exact test-id read does.
+function stableIdentityReorderingSubmitFake() {
+  const rows = [
+    { testid: "conversation-turn-1", text: "first user", role: "user" },
+    { testid: "conversation-turn-2", text: "first assistant", role: "assistant" },
+  ];
+  const state = {
+    sent: false,
+    composer: PROMPT,
+    enterPresses: 0,
+    reorders: 0,
+  };
+  const fresh = { testid: "conversation-turn-3", text: PROMPT, role: "user" };
+  const remountedAssistant = { testid: "conversation-turn-4", text: "stale remounted assistant", role: "assistant" };
+  const byTestId = (testid) => rows.find((row) => row.testid === testid) ?? null;
+  const reorderAfterMetadata = () => {
+    if (!state.sent) return;
+    const oldUser = rows.find((row) => row.testid === "conversation-turn-1");
+    const oldAssistant = rows.find((row) => row.testid === "conversation-turn-2");
+    const exact = byTestId(fresh.testid);
+    const wrong = byTestId(remountedAssistant.testid);
+    if (!oldUser || !oldAssistant || !exact || !wrong) return;
+    // Keep the exact user turn in the DOM, but move the unrelated assistant
+    // into the index captured by readTurnSeqs before its next text read.
+    if (rows.indexOf(exact) === 2) {
+      rows.splice(0, rows.length, oldUser, exact, wrong, oldAssistant);
+    } else {
+      rows.splice(0, rows.length, oldUser, wrong, exact, oldAssistant);
+    }
+    state.reorders += 1;
+  };
+  const doSend = () => {
+    if (state.sent) return;
+    state.sent = true;
+    state.composer = "";
+    rows.push(fresh, remountedAssistant);
+  };
+  const page = {
+    url: () => TARGET_URL,
+    locator: (selector) => {
+      const stableMatch = /\[data-testid="([^"]+)"\]/u.exec(selector);
+      const stableTestId = stableMatch?.[1] ?? null;
+      const isTurnWindow = selector.includes('[data-testid^="conversation-turn-"]');
+      const isRoleLookup = selector.includes('[data-message-author-role]');
+      const isSendButton = selector.includes('send-button') || selector.includes('aria-label*="Send"');
+      return {
+        first: () => ({
+          focus: async () => {},
+          innerText: async () => stableTestId ? (byTestId(stableTestId)?.text ?? "") : state.composer,
+          click: async () => { if (isSendButton) doSend(); },
+          getAttribute: async (name) => {
+            if (name === "data-message-author-role" && isRoleLookup && stableTestId) {
+              const row = byTestId(stableTestId);
+              if (row?.testid === fresh.testid) reorderAfterMetadata();
+              return row?.role ?? null;
+            }
+            return null;
+          },
+        }),
+        nth: (index) => ({
+          click: async () => { if (isSendButton) doSend(); },
+          isVisible: async () => true,
+          innerText: async () => (isTurnWindow ? (rows[index]?.text ?? "") : state.composer),
+          getAttribute: async (name) => isTurnWindow && name === "data-testid" ? (rows[index]?.testid ?? null) : null,
+        }),
+        count: async () => isTurnWindow ? rows.length : 1,
+      };
+    },
+    keyboard: {
+      press: async (key) => {
+        assert.equal(key, "Enter");
+        state.enterPresses += 1;
+        doSend();
       },
     },
   };
@@ -179,6 +273,17 @@ test("transient partial render of the same fresh user turn is re-read before cla
   assert.equal(ack.userTurnText, PROMPT);
   assert.equal(state.enterPresses, 0);
   assert.ok(state.sentTextReads >= 2);
+});
+
+test("ack reads the stable fresh user turn when the virtualized window remounts", async () => {
+  const { page, state } = stableIdentityReorderingSubmitFake();
+  const baseline = await captureSendBaseline(page);
+  const ack = await submitComposedPrompt(page, PROMPT, baseline, FAST);
+  assert.equal(ack.userTurnIndex, 2);
+  assert.equal(ack.userTurnSeq, 3);
+  assert.equal(ack.userTurnText, PROMPT);
+  assert.equal(state.enterPresses, 0);
+  assert.ok(state.reorders >= 1);
 });
 
 test("late fresh assistant turn is ignored while exact fresh user turn acknowledges send", async () => {
@@ -331,7 +436,12 @@ test("ack survives a virtualized window slide (positions shift, seqs grow)", asy
     locator: (selector) => ({
       first: () => ({
         focus: async () => {},
-        innerText: async () => st.composer,
+        innerText: async () => {
+          const match = /data-testid="conversation-turn-(\d+)"/u.exec(selector);
+          if (!match) return st.composer;
+          const seq = Number.parseInt(match[1], 10);
+          return win.find((entry) => entry.testid === `conversation-turn-${seq}`)?.text ?? "";
+        },
         click: async () => {},
         getAttribute: async (name) => {
           if (name !== "data-message-author-role") return null;
