@@ -1,0 +1,6 @@
+interface:
+  display_name: "Checkpoint Autoreport"
+  short_description: "Durable Codex checkpoints with automatic exact-chat reporting"
+  default_prompt: "Use checkpoint autoreport for this long-running mission."
+policy:
+  allow_implicit_invocation: true
