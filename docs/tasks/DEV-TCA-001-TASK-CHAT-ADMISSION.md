@@ -53,6 +53,19 @@ The model/Worker never chooses or infers the destination.
 
 Mutable aliases, browser focus, current chat, registry default, project fallback, recent-chat heuristics, and model judgment are never post-admission routing authority.
 
+## Execution profile — Luna Max primary
+
+User decision for this implementation run: use **Luna Max as the primary implementation Worker**.
+
+This is an explicit task profile and therefore overrides the generic Astra-first default for this Task only.
+
+- Luna Max owns the main implementation loop: inspect, plan locally, edit, test, repair, and continue toward the Brief's Done conditions.
+- Do not demote Luna Max to a read-only leaf role merely because generic guidance uses Luna as a bounded reading lane.
+- Keep the Task Brief as durable authority and keep the launch prompt thin; do not copy the whole Brief into the model prompt.
+- Prefer one coherent Luna Max execution context while it remains productive. If context becomes noisy or stale, persist a coherent checkpoint and resume with a fresh Luna Max context under the same Task identity.
+- Do not add a default Sol/Astra Coordinator. Escalate to ChatGPT/Sol or another stronger/fresh perspective only for a material architecture/authority/product decision, unresolved evidence contradiction, or genuine no-progress after replan/context refresh.
+- Model selection must be verified by the actual runtime/configuration. Writing "Luna Max" in the prompt is not proof that the run used Luna Max.
+
 ## Identity
 
 The admission identity is parent-owned and deterministic from the durable lineage:
@@ -333,7 +346,7 @@ Report only:
 After this brief is committed, the executor prompt should remain small:
 
 ```text
-Goal: Implement DEV-TCA-001 from docs/tasks/DEV-TCA-001-TASK-CHAT-ADMISSION.md so one durable Task lineage can automatically obtain and reuse one immutable ChatGPT conversation binding without manual URL setup.
+Goal: Using Luna Max as the primary implementation Worker, implement DEV-TCA-001 from docs/tasks/DEV-TCA-001-TASK-CHAT-ADMISSION.md so one durable Task lineage can automatically obtain and reuse one immutable ChatGPT conversation binding without manual URL setup.
 
 Done: Deterministic acceptance in the Task Brief passes, Closed Goal Loop --auto-chat works while explicit --chat-url remains compatible, and the exact candidate passes the Task A/Task B SHIRO-WS live canary including replay with zero duplicate seed sends.
 
