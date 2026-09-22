@@ -174,11 +174,15 @@ export function getJobStatus({ root, job_id }) {
   return Object.freeze({ state: 'NOT_FOUND', result: null });
 }
 
-export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-contributor', agent = 'build', attach = null } = {}) {
+export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-contributor', agent = null, attach = null } = {}) {
   const valid = validateJob(job);
+  if (valid.authority === 'read-only' && agent && agent !== 'plan') {
+    throw new Error('read-only jobs require the OpenCode plan agent');
+  }
   const args = ['run'];
   if (attach) args.push('--attach', attach);
-  args.push('--dir', valid.workspace, '--model', model, '--agent', agent, '--format', 'json');
+  const selectedAgent = agent || (valid.authority === 'read-only' ? 'plan' : 'build');
+  args.push('--dir', valid.workspace, '--model', model, '--agent', selectedAgent, '--format', 'json');
   const prompt = [
     `Goal: ${valid.goal}`,
     `Done: ${valid.done}`,

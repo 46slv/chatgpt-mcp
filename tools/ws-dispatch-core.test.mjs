@@ -95,6 +95,15 @@ test('OpenCode command builder carries only bounded job contract', () => {
   assert.match(run.args.at(-1), /Authority: workspace-write/);
 });
 
+test('read-only jobs select the non-editing OpenCode plan agent by default', () => {
+  const run = buildOpenCodeRun({ job: job({ authority: 'read-only' }) });
+  assert.deepEqual(run.args.slice(run.args.indexOf('--agent'), run.args.indexOf('--agent') + 2), ['--agent', 'plan']);
+  assert.throws(
+    () => buildOpenCodeRun({ job: job({ authority: 'read-only' }), agent: 'build' }),
+    /require the OpenCode plan agent/,
+  );
+});
+
 test('unknown fields and unsafe authority expansion fail closed', () => {
   const root = tempRoot();
   assert.throws(() => submitJob({ root, job: { ...job(), authority: 'full-machine' } }), /authority is invalid/);

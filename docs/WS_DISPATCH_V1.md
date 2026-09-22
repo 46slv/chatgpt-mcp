@@ -32,27 +32,32 @@ For one logical task:
 
 This gate exists because hosted Remote control has a scarce call budget and because high-frequency host work is both cheaper and more coherent when the local Worker owns the loop.
 
-## Current local submission interface
+## Local submission and resident interface
 
 This branch exposes a first-class local CLI around the durable queue:
 
 ```powershell
 # Submit one immutable job JSON. This only queues; a resident dispatcher may claim it.
-node .\tools\ws-dispatch-cli.mjs submit --root <machine-local-root> --job .\job.json
+node .\tools\ws-dispatch-cli.mjs submit --job .\job.json
 
 # The same submission can be piped through stdin, useful for a single bounded
 # remote-control process call without a separate remote file-write operation.
-Get-Content .\job.json -Raw | node .\tools\ws-dispatch-cli.mjs submit --root <machine-local-root> --stdin
+Get-Content .\job.json -Raw | node .\tools\ws-dispatch-cli.mjs submit --stdin
 
 # Inspect durable queue/result state without launching anything.
-node .\tools\ws-dispatch-cli.mjs status --root <machine-local-root> --job-id <job-id>
+node .\tools\ws-dispatch-cli.mjs status --job-id <job-id>
 
 # Until the Scheduled Task/service lifecycle is installed, a one-shot local
 # dispatcher can execute exactly one queued job through the Muse/OpenCode lane.
-node .\tools\ws-dispatch-cli.mjs run-once --root <machine-local-root>
+node .\tools\ws-dispatch-cli.mjs run-once
+
+# Foreground resident dispatcher. It owns one dispatcher lock, performs startup
+# recovery once, sleeps on a bounded filesystem wait while idle, and drains one
+# Muse/OpenCode job at a time.
+node .\tools\ws-dispatch-cli.mjs serve
 ```
 
-Operationally, the preferred temporary path before service installation is one remote process invocation that performs the submit and then `run-once` locally. The remote channel must not be used to drive the Worker's internal shell/test loop.
+`--root` and `--checkpoint-state-root` remain explicit test/canary overrides. Installed operation deliberately omits them so submission, resident execution, and Scheduled Task startup resolve the same machine-local identity.
 
 The installed steady state remains:
 
@@ -61,7 +66,30 @@ one remote submit -> resident local dispatcher -> local Worker loop
                   -> terminal result -> checkpoint REPORT/CONSULT
 ```
 
-The exact machine-local dispatch root and resident dispatcher lifecycle remain host qualification gates; the CLI does not silently choose or install them.
+## Machine-local identity
+
+The formal v1 root is:
+
+`%LOCALAPPDATA%/ChatGPTMCPProbe/ws-dispatch-v1`
+
+This reuses the existing ChatGPTMCPProbe owner used by Dev Exec and checkpoint autoreport. It does not create another task manager or top-level product state owner. One config resolver owns the dispatch root, checkpoint state root, runtime release location, log path, and Scheduled Task name. `WS_DISPATCH_ROOT`, `CHECKPOINT_AUTOREPORT_STATE_ROOT`, and `WS_DISPATCH_TASK_NAME` are explicit operator/test overrides.
+
+The root contains the durable queue plus `runtime/releases/<git-sha>/`, `runtime/installation.json`, and `logs/dispatcher.jsonl`. Queue/results/evidence and runtime releases have separate subtrees, so uninstalling the Scheduled Task does not remove execution history.
+
+## Windows Scheduled Task lifecycle
+
+WS Dispatch v1 uses a current-user Scheduled Task, not a Windows Service. Installation copies the exact built Git candidate into a versioned machine-local release and installs production dependencies there. The task never points at a PR worktree.
+
+```powershell
+npm run build
+node .\tools\ws-dispatch-cli.mjs task-install
+node .\tools\ws-dispatch-cli.mjs task-status
+node .\tools\ws-dispatch-cli.mjs task-uninstall
+```
+
+Install/status/uninstall are idempotent. The task uses the current user with `Interactive` logon type and `Limited` run level, an at-logon trigger, hidden execution, `IgnoreNew`, three one-minute restart attempts, and an unlimited execution time for the resident process. Install starts the task immediately. Uninstall stops and unregisters it while preserving the dispatch root, queue, results, evidence, logs, installation receipt, and versioned runtime.
+
+The installer requires a built `dist/chatgpt.js`, snapshots the exact Git HEAD, and runs `npm ci --omit=dev --ignore-scripts` inside the versioned runtime. Candidate canaries should use an explicit disposable `--root`; canonical acceptance uses the installed default root.
 
 ## v1 ownership boundary
 
@@ -72,7 +100,7 @@ The exact machine-local dispatch root and resident dispatcher lifecycle remain h
 
 ## File queue
 
-Default host root is expected to be a machine-local path under `%LOCALAPPDATA%`; the exact installation path remains a host decision.
+The default host root is the formal machine-local identity documented above.
 
 ```text
 <root>/
@@ -136,6 +164,8 @@ Do not copy checkpoint identity, target binding, delivery claims, or receipt log
 
 The adapter records a write-once job-to-checkpoint link. A durable claim is written before checkpoint creation; a leftover claim is `IN_FLIGHT_AMBIGUOUS` and never authorizes a second checkpoint. `reply.target_alias`, when supplied, must match the workspace's immutable checkpoint binding. Delivery still occurs only through `dispatchCheckpoint`.
 
+The resident dispatcher calls the thin projection adapter after each terminal Worker result and at startup for any pre-existing terminal result. For `REPORT` and `CONSULT`, it then calls the existing checkpoint core's `dispatchCheckpoint` with the same `sendOnlyReply` / `blockingReply` transport used by checkpoint MCP tools. Existing checkpoint claims and receipts own dedupe, cached delivery, and ambiguous delivery semantics. WS Dispatch adds no second delivery state machine. `NONE` returns `SKIPPED` before loading or calling a ChatGPT transport.
+
 ## Acceptance before host deployment
 
 Already cloud-verified in this slice:
@@ -153,11 +183,13 @@ Additional cloud-prebuilt pieces:
 - generic `dispatchNextJob` terminalization with runner exceptions converted to FAILED receipts;
 - OpenCode process adapter with explicit Windows `opencode.cmd`, shell disabled, and local stdout/stderr evidence capture.
 
-Still requires SHIRO-WS after PR #24 work is no longer blocking:
+SHIRO-WS qualification rows:
 
-1. choose/install machine-local dispatch root and scheduled/service lifecycle;
-2. run one disposable read-only Muse job with real `opencode --format json` evidence;
-3. run one disposable workspace-write read/edit/test/repair job;
-4. verify Remote Commander needs only job submission, not process polling;
-5. prove end-to-end `one remote submission -> local execution -> automatic exact-chat report` using the implemented terminal-result adapter;
-6. only then add/re-qualify Codex/Luna and deterministic `auto` routing.
+1. focused resident/config/checkpoint tests pass on the exact candidate;
+2. task install/status/uninstall readback matches the lifecycle contract;
+3. one disposable read-only Muse job reaches a terminal receipt with real `opencode --format json` evidence;
+4. one disposable workspace-write job performs its own read/edit/test/repair loop and records focused test evidence;
+5. task restart converts active/no-result to `AMBIGUOUS` without a second Worker launch;
+6. after Scheduled Task start, submission alone reaches terminal state;
+7. when an exact checkpoint binding and ChatGPT transport session are available, one `REPORT` job reaches the existing checkpoint receipt with no hosted remote execution loop;
+8. only then consider a separate revision for Codex/Luna or deterministic `auto` routing.

@@ -11,11 +11,20 @@ import {
   releaseDispatcherLock,
   submitJob,
 } from './ws-dispatch-core.mjs';
+import { connectTerminalResultToCheckpoint } from './ws-dispatch-checkpoint-delivery.mjs';
+import { resolveWsDispatchConfig } from './ws-dispatch-config.mjs';
+import {
+  installScheduledDispatcher,
+  readWsDispatchInstallation,
+  scheduledTaskStatus,
+  uninstallScheduledDispatcher,
+} from './ws-dispatch-install.mjs';
 import { runOpenCodeWorker } from './ws-dispatch-opencode.mjs';
+import { appendDispatcherLog, serveDispatcher } from './ws-dispatch-server.mjs';
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
-  if (!command) throw new Error('command is required: submit | status | run-once');
+  if (!command) throw new Error('command is required: submit | status | run-once | serve | task-install | task-status | task-uninstall');
   const values = {};
   for (let i = 0; i < rest.length; i += 1) {
     const token = rest[i];
@@ -35,6 +44,12 @@ function required(values, key) {
   return value;
 }
 
+function positiveInteger(value, fallback) {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/u.test(String(value)) || Number(value) < 1) throw new Error('wait-ms must be a positive integer');
+  return Number(value);
+}
+
 async function readAll(stream) {
   let out = '';
   for await (const chunk of stream) out += chunk.toString();
@@ -46,8 +61,38 @@ async function loadJob(values, stdin) {
   const fromStdin = values.stdin === true;
   if ((typeof fromFile === 'string') === fromStdin) throw new Error('provide exactly one of --job <file> or --stdin');
   const raw = fromStdin ? await readAll(stdin) : fs.readFileSync(path.resolve(fromFile), 'utf8');
-  const parsed = JSON.parse(raw);
-  return parsed;
+  return JSON.parse(raw);
+}
+
+function workerRunner(values, runOpenCodeWorkerFn) {
+  const model = typeof values.model === 'string' ? values.model : undefined;
+  const agent = typeof values.agent === 'string' ? values.agent : undefined;
+  const attach = typeof values.attach === 'string' ? values.attach : null;
+  return async ({ job, evidence_dir }) => {
+    if (job.lane !== 'muse') {
+      return {
+        state: 'REJECTED',
+        summary: `Worker lane ${job.lane} is reserved and is not qualified in WS Dispatch v1.`,
+        evidence_refs: [],
+        error: 'Only lane=muse is executable in WS Dispatch v1.',
+      };
+    }
+    return runOpenCodeWorkerFn({
+      job,
+      evidence_dir,
+      model,
+      agent: job.authority === 'read-only' ? 'plan' : agent,
+      attach,
+    });
+  };
+}
+
+async function connectCheckpointSafely(connectCheckpointFn, args) {
+  try {
+    return { checkpoint: await connectCheckpointFn(args), checkpoint_error: null };
+  } catch (error) {
+    return { checkpoint: null, checkpoint_error: error?.stack || error?.message || String(error) };
+  }
 }
 
 export async function runCli(
@@ -60,45 +105,110 @@ export async function runCli(
     releaseDispatcherLockFn = releaseDispatcherLock,
     dispatchNextJobFn = dispatchNextJob,
     runOpenCodeWorkerFn = runOpenCodeWorker,
+    connectCheckpointFn = connectTerminalResultToCheckpoint,
+    serveDispatcherFn = serveDispatcher,
+    installScheduledDispatcherFn = installScheduledDispatcher,
+    scheduledTaskStatusFn = scheduledTaskStatus,
+    uninstallScheduledDispatcherFn = uninstallScheduledDispatcher,
+    readWsDispatchInstallationFn = readWsDispatchInstallation,
   } = {},
   {
     stdin = process.stdin,
     stdout = process.stdout,
+    signal = null,
   } = {},
 ) {
   const { command, values } = parseArgs(argv);
-  const root = path.resolve(required(values, 'root'));
+  const config = resolveWsDispatchConfig({
+    root: typeof values.root === 'string' ? values.root : null,
+    checkpointStateRoot: typeof values['checkpoint-state-root'] === 'string' ? values['checkpoint-state-root'] : null,
+  });
 
   if (command === 'submit') {
     const job = await loadJob(values, stdin);
-    const file = submitJobFn({ root, job });
-    stdout.write(`${JSON.stringify({ operation: 'submit', job_id: job.job_id, file }, null, 2)}\n`);
+    const file = submitJobFn({ root: config.root, job });
+    stdout.write(`${JSON.stringify({ operation: 'submit', job_id: job.job_id, root: config.root, file }, null, 2)}\n`);
     return 0;
   }
 
   if (command === 'status') {
     const job_id = required(values, 'job-id');
-    const status = getJobStatusFn({ root, job_id });
-    stdout.write(`${JSON.stringify({ operation: 'status', job_id, ...status }, null, 2)}\n`);
+    const status = getJobStatusFn({ root: config.root, job_id });
+    stdout.write(`${JSON.stringify({ operation: 'status', job_id, root: config.root, ...status }, null, 2)}\n`);
     return 0;
   }
 
   if (command === 'run-once') {
-    const recovered = recoverInterruptedJobsFn({ root });
-    const lock = acquireDispatcherLockFn({ root });
+    const lock = acquireDispatcherLockFn({ root: config.root });
     try {
-      const model = typeof values.model === 'string' ? values.model : undefined;
-      const agent = typeof values.agent === 'string' ? values.agent : undefined;
-      const attach = typeof values.attach === 'string' ? values.attach : null;
-      const result = await dispatchNextJobFn({
-        root,
-        runner: ({ job, evidence_dir }) => runOpenCodeWorkerFn({ job, evidence_dir, model, agent, attach }),
-      });
-      stdout.write(`${JSON.stringify({ operation: 'run-once', recovered, result }, null, 2)}\n`);
+      const recovered = recoverInterruptedJobsFn({ root: config.root });
+      const recovered_checkpoints = [];
+      for (const job_id of recovered) {
+        recovered_checkpoints.push({
+          job_id,
+          ...await connectCheckpointSafely(connectCheckpointFn, { root: config.root, job_id, stateRoot: config.checkpoint_state_root }),
+        });
+      }
+      const result = await dispatchNextJobFn({ root: config.root, runner: workerRunner(values, runOpenCodeWorkerFn) });
+      const checkpoint = result
+        ? await connectCheckpointSafely(connectCheckpointFn, { root: config.root, job_id: result.job_id, stateRoot: config.checkpoint_state_root })
+        : { checkpoint: null, checkpoint_error: null };
+      stdout.write(`${JSON.stringify({ operation: 'run-once', root: config.root, recovered, recovered_checkpoints, result, ...checkpoint }, null, 2)}\n`);
       return 0;
     } finally {
       releaseDispatcherLockFn(lock);
     }
+  }
+
+  if (command === 'serve') {
+    const ownController = signal ? null : new AbortController();
+    const activeSignal = signal || ownController.signal;
+    const stop = () => ownController?.abort();
+    if (ownController) {
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    }
+    try {
+      const summary = await serveDispatcherFn({
+        root: config.root,
+        checkpointStateRoot: config.checkpoint_state_root,
+        runner: workerRunner(values, runOpenCodeWorkerFn),
+        signal: activeSignal,
+        waitMs: positiveInteger(values['wait-ms'], 1000),
+        connectCheckpointFn,
+        recoverInterruptedJobsFn,
+        acquireDispatcherLockFn,
+        releaseDispatcherLockFn,
+        dispatchNextJobFn,
+        onEvent: (event) => appendDispatcherLog(config.log_file, event),
+      });
+      stdout.write(`${JSON.stringify({ operation: 'serve', root: config.root, summary }, null, 2)}\n`);
+      return 0;
+    } finally {
+      if (ownController) {
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+      }
+    }
+  }
+
+  if (command === 'task-install') {
+    const installed = installScheduledDispatcherFn({ config });
+    stdout.write(`${JSON.stringify({ operation: 'task-install', root: config.root, ...installed }, null, 2)}\n`);
+    return 0;
+  }
+
+  if (command === 'task-status') {
+    const task = scheduledTaskStatusFn({ config });
+    const installation = readWsDispatchInstallationFn({ config });
+    stdout.write(`${JSON.stringify({ operation: 'task-status', root: config.root, task, installation }, null, 2)}\n`);
+    return 0;
+  }
+
+  if (command === 'task-uninstall') {
+    const removed = uninstallScheduledDispatcherFn({ config });
+    stdout.write(`${JSON.stringify({ operation: 'task-uninstall', root: config.root, ...removed }, null, 2)}\n`);
+    return 0;
   }
 
   throw new Error(`unknown command: ${command}`);

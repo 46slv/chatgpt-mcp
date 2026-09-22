@@ -12,7 +12,7 @@ export async function runOpenCodeWorker({
   evidence_dir,
   attach = null,
   model = 'opencode-go/muse-spark-1.3-contributor',
-  agent = 'build',
+  agent = null,
   spawnImpl = spawn,
   platform = process.platform,
   env = process.env,
