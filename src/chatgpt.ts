@@ -495,7 +495,7 @@ export function decidePollCompletion(prev: PollProgress, obs: FreshTurnSnapshot)
 export interface ComposerSubmitPage {
   url(): string;
   locator(selector: string): {
-    first(): { focus(): Promise<void>; innerText(): Promise<string>; click(options?: unknown): Promise<void> };
+    first(): { focus(): Promise<void>; innerText(): Promise<string>; click(options?: unknown): Promise<void>; getAttribute(name: string): Promise<string | null> };
     nth(index: number): {
       click(options?: unknown): Promise<void>;
       isVisible(): Promise<boolean>;
@@ -567,10 +567,10 @@ export function turnSeqFromTestId(value: unknown): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-/** Window positions plus stable global sequences, in document order. */
-async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number }>> {
+/** Window positions plus stable global sequences/author roles, in document order. */
+async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: number; index: number; testid: string; role: string | null }>> {
   const total = await page.locator(COMPOSER_TURN_SELECTOR).count();
-  const entries: Array<{ seq: number; index: number }> = [];
+  const entries: Array<{ seq: number; index: number; testid: string; role: string | null }> = [];
   for (let index = 0; index < total; index++) {
     let testid: string | null = null;
     try {
@@ -579,7 +579,17 @@ async function readTurnSeqs(page: ComposerSubmitPage): Promise<Array<{ seq: numb
       testid = null;
     }
     const seq = turnSeqFromTestId(testid);
-    if (seq !== null) entries.push({ seq, index });
+    if (seq === null || testid === null) continue;
+    let role: string | null = null;
+    try {
+      role = await page
+        .locator(`[data-testid="${testid}"] [data-message-author-role]`)
+        .first()
+        .getAttribute('data-message-author-role');
+    } catch {
+      role = null;
+    }
+    entries.push({ seq, index, testid, role });
   }
   return entries;
 }
@@ -607,9 +617,12 @@ export async function readComposerText(page: ComposerSubmitPage): Promise<string
     return '';
   }
 }
-async function readTurnText(page: ComposerSubmitPage, index: number): Promise<string | null> {
+async function readTurnText(page: ComposerSubmitPage, testid: string): Promise<string | null> {
   try {
-    return await page.locator(COMPOSER_TURN_SELECTOR).nth(index).innerText();
+    // The rendered turn window can slide or remount between the metadata scan
+    // and this text read. Bind the read to the stable global test id rather
+    // than reusing the stale positional index from that scan.
+    return await page.locator(`[data-testid="${testid}"]`).first().innerText();
   } catch {
     return null;
   }
@@ -618,27 +631,43 @@ async function readTurnText(page: ComposerSubmitPage, index: number): Promise<st
 async function observeSubmission(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgetMs: number): Promise<SendAcknowledgment | null> {
   const expected = normalizeComposedText(prompt);
   const deadline = Date.now() + Math.max(1, budgetMs);
+  let sawMismatchedFreshUserTurn = false;
   for (;;) {
     if (page.url() !== baseline.url) {
       throw new Error('Target URL changed during submit; refusing to correlate turns across conversations.');
     }
     const seqs = await readTurnSeqs(page);
-    const fresh = seqs.filter((entry) => entry.seq > baseline.maxSeq);
+    // Only a newly posted USER turn can acknowledge our send. Assistant turns
+    // may appear/remount after the baseline (especially when a prior response
+    // settles late); treating one as the submitted user turn creates a false
+    // mismatch and can strand a successfully delivered CONSULT as UNKNOWN.
+    const fresh = seqs.filter((entry) => entry.seq > baseline.maxSeq && entry.role === 'user');
     if (fresh.length > 0) {
       const first = fresh[0];
-      const rawText = await readTurnText(page, first.index);
+      const rawText = await readTurnText(page, first.testid);
       const text = rawText === null ? null : stripPostedChrome(rawText);
       const normalized = text === null ? '' : normalizeComposedText(text);
       if (normalized.length > 0 && expected.length > 0 && normalized !== expected) {
-        throw new Error('New user turn text does not match the submitted prompt; refusing to claim this send.');
-      }
-      const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
-      if (normalized.length > 0 || composerEmpty) {
-        return { url: baseline.url, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
+        // A freshly posted long turn can be observed while ChatGPT is still
+        // hydrating/collapsing its DOM. The first innerText snapshot may be a
+        // transient prefix/partial render even though the final posted turn is
+        // exact. Keep observing the SAME first fresh user turn for the bounded
+        // submit window; never skip to a later turn and never claim a mismatch.
+        sawMismatchedFreshUserTurn = true;
+      } else {
+        const composerEmpty = normalizeComposedText(await readComposerText(page)).length === 0;
+        if (normalized.length > 0 || composerEmpty) {
+          return { url: baseline.url, userTurnIndex: first.index, userTurnSeq: first.seq, ackTurnCount: seqs.length, userTurnText: normalized.length > 0 ? normalized : null };
+        }
       }
     }
-    if (Date.now() >= deadline) return null;
-    await wait(500);
+    if (Date.now() >= deadline) {
+      if (sawMismatchedFreshUserTurn) {
+        throw new Error('New user turn text does not match the submitted prompt after the bounded observation window; refusing to claim this send.');
+      }
+      return null;
+    }
+    await wait(Math.min(500, Math.max(1, deadline - Date.now())));
   }
 }
 
@@ -673,13 +702,21 @@ export interface SubmitBudgets {
   enterAckMs?: number;
 }
 
+// ChatGPT can acknowledge a submitted turn only after a slow composer remount
+// or navigation settles. Keep the fail-closed two-attempt contract, but give
+// each observation window enough time for that live UI path to materialize.
+export const DEFAULT_SUBMIT_BUDGETS = Object.freeze({
+  clickAckMs: 30_000,
+  enterAckMs: 45_000,
+});
+
 export async function submitComposedPrompt(page: ComposerSubmitPage, prompt: string, baseline: SendBaseline, budgets?: SubmitBudgets): Promise<SendAcknowledgment> {
   if (page.url() !== baseline.url) {
     throw new Error('Submit started on a different conversation than the send baseline.');
   }
   await clickFirstVisible(page, SELECTORS.sendButton);
-  const clickAckMs = budgets?.clickAckMs ?? 8000;
-  const enterAckMs = budgets?.enterAckMs ?? 15000;
+  const clickAckMs = budgets?.clickAckMs ?? DEFAULT_SUBMIT_BUDGETS.clickAckMs;
+  const enterAckMs = budgets?.enterAckMs ?? DEFAULT_SUBMIT_BUDGETS.enterAckMs;
   const ack = await observeSubmission(page, prompt, baseline, clickAckMs);
   if (ack) { console.error(`[submit] click-path acknowledged userTurnIndex=${ack.userTurnIndex}`); return ack; }
   if (normalizeComposedText(prompt).length === 0
@@ -1238,6 +1275,71 @@ export async function blockingReply(
     return {
       response: '',
       elapsed_seconds: 0,
+      model: null,
+      chat_id: null,
+      poll_count: 0,
+      error: message,
+    };
+  }
+}
+
+/**
+ * sendOnlyReply - exact-target report transport that returns after the new
+ * user turn is acknowledged in the intended conversation. It deliberately
+ * does not wait for an assistant reply; CONSULT keeps using blockingReply.
+ */
+export async function sendOnlyReply(
+  prompt: string,
+  options: BlockingReplyOptions = {},
+): Promise<AskResult> {
+  let stage = 'target-resolution';
+  let stageConversationId: string | null = null;
+  const startedAt = Date.now();
+  try {
+    const target = resolveReplyTarget(options);
+    if (!target) throw new Error('sendOnlyReply requires an exact target_url.');
+
+    stage = 'target-resolved';
+    stageConversationId = target.conversationId;
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    await ensureSession(target);
+    stage = 'session-ensured';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    await ensureReplyTarget(target);
+    stage = 'target-ensured';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    stage = 'submit-begin';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+    await sendPromptText(prompt, target.url);
+    stage = 'user-turn-acknowledged';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    const page = await getPage(target.url);
+    const finalTarget = parseChatGPTTargetUrl(page.url());
+    if (finalTarget.url !== target.url || finalTarget.conversationId !== target.conversationId) {
+      throw new Error('Target conversation identity mismatch after report send.');
+    }
+    sessionState.conversationId = finalTarget.conversationId;
+    stage = 'target-reverified';
+    appendStageEvent({ scope: 'report', stage, conversation_id: stageConversationId });
+
+    return {
+      response: '',
+      elapsed_seconds: (Date.now() - startedAt) / 1000,
+      model: sessionState.currentModel,
+      chat_id: sessionState.conversationId,
+      poll_count: 0,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[report] stage=${stage} error=${message}`);
+    appendStageEvent({ scope: 'report', stage, status: 'failed', conversation_id: stageConversationId, error: message });
+    return {
+      response: '',
+      elapsed_seconds: (Date.now() - startedAt) / 1000,
       model: null,
       chat_id: null,
       poll_count: 0,

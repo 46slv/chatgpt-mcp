@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
- * chatgpt-mcp — MCP server for ChatGPT web UI automation via Playwright
+ * chatgpt-mcp - MCP server for ChatGPT web UI automation via Playwright
  *
- * Provides 5 tools: chatgpt_ask, chatgpt_reply, chatgpt_upload,
- * chatgpt_select_project, chatgpt_new_chat
+ * Provides the ChatGPT bridge tools plus durable checkpoint autoreport tools.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -18,11 +17,14 @@ import {
   newConversation,
 } from './chatgpt.js';
 import { closeBrowser } from './browser.js';
+import { registerCheckpointTools } from './checkpoint-tools.js';
 
 const server = new McpServer({
   name: 'chatgpt-mcp',
   version: '1.0.0',
 });
+
+registerCheckpointTools(server);
 
 // =============================================================================
 // Tool: chatgpt_ask
