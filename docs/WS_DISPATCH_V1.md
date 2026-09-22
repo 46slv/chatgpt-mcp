@@ -1,6 +1,6 @@
 # WS Dispatch v1 — prebuild contract
 
-Status: cloud/pre-host candidate. This slice is intentionally independent of checkpoint autoreport PR #24.
+Status: current-main host candidate. Checkpoint autoreport PR #24 is merged and the terminal-result projection adapter is implemented on this branch.
 
 ## Goal
 
@@ -13,7 +13,8 @@ ChatGPT
   -> local Worker (Muse first; Codex/Luna later)
   -> local repo / CLI / MCP / application
   -> terminal result + evidence
-  -> checkpoint/report adapter after PR #24 is qualified
+  -> durable checkpoint-link adapter
+  -> existing checkpoint REPORT/CONSULT delivery
 ```
 
 ## v1 ownership boundary
@@ -21,7 +22,7 @@ ChatGPT
 - ChatGPT owns user-intent compilation: `goal`, observable `done`, authority, and requested reply mode.
 - WS Dispatch owns job identity, queue claim, terminal receipt, no-blind-retry semantics, and Worker launch.
 - The Worker owns the bounded execution loop inside the supplied authority.
-- PR #24 / checkpoint autoreport will later own exact-bound ChatGPT REPORT/CONSULT delivery. This prebuild does not import or duplicate that state machine.
+- checkpoint autoreport owns exact-bound ChatGPT REPORT/CONSULT delivery. WS Dispatch only creates one linked checkpoint event from one immutable terminal result and does not duplicate the delivery state machine.
 
 ## File queue
 
@@ -74,7 +75,7 @@ It intentionally does not include `full-machine`, elevation, credential access, 
 
 ## PR #24 integration seam
 
-After checkpoint autoreport is host-qualified, terminal Worker handling adds a thin adapter:
+Terminal Worker handling uses a thin adapter:
 
 ```text
 terminal ws-dispatch.result
@@ -86,6 +87,8 @@ terminal ws-dispatch.result
 ```
 
 Do not copy checkpoint identity, target binding, delivery claims, or receipt logic into WS Dispatch. The checkpoint subsystem remains the single owner of REPORT/CONSULT delivery semantics.
+
+The adapter records a write-once job-to-checkpoint link. A durable claim is written before checkpoint creation; a leftover claim is `IN_FLIGHT_AMBIGUOUS` and never authorizes a second checkpoint. `reply.target_alias`, when supplied, must match the workspace's immutable checkpoint binding. Delivery still occurs only through `dispatchCheckpoint`.
 
 ## Acceptance before host deployment
 
@@ -110,6 +113,5 @@ Still requires SHIRO-WS after PR #24 work is no longer blocking:
 2. run one disposable read-only Muse job with real `opencode --format json` evidence;
 3. run one disposable workspace-write read/edit/test/repair job;
 4. verify Remote Commander needs only job submission, not process polling;
-5. connect terminal result to qualified checkpoint REPORT;
-6. prove end-to-end `one remote submission -> local execution -> automatic exact-chat report`;
-7. only then add/re-qualify Codex/Luna and deterministic `auto` routing.
+5. prove end-to-end `one remote submission -> local execution -> automatic exact-chat report` using the implemented terminal-result adapter;
+6. only then add/re-qualify Codex/Luna and deterministic `auto` routing.
