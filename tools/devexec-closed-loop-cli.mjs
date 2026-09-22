@@ -10,6 +10,7 @@ import {
   DEFAULT_LOCAL_RELAY_MODEL,
   DEFAULT_MCP_CONFIG_PATH,
   admitExistingCodexTask,
+  connectTaskChatAdmission,
   closedLoopAdmissionPath,
   loadClosedLoopAdmission,
   runAdmittedClosedLoop,
@@ -19,9 +20,9 @@ import { createClosedLoopStateStore } from "./devexec-closed-loop.mjs";
 const HELP = [
   "Usage:",
   " devexec closed-loop admit --mission-id <id> --task-id <id> --thread-id <uuid> --initial-turn-id <uuid>",
-  "   --chat-url <exact canonical URL> --runtime-path <absolute codex.exe>",
+  "   (--chat-url <exact canonical URL> | --auto-chat) --runtime-path <absolute codex.exe>",
   "   --working-directory <absolute path> [--repo-root <absolute path>]",
-  "   [--admission <id>] [--admission-root <absolute path>] [--state-dir <absolute path>]",
+  "   [--admission <id>] [--admission-root <absolute path>] [--state-dir <absolute path>] [--mcp-config <absolute path>]",
   "   [--mode <bounded|completion-driven>] [--until-complete] [--goal <text>] [--current-task <text>]",
   "   [--max-rounds <1..20 legacy / 1..1000 completion>] [--safety-max-rounds <1..10000>] [--turn-timeout-ms <ms>] [--chatgpt-timeout-ms <ms>] [--local-relay-timeout-ms <ms>] [--wall-clock-budget-ms <ms>]",
   " devexec closed-loop run --admission <id-or-absolute-manifest-path>",
@@ -37,6 +38,7 @@ const VALUE_OPTIONS = new Set([
   "thread-id",
   "initial-turn-id",
   "chat-url",
+  "auto-chat",
   "runtime-path",
   "working-directory",
   "repo-root",
@@ -63,7 +65,7 @@ function parseArgs(argv) {
     const token = argv[index];
     if (!token.startsWith("--")) throw new Error(`Unexpected argument: ${token}`);
     const name = token.slice(2);
-    if (name === "until-complete" || name === "completion-driven") {
+    if (name === "until-complete" || name === "completion-driven" || name === "auto-chat") {
       values[name] = true;
       continue;
     }
@@ -101,30 +103,36 @@ function admissionRoot(values) {
 
 async function admit(values) {
   const executionMode = values.mode || (values["until-complete"] || values["completion-driven"] ? "completion-driven" : "bounded");
-  const result = await admitExistingCodexTask({
-    mission_id: required(values, "mission-id"),
-    task_id: required(values, "task-id"),
-    thread_id: required(values, "thread-id"),
-    initial_turn_id: required(values, "initial-turn-id"),
-    chat_url: required(values, "chat-url"),
-    runtime_path: required(values, "runtime-path"),
-    working_directory: required(values, "working-directory"),
-    repo_root: values["repo-root"],
-    admission_id: values.admission,
-    admission_root: admissionRoot(values),
-    state_dir: values["state-dir"],
-    execution_mode: executionMode,
-    goal: values.goal,
-    current_task: values["current-task"],
-    max_rounds: integer(values, "max-rounds", executionMode === "bounded" ? 8 : null),
-    safety_max_rounds: integer(values, "safety-max-rounds"),
-    turn_timeout_ms: integer(values, "turn-timeout-ms"),
-    chatgpt_timeout_ms: integer(values, "chatgpt-timeout-ms"),
-    local_relay_timeout_ms: integer(values, "local-relay-timeout-ms"),
-    wall_clock_budget_ms: integer(values, "wall-clock-budget-ms"),
-    runtime_provenance: "explicit-cli-runtime",
-  });
-  print({
+  const autoChat = values["auto-chat"] === true;
+  if (autoChat && values["chat-url"] !== undefined) throw new Error("--auto-chat and --chat-url are mutually exclusive.");
+  if (!autoChat && values["chat-url"] === undefined) throw new Error("Either --chat-url or --auto-chat is required.");
+  let admissionAdapter = null;
+  try {
+    if (autoChat) admissionAdapter = await connectTaskChatAdmission({ mcpConfigPath: values["mcp-config"] || process.env.DEV_EXEC_MCP_CONFIG || DEFAULT_MCP_CONFIG_PATH });
+    const result = await admitExistingCodexTask({
+      mission_id: required(values, "mission-id"),
+      task_id: required(values, "task-id"),
+      thread_id: required(values, "thread-id"),
+      initial_turn_id: required(values, "initial-turn-id"),
+      ...(autoChat ? { auto_chat: true, task_chat_admit: admissionAdapter.admit } : { chat_url: values["chat-url"] }),
+      runtime_path: required(values, "runtime-path"),
+      working_directory: required(values, "working-directory"),
+      repo_root: values["repo-root"],
+      admission_id: values.admission,
+      admission_root: admissionRoot(values),
+      state_dir: values["state-dir"],
+      execution_mode: executionMode,
+      goal: values.goal,
+      current_task: values["current-task"],
+      max_rounds: integer(values, "max-rounds", executionMode === "bounded" ? 8 : null),
+      safety_max_rounds: integer(values, "safety-max-rounds"),
+      turn_timeout_ms: integer(values, "turn-timeout-ms"),
+      chatgpt_timeout_ms: integer(values, "chatgpt-timeout-ms"),
+      local_relay_timeout_ms: integer(values, "local-relay-timeout-ms"),
+      wall_clock_budget_ms: integer(values, "wall-clock-budget-ms"),
+      runtime_provenance: "explicit-cli-runtime",
+    });
+    print({
     command: "closed-loop admit",
     created: result.created,
     admission_id: result.admission.admission_id,
@@ -139,7 +147,10 @@ async function admit(values) {
     execution_mode: result.admission.execution_mode,
     goal: result.admission.goal,
     current_task: result.admission.current_task,
-  });
+    });
+  } finally {
+    if (admissionAdapter) await admissionAdapter.close();
+  }
 }
 
 async function run(values) {

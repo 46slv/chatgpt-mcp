@@ -30,6 +30,7 @@ function submitFake(options = {}) {
     clicks: 0,
     driftAfterCalls: options.driftAfterCalls ?? -1,
     urlCalls: 0,
+    postSendUrlCalls: 0,
     sentTextReads: 0,
   };
   const doSend = () => { state.sent = true; state.composer = ""; };
@@ -50,6 +51,12 @@ function submitFake(options = {}) {
     url: () => {
       state.urlCalls += 1;
       if (state.driftAfterCalls >= 0 && state.urlCalls > state.driftAfterCalls) return "https://chatgpt.com/c/other-conversation";
+      if (state.sent && Array.isArray(options.urlAfterSendSequence) && options.urlAfterSendSequence.length > 0) {
+        const index = Math.min(state.postSendUrlCalls++, options.urlAfterSendSequence.length - 1);
+        return options.urlAfterSendSequence[index];
+      }
+      if (state.sent && options.urlAfterSend) return options.urlAfterSend;
+      if (options.baselineUrl) return options.baselineUrl;
       return TARGET_URL;
     },
     locator: (selector) => ({
@@ -304,6 +311,37 @@ test("target url drift fails closed without Enter", async () => {
   const { page, state } = submitFake({ driftAfterCalls: 1 });
   const baseline = await captureSendBaseline(page);
   await assert.rejects(submitComposedPrompt(page, PROMPT, baseline, FAST), /different conversation|changed during submit/);
+  assert.equal(state.enterPresses, 0);
+});
+
+test("admission mode allows only the canonical home-to-new-conversation transition", async () => {
+  const { page, state } = submitFake({
+    baselineUrl: "https://chatgpt.com",
+    urlAfterSend: "https://chatgpt.com/c/admission-created-1",
+    clickSends: true,
+  });
+  const baseline = await captureSendBaseline(page);
+  const ack = await submitComposedPrompt(page, PROMPT, baseline, FAST, true);
+  assert.equal(ack.url, "https://chatgpt.com/c/admission-created-1");
+  assert.equal(ack.userTurnText, PROMPT);
+  assert.equal(state.enterPresses, 0);
+});
+
+test("admission mode tolerates a transient canonical home normalization before the new conversation URL", async () => {
+  const { page, state } = submitFake({
+    baselineUrl: "https://chatgpt.com",
+    urlAfterSendSequence: [
+      "https://chatgpt.com/?oai-dm=1",
+      "https://chatgpt.com/c/WEB:b9688dcd-67e9-42e1-9669-492256fa4d3d",
+      "https://chatgpt.com/c/admission-created-2",
+      "https://chatgpt.com/c/admission-created-2",
+    ],
+    clickSends: true,
+  });
+  const baseline = await captureSendBaseline(page);
+  const ack = await submitComposedPrompt(page, PROMPT, baseline, { clickAckMs: 2000, enterAckMs: 5 }, true);
+  assert.equal(ack.url, "https://chatgpt.com/c/admission-created-2");
+  assert.equal(ack.userTurnText, PROMPT);
   assert.equal(state.enterPresses, 0);
 });
 

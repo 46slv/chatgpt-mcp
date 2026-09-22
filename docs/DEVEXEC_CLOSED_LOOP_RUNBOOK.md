@@ -118,7 +118,9 @@ Supporting design references:
 
 Before admitting a real closed-loop task, the operator/parent must have all of the following:
 
-1. An exact ChatGPT conversation URL prepared by the user/operator.
+1. Either an exact ChatGPT conversation URL prepared by the user/operator, or
+   an authenticated ChatGPT MCP bridge exposing the durable `task_chat_admit`
+   operation for the explicit `--auto-chat` lane.
 2. A persisted, non-ephemeral Codex thread/session for the task.
 3. A native Codex runtime that has been explicitly selected and fingerprinted, with `queue=true`.
 4. A Local Model RELAY adapter that implements only the strict hash-only decision contract.
@@ -134,12 +136,12 @@ Do not put a user's real ChatGPT conversation URL in tracked source or documenta
 
 The first-class `devexec closed-loop ...` CLI/facade admits an existing
 persisted Codex task/thread without creating a new thread. Admission requires
-the exact mission/task/thread/initial-turn identities, the canonical ChatGPT
-conversation URL, an absolute native `codex.exe` path, and an absolute bound
-worktree. None of these values are inferred from current chat, mutable
+the exact mission/task/thread/initial-turn identities, either an explicit
+canonical ChatGPT conversation URL or `--auto-chat`, an absolute native
+`codex.exe` path, and an absolute bound worktree. None of these values are inferred from current chat, mutable
 defaults, browser focus, PATH, `--last`, or fuzzy session lookup.
 
-Admission:
+Explicit URL admission:
 
 ```powershell
 node .\tools\devexec.mjs closed-loop admit `
@@ -154,7 +156,31 @@ node .\tools\devexec.mjs closed-loop admit `
   --until-complete `
   --goal '<goal text>' `
   --current-task '<current task text>'
+
 ```
+
+Automatic Task-chat admission (the URL is provisioned by the bridge and is not
+accepted from the caller):
+
+```powershell
+node .\tools\devexec.mjs closed-loop admit `
+  --mission-id <mission-id> `
+  --task-id <task-id> `
+  --thread-id <persisted-codex-thread-uuid> `
+  --initial-turn-id <completed-turn-uuid> `
+  --auto-chat `
+  --runtime-path 'C:\Users\<user>\AppData\Local\OpenAI\Codex\bin\<revision>\codex.exe' `
+  --working-directory 'D:\Documents\<dedicated-worktree>' `
+  --until-complete `
+  --goal '<goal text>' `
+  --current-task '<current task text>'
+```
+
+`--auto-chat` and `--chat-url` are mutually exclusive. Repeating automatic
+admission for the same mission/task returns the existing immutable binding and
+does not send another seed. If the seed result becomes ambiguous after
+`SEND_INTENT`, the durable status is `ADMISSION_UNKNOWN` and no blind retry is
+performed.
 
 The command probes the supplied runtime by its absolute path, requires native
 `queue=true`, and proves the supplied persisted thread. If the thread already

@@ -483,7 +483,12 @@ export async function admitExistingCodexTask(input = {}) {
   const taskId = requiredText(input.task_id || input.taskId, "task_id");
   const threadId = uuid(input.thread_id || input.threadId, "thread_id");
   const initialTurnId = uuid(input.initial_turn_id || input.initialTurnId, "initial_turn_id");
-  const chatUrl = requiredText(input.chat_url || input.chatUrl, "chat_url");
+  const autoChat = input.auto_chat === true || input.autoChat === true;
+  const suppliedChatUrl = input.chat_url ?? input.chatUrl;
+  if (autoChat && suppliedChatUrl !== undefined && suppliedChatUrl !== null) {
+    throw new ClosedLoopFacadeError("--auto-chat and --chat-url are mutually exclusive.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
+  }
+  const chatUrl = autoChat ? null : requiredText(suppliedChatUrl, "chat_url");
   const runtimePath = absolutePath(input.runtime_path || input.runtimePath || input.executable_path, "runtime_path");
   const workingDirectory = absolutePath(input.working_directory || input.workingDirectory || input.cwd, "working_directory");
   const repoRoot = input.repo_root === undefined && input.repoRoot === undefined ? null : absolutePath(input.repo_root || input.repoRoot, "repo_root");
@@ -506,7 +511,7 @@ export async function admitExistingCodexTask(input = {}) {
   const requestedAdmissionId = input.admission_id || input.admissionId || null;
   if (requestedAdmissionId !== null) validateAdmissionId(requestedAdmissionId);
 
-  const chat = createTaskChatBinding({
+  let chat = autoChat ? null : createTaskChatBinding({
     mission_id: missionId,
     task_id: taskId,
     chat_url: chatUrl,
@@ -523,9 +528,12 @@ export async function admitExistingCodexTask(input = {}) {
     bound_at: input.bound_at || new Date().toISOString(),
   });
 
-  // If a deterministic admission already exists, load it before probing or
-  // rebinding the native runtime. A changed runtime remains drift, not a new
-  // implicit admission.
+  // If a deterministic explicit-URL admission already exists, load it before
+  // probing or rebinding the native runtime. Automatic admission resolves its
+  // immutable TaskChatBinding only after the local prerequisites are proven.
+  let candidateFile = null;
+  let existingCandidateId = requestedAdmissionId || null;
+  if (!autoChat) {
   const candidateInput = {
     mission_id: missionId,
     task_id: taskId,
@@ -541,8 +549,7 @@ export async function admitExistingCodexTask(input = {}) {
   const candidateIds = requestedAdmissionId
     ? [candidateId]
     : [candidateId, computeLegacyClosedLoopAdmissionId(candidateInput)].filter((value, index, values) => values.indexOf(value) === index);
-  let candidateFile = null;
-  let existingCandidateId = candidateId;
+  existingCandidateId = candidateId;
   for (const id of candidateIds) {
     const file = admissionPath(admissionRoot, id);
     if (fs.existsSync(file)) {
@@ -568,6 +575,7 @@ export async function admitExistingCodexTask(input = {}) {
       throw new ClosedLoopFacadeError("Existing admission conflicts with the explicit task/thread/runtime identity.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
     }
     return Object.freeze({ admission: existing, created: false, file: candidateFile, thread_identity: { thread_id: existing.codex_continuation_binding.thread_id, initial_turn_id: existing.initial_turn_id, probe_turn_id: existing.thread_probe.turn_id, source_turn_sha256: existing.thread_probe.source_turn_sha256 } });
+  }
   }
 
   let runtime;
@@ -604,6 +612,58 @@ export async function admitExistingCodexTask(input = {}) {
     threadProbe: input.thread_probe || input.threadProbe,
     now,
   });
+  if (autoChat) {
+    const admitTaskChat = input.task_chat_admit || input.taskChatAdmit;
+    if (typeof admitTaskChat !== "function") {
+      throw new ClosedLoopFacadeError("Automatic Closed Goal Loop admission requires a task_chat_admit adapter.", CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID);
+    }
+    const admittedBinding = await admitTaskChat({
+      mission_id: missionId,
+      task_id: taskId,
+      admission_root: input.task_chat_admission_root || input.taskChatAdmissionRoot,
+    });
+    try { chat = validateTaskChatBinding(admittedBinding); }
+    catch (error) { throw new ClosedLoopFacadeError("task_chat_admit did not return a valid immutable TaskChatBinding.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_INVALID, error); }
+
+    const candidateInput = {
+      mission_id: missionId,
+      task_id: taskId,
+      initial_turn_id: initialTurnId,
+      task_chat_binding: chat,
+      codex_continuation_binding: continuation,
+      codex_runtime_binding: { executable_path: runtimePath },
+      execution_mode: executionMode,
+      goal,
+      current_task: currentTask,
+    };
+    const candidateId = requestedAdmissionId || computeClosedLoopAdmissionId(candidateInput);
+    const candidateIds = requestedAdmissionId
+      ? [candidateId]
+      : [candidateId, computeLegacyClosedLoopAdmissionId(candidateInput)].filter((value, index, values) => values.indexOf(value) === index);
+    existingCandidateId = candidateId;
+    for (const id of candidateIds) {
+      const file = admissionPath(admissionRoot, id);
+      if (fs.existsSync(file)) { candidateFile = file; existingCandidateId = id; break; }
+    }
+    if (candidateFile !== null) {
+      const existing = loadClosedLoopAdmission(candidateFile);
+      const requestedStateDir = input.state_dir || input.stateDir ? absolutePath(input.state_dir || input.stateDir, "state_dir") : null;
+      const limitFields = [
+        ["max_rounds", ["max_rounds", "maxRounds"]],
+        ["safety_max_rounds", ["safety_max_rounds", "safetyMaxRounds"]],
+        ["turn_timeout_ms", ["turn_timeout_ms", "turnTimeoutMs"]],
+        ["chatgpt_timeout_ms", ["chatgpt_timeout_ms", "chatGPTTimeoutMs"]],
+        ["local_relay_timeout_ms", ["local_relay_timeout_ms", "localRelayTimeoutMs"]],
+        ["wall_clock_budget_ms", ["wall_clock_budget_ms", "wallClockBudgetMs"]],
+      ];
+      const limitsConflict = limitFields.some(([field, aliases]) => aliases.some((alias) => hasOwn(input, alias) || hasOwn(input.limits || {}, alias)) && existing.limits[field] !== limits[field]);
+      const stateDirConflict = requestedStateDir !== null && existing.state_dir !== requestedStateDir;
+      if (existing.mission_id !== missionId || existing.task_id !== taskId || existing.initial_turn_id !== initialTurnId || existing.task_chat_binding.chat_url !== chat.chat_url || existing.codex_continuation_binding.thread_id !== threadId || existing.codex_continuation_binding.working_directory !== workingDirectory || existing.codex_runtime_binding.executable_path.toLowerCase() !== runtimePath.toLowerCase() || existing.execution_mode !== executionMode || existing.goal !== goal || existing.current_task !== currentTask || limitsConflict || stateDirConflict) {
+        throw new ClosedLoopFacadeError("Existing automatic admission conflicts with the explicit task/thread/runtime identity.", CLOSED_LOOP_FACADE_ERRORS.ADMISSION_CONFLICT);
+      }
+      return Object.freeze({ admission: existing, created: false, file: candidateFile, thread_identity: { thread_id: existing.codex_continuation_binding.thread_id, initial_turn_id: existing.initial_turn_id, probe_turn_id: existing.thread_probe.turn_id, source_turn_sha256: existing.thread_probe.source_turn_sha256 } });
+    }
+  }
   const admissionId = requestedAdmissionId || existingCandidateId;
   const admission = validateClosedLoopAdmission({
     protocol: CLOSED_LOOP_ADMISSION_PROTOCOL,
@@ -753,6 +813,48 @@ export async function connectBoundChatGPTTransport({ taskChatBinding, mcpConfigP
     client,
     close: async () => { try { await client.close(); } catch {} },
     target: getTaskChatReturnTarget(binding),
+  });
+}
+
+/**
+ * Connect the existing MCP bridge for automatic Task-chat admission.  This
+ * seam exposes only the durable mission/task operation; it never accepts a
+ * caller URL and never resolves current-chat, registry, project, or browser
+ * focus state as a target.
+ */
+export async function connectTaskChatAdmission({ mcpConfigPath = DEFAULT_MCP_CONFIG_PATH, timeoutMinutes = 30, clientName = "devexec-task-chat-admission" } = {}) {
+  const { server } = readMcpConfig(mcpConfigPath);
+  const client = new Client({ name: clientName, version: "1" });
+  const env = { ...process.env, ...(isObject(server.env) ? server.env : {}) };
+  const transport = new StdioClientTransport({ command: server.command, args: server.args || [], env });
+  try {
+    await client.connect(transport);
+    const listed = await client.listTools();
+    if (!Array.isArray(listed?.tools) || !listed.tools.some((tool) => tool?.name === "task_chat_admit")) {
+      throw new ClosedLoopFacadeError("task_chat_admit is unavailable in the bound MCP bridge.", CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID);
+    }
+  } catch (error) {
+    try { await client.close(); } catch {}
+    if (error instanceof ClosedLoopFacadeError) throw error;
+    throw new ClosedLoopFacadeError("Could not connect to the Task-chat admission MCP bridge.", CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID, error);
+  }
+  const timeout = Math.max(1, Number(timeoutMinutes) || 30) * 60 * 1000;
+  const call = async (name, args) => {
+    const result = await client.callTool({ name, arguments: args }, undefined, { timeout, maxTotalTimeout: timeout });
+    if (result?.isError) throw new ClosedLoopFacadeError(`${name} MCP call failed.`, CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID);
+    const blocks = Array.isArray(result?.content) ? result.content.filter((item) => item?.type === "text").map((item) => item.text) : [];
+    if (blocks.length !== 1) throw new ClosedLoopFacadeError(`${name} MCP call returned an invalid envelope.`, CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID);
+    try { return JSON.parse(blocks[0]); }
+    catch (error) { throw new ClosedLoopFacadeError(`${name} MCP call returned non-JSON text.`, CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID, error); }
+  };
+  return Object.freeze({
+    admit: async ({ mission_id, task_id, admission_root } = {}) => {
+      const result = await call("task_chat_admit", { mission_id, task_id, ...(admission_root ? { admission_root } : {}) });
+      if (!isObject(result) || !isObject(result.binding)) throw new ClosedLoopFacadeError("task_chat_admit returned no immutable TaskChatBinding.", CLOSED_LOOP_FACADE_ERRORS.MCP_INVALID);
+      return result.binding;
+    },
+    status: async ({ mission_id, task_id, admission_root } = {}) => call("task_chat_admission_status", { mission_id, task_id, ...(admission_root ? { admission_root } : {}) }),
+    close: async () => { try { await client.close(); } catch {} },
   });
 }
 
