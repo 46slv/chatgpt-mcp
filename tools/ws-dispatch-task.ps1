@@ -13,6 +13,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Format-WsDispatchDateTime([object]$Value) {
+  if ($null -eq $Value) { return $null }
+  return $Value.ToString('o')
+}
+
 function Get-WsDispatchTaskStatus {
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($null -eq $task) {
@@ -41,9 +46,9 @@ function Get-WsDispatchTaskStatus {
     restart_count = [int]$task.Settings.RestartCount
     restart_interval = [string]$task.Settings.RestartInterval
     execution_time_limit = [string]$task.Settings.ExecutionTimeLimit
-    last_run_time = $info.LastRunTime.ToString('o')
+    last_run_time = (Format-WsDispatchDateTime $info.LastRunTime)
     last_task_result = [int]$info.LastTaskResult
-    next_run_time = $info.NextRunTime.ToString('o')
+    next_run_time = (Format-WsDispatchDateTime $info.NextRunTime)
   }
 }
 
@@ -94,6 +99,15 @@ $settingsArgs = @{
 }
 $settings = New-ScheduledTaskSettingsSet @settingsArgs
 $definition = New-ScheduledTask -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($null -ne $existing -and [string]$existing.State -eq 'Running') {
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+  for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+    $state = [string](Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop).State
+    if ($state -ne 'Running') { break }
+    Start-Sleep -Milliseconds 100
+  }
+}
 Register-ScheduledTask -TaskName $TaskName -InputObject $definition -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Milliseconds 500
