@@ -103,6 +103,51 @@ function validateLeaseOwner(owner, expected, receiptFile) {
   return owner;
 }
 
+function readPrivateLeaseOwner(ownerFile, expected, canonicalReceipt) {
+  const stat = fs.lstatSync(ownerFile);
+  if (!stat.isFile() || stat.isSymbolicLink?.() || stat.isReparsePoint?.() || (Number.isInteger(stat.nlink) && stat.nlink !== 1)) {
+    throw new Error("OUTER_RUN_LEASE_OWNER_UNSAFE");
+  }
+  return validateLeaseOwner(readJson(ownerFile), expected, canonicalReceipt);
+}
+
+function cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile, expected, canonicalReceipt, expectedOwner) {
+  try {
+    const leaseStat = fs.lstatSync(leaseDirectory);
+    if (!leaseStat.isDirectory() || leaseStat.isSymbolicLink?.() || leaseStat.isReparsePoint?.()) return false;
+
+    if (!fs.existsSync(ownerFile)) {
+      if (fs.readdirSync(leaseDirectory).length !== 0) return false;
+      fs.rmdirSync(leaseDirectory);
+      return true;
+    }
+
+    // Capture the currently published owner path before deciding whether it is
+    // ours. This closes the validate-then-unlink race: if another actor replaces
+    // owner.json after the capture, the replacement remains in the lease and
+    // rmdir fails closed. Foreign/unreadable captured evidence is preserved in
+    // the nonce-bound proof path for operator adjudication.
+    const cleanupProof = path.join(leaseDirectory, `owner.cleanup-${expectedOwner.owner_token}.json`);
+    if (fs.existsSync(cleanupProof)) return false;
+    fs.renameSync(ownerFile, cleanupProof);
+
+    let observed;
+    try {
+      observed = readPrivateLeaseOwner(cleanupProof, expected, canonicalReceipt);
+    } catch {
+      return false;
+    }
+    if (observed.owner_token !== expectedOwner.owner_token || observed.process_id !== expectedOwner.process_id) return false;
+
+    fs.unlinkSync(cleanupProof);
+    if (fs.readdirSync(leaseDirectory).length !== 0) return false;
+    fs.rmdirSync(leaseDirectory);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function acquireOuterLease(expected) {
   const canonicalReceipt = canonicalReceiptPath(expected.receiptFile);
   const leaseDirectory = `${canonicalReceipt}.lease`;
@@ -148,8 +193,10 @@ function acquireOuterLease(expected) {
       fs.closeSync(fd);
     }
   } catch (error) {
+    const residueCleaned = cleanupFailedOuterLeaseInitialization(leaseDirectory, ownerFile, expected, canonicalReceipt, owner);
     const failed = new Error("OUTER_RUN_LEASE_INITIALIZATION_FAILED");
     failed.code = "OUTER_RUN_LEASE_INITIALIZATION_FAILED";
+    failed.lease_residue_cleaned = residueCleaned;
     failed.cause = error;
     throw failed;
   }
@@ -175,8 +222,39 @@ function assertOuterLeaseOwner(lease, expected) {
 
 function releaseOuterLease(lease, expected) {
   assertOuterLeaseOwner(lease, expected);
-  fs.unlinkSync(lease.ownerFile);
-  fs.rmdirSync(lease.leaseDirectory);
+
+  // Do not unlink owner.json after validating it. The path can be replaced
+  // between that read and unlink, which would erase foreign authority and
+  // reopen the outer single-flight gate. Capture the currently published path
+  // into this owner's proof name first, then revalidate the captured bytes.
+  const releaseProof = path.join(lease.leaseDirectory, `owner.release-${lease.owner.owner_token}.json`);
+  if (fs.existsSync(releaseProof)) {
+    const ambiguous = new Error("OUTER_RUN_LEASE_RELEASE_AMBIGUOUS");
+    ambiguous.code = "OUTER_RUN_LEASE_RELEASE_AMBIGUOUS";
+    throw ambiguous;
+  }
+  try {
+    fs.renameSync(lease.ownerFile, releaseProof);
+    const captured = readPrivateLeaseOwner(releaseProof, expected, lease.canonicalReceipt);
+    if (captured.owner_token !== lease.owner.owner_token || captured.process_id !== lease.owner.process_id) {
+      const lost = new Error("OUTER_RUN_LEASE_OWNERSHIP_LOST");
+      lost.code = "OUTER_RUN_LEASE_OWNERSHIP_LOST";
+      throw lost;
+    }
+    fs.unlinkSync(releaseProof);
+    if (fs.readdirSync(lease.leaseDirectory).length !== 0) {
+      const ambiguous = new Error("OUTER_RUN_LEASE_RELEASE_AMBIGUOUS");
+      ambiguous.code = "OUTER_RUN_LEASE_RELEASE_AMBIGUOUS";
+      throw ambiguous;
+    }
+    fs.rmdirSync(lease.leaseDirectory);
+  } catch (error) {
+    if (typeof error?.code === "string" && error.code.startsWith("OUTER_RUN_LEASE_")) throw error;
+    const ambiguous = new Error("OUTER_RUN_LEASE_RELEASE_AMBIGUOUS");
+    ambiguous.code = "OUTER_RUN_LEASE_RELEASE_AMBIGUOUS";
+    ambiguous.cause = error;
+    throw ambiguous;
+  }
 }
 
 export async function runOuterCycles(args) {
