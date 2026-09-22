@@ -56,6 +56,17 @@ function copyRuntimeSource(from, to) {
   }
 }
 
+export function resolveNpmInvocation({
+  platform = process.platform,
+  nodePath = process.execPath,
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== 'win32') return Object.freeze({ command: 'npm', args_prefix: Object.freeze([]) });
+  const npmCli = path.join(path.dirname(nodePath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (!existsSync(npmCli)) throw new Error(`npm-cli.js was not found beside the active Node runtime: ${npmCli}`);
+  return Object.freeze({ command: nodePath, args_prefix: Object.freeze([npmCli]) });
+}
+
 function powershellJson(args, { execFile = execFileSync } = {}) {
   const output = execFile(
     'powershell.exe',
@@ -90,9 +101,10 @@ export function installScheduledDispatcher({
     fs.mkdirSync(stage, { recursive: false });
     try {
       copyRuntimeSource(source, stage);
+      const npm = resolveNpmInvocation();
       execFile(
-        process.platform === 'win32' ? 'npm.cmd' : 'npm',
-        ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'],
+        npm.command,
+        [...npm.args_prefix, 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'],
         { cwd: stage, stdio: 'pipe', encoding: 'utf8', windowsHide: true },
       );
       fs.renameSync(stage, release);
