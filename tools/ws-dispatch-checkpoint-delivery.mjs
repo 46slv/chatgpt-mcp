@@ -8,10 +8,12 @@ import {
 import { projectWsDispatchResultToCheckpoint } from './ws-dispatch-checkpoint-adapter.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+let transportLoaded = false;
 
 async function defaultSend({ packet, target, event }) {
   const transportPath = path.resolve(here, '..', 'dist', 'chatgpt.js');
   const transport = await import(pathToFileURL(transportPath).href);
+  transportLoaded = true;
   return event.mode === 'CONSULT'
     ? transport.blockingReply(
         packet,
@@ -22,6 +24,15 @@ async function defaultSend({ packet, target, event }) {
         packet,
         { target_url: target.chat_url, expected_conversation_id: target.conversation_id },
       );
+}
+
+export async function closeWsDispatchCheckpointTransport() {
+  if (!transportLoaded) return false;
+  const browserPath = path.resolve(here, '..', 'dist', 'browser.js');
+  const browser = await import(pathToFileURL(browserPath).href);
+  await browser.closeBrowser();
+  transportLoaded = false;
+  return true;
 }
 
 export async function connectTerminalResultToCheckpoint({

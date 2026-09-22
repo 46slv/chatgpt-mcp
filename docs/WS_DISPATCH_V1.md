@@ -1,6 +1,6 @@
 # WS Dispatch v1 — prebuild contract
 
-Status: current-main host candidate. Checkpoint autoreport PR #24 is merged and the terminal-result projection adapter is implemented on this branch.
+Status: FIRST_USABLE on SHIRO-WS. Resident Muse/OpenCode execution, machine-local installation, Scheduled Task lifecycle, restart ambiguity, and one exact-bound REPORT have completed real-host acceptance.
 
 ## Goal
 
@@ -193,3 +193,16 @@ SHIRO-WS qualification rows:
 6. after Scheduled Task start, submission alone reaches terminal state;
 7. when an exact checkpoint binding and ChatGPT transport session are available, one `REPORT` job reaches the existing checkpoint receipt with no hosted remote execution loop;
 8. only then consider a separate revision for Codex/Luna or deterministic `auto` routing.
+
+## SHIRO-WS acceptance — 2026-09-23
+
+- Resident/config/checkpoint focused tests: 28 passed, 0 failed after the final shutdown hardening.
+- Final full suite: 535 tests, 525 passed, 10 explicit skips, 0 failed; portability 3 passed; read-only preflight passed.
+- Read-only Muse: `canary-ro-327006c` completed, reported `CANARY_READ_ONLY_VALUE=EPHEMERA-WS-DISPATCH-7d7bc0e`, and left the fixture clean.
+- Workspace-write Muse: `canary-write-327006c` reproduced `41 !== 42`, changed only `value.mjs`, reran `npm test`, and recorded 1 passed / 0 failed in OpenCode JSONL evidence.
+- Process crash/restart: `restart-ambiguous-327006c` was killed after reaching `ACTIVE`; restart wrote `AMBIGUOUS`, processed zero jobs, created no Worker evidence, and did not requeue.
+- Scheduled Task: install/status/uninstall/reinstall readback confirmed current user, `Interactive`, `Limited`, hidden, `IgnoreNew`, restart count 3 / `PT1M`, and execution time limit `PT0S`. Uninstall preserved the terminal queue/result and versioned runtime.
+- Submit-only scheduled acceptance: `scheduled-ro-b68e83e` reached `COMPLETED` after one queue submission while the installed task was already resident.
+- Exact-bound REPORT E2E: `e2e-report-b68e83e` completed through Muse, created checkpoint `505006875447608106a05407b3a741c8cb2b584bb7f67cd260896f5862fb7030`, linked `report-fbe68cde0be15a95e7921f28`, and reached `DELIVERED` with `USER_TURN_ACK`; pending became empty.
+
+The first real OpenCode attempt exposed Windows `spawn EINVAL` for `.cmd`; the accepted path now resolves the native `opencode.exe` and never passes Worker text through a command shell. Runtime installation similarly invokes `npm-cli.js` through the active `node.exe`. CDP checkpoint transport is disconnected during graceful shutdown through the existing browser cleanup contract without closing the caller-owned Chrome process or its tabs.

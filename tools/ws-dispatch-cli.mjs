@@ -11,7 +11,10 @@ import {
   releaseDispatcherLock,
   submitJob,
 } from './ws-dispatch-core.mjs';
-import { connectTerminalResultToCheckpoint } from './ws-dispatch-checkpoint-delivery.mjs';
+import {
+  closeWsDispatchCheckpointTransport,
+  connectTerminalResultToCheckpoint,
+} from './ws-dispatch-checkpoint-delivery.mjs';
 import { resolveWsDispatchConfig } from './ws-dispatch-config.mjs';
 import {
   installScheduledDispatcher,
@@ -106,6 +109,7 @@ export async function runCli(
     dispatchNextJobFn = dispatchNextJob,
     runOpenCodeWorkerFn = runOpenCodeWorker,
     connectCheckpointFn = connectTerminalResultToCheckpoint,
+    closeCheckpointTransportFn = closeWsDispatchCheckpointTransport,
     serveDispatcherFn = serveDispatcher,
     installScheduledDispatcherFn = installScheduledDispatcher,
     scheduledTaskStatusFn = scheduledTaskStatus,
@@ -157,6 +161,7 @@ export async function runCli(
       return 0;
     } finally {
       releaseDispatcherLockFn(lock);
+      await closeCheckpointTransportFn();
     }
   }
 
@@ -176,6 +181,7 @@ export async function runCli(
         signal: activeSignal,
         waitMs: positiveInteger(values['wait-ms'], 1000),
         connectCheckpointFn,
+        closeCheckpointTransportFn,
         recoverInterruptedJobsFn,
         acquireDispatcherLockFn,
         releaseDispatcherLockFn,

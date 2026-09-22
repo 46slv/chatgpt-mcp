@@ -8,7 +8,10 @@ import {
   recoverInterruptedJobs,
   releaseDispatcherLock,
 } from './ws-dispatch-core.mjs';
-import { connectTerminalResultToCheckpoint } from './ws-dispatch-checkpoint-delivery.mjs';
+import {
+  closeWsDispatchCheckpointTransport,
+  connectTerminalResultToCheckpoint,
+} from './ws-dispatch-checkpoint-delivery.mjs';
 
 function terminalJobIds(root) {
   const dirs = ensureLayout(root);
@@ -58,6 +61,7 @@ export async function serveDispatcher({
   waitMs = 1000,
   waitForInboxFn = waitForInbox,
   connectCheckpointFn = connectTerminalResultToCheckpoint,
+  closeCheckpointTransportFn = closeWsDispatchCheckpointTransport,
   recoverInterruptedJobsFn = recoverInterruptedJobs,
   acquireDispatcherLockFn = acquireDispatcherLock,
   releaseDispatcherLockFn = releaseDispatcherLock,
@@ -106,5 +110,11 @@ export async function serveDispatcher({
   } finally {
     releaseDispatcherLockFn(lock);
     emit('STOPPED', { pid: process.pid });
+    try {
+      const closed = await closeCheckpointTransportFn();
+      if (closed) emit('CHECKPOINT_TRANSPORT_CLOSED', { pid: process.pid });
+    } catch (error) {
+      emit('CHECKPOINT_TRANSPORT_CLOSE_FAILED', { error: error?.stack || error?.message || String(error) });
+    }
   }
 }

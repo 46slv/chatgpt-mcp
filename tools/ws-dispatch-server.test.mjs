@@ -45,6 +45,7 @@ test('resident dispatcher processes one job, connects its terminal result once, 
       connected.push(job_id);
       return { projection: { status: 'SKIPPED' }, delivery: null };
     },
+    closeCheckpointTransportFn: async () => false,
     waitForInboxFn: async () => {
       waits += 1;
       controller.abort();
@@ -77,6 +78,7 @@ test('startup recovery terminalizes active/no-result as AMBIGUOUS without rerunn
       connected.push(job_id);
       return { projection: { status: 'SKIPPED' }, delivery: null };
     },
+    closeCheckpointTransportFn: async () => false,
     waitForInboxFn: async () => {
       controller.abort();
       return 'aborted';
@@ -93,11 +95,16 @@ test('graceful idle shutdown releases the owned dispatcher lock', async () => {
   const root = tempRoot('idle');
   const controller = new AbortController();
   let waits = 0;
+  let transportCloses = 0;
   await serveDispatcher({
     root,
     checkpointStateRoot: path.join(root, 'checkpoint-state'),
     signal: controller.signal,
     runner: async () => { throw new Error('no job should run'); },
+    closeCheckpointTransportFn: async () => {
+      transportCloses += 1;
+      return true;
+    },
     waitForInboxFn: async () => {
       waits += 1;
       controller.abort();
@@ -105,5 +112,6 @@ test('graceful idle shutdown releases the owned dispatcher lock', async () => {
     },
   });
   assert.equal(waits, 1);
+  assert.equal(transportCloses, 1);
   assert.equal(fs.existsSync(path.join(root, 'dispatcher.lock')), false);
 });
