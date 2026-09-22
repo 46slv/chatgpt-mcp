@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://46slv.example/schemas/ws-dispatch-result.v1.schema.json",
+  "title": "WS Dispatch Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol","schema_version","job_id","state","lane","started_at","finished_at","summary","evidence_refs","error"],
+  "properties": {
+    "protocol": {"const":"ws-dispatch.result"},
+    "schema_version": {"const":1},
+    "job_id":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},
+    "state":{"type":"string","enum":["COMPLETED","FAILED","AMBIGUOUS","REJECTED"]},
+    "lane":{"type":"string","enum":["muse","codex-luna","auto"]},
+    "started_at":{"type":"string","format":"date-time"},
+    "finished_at":{"type":"string","format":"date-time"},
+    "summary":{"type":"string","minLength":1,"maxLength":16000},
+    "evidence_refs":{"type":"array","maxItems":64,"items":{"type":"string","minLength":1,"maxLength":2048}},
+    "error":{"type":["string","null"],"maxLength":16000}
+  }
+}

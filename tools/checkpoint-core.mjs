@@ -297,7 +297,7 @@ export function latestCheckpoint(stateRoot, missionId) {
   return readJson(path.join(checkpointsDir(stateRoot, missionId), files.at(-1)));
 }
 
-export function saveCheckpoint({ workspace, next, approach, done_for_next = null, mode = 'REPORT', question = null, evidence_refs = [], stateRoot = defaultStateRoot(), now = () => new Date().toISOString() } = {}) {
+export function saveCheckpoint({ workspace, next, approach, done_for_next = null, mode = 'REPORT', question = null, evidence_refs = [], producer_kind = 'codex', producer_session_id = undefined, stateRoot = defaultStateRoot(), now = () => new Date().toISOString() } = {}) {
   const root = normalizedWorkspace(workspace);
   const binding = findBindingForWorkspace(root, { stateRoot });
   if (!binding) throw new Error('checkpoint binding not found for workspace; call checkpoint_bind first');
@@ -310,6 +310,11 @@ export function saveCheckpoint({ workspace, next, approach, done_for_next = null
     question: optionalText(question, 'question', 4000),
   };
   if (normalizedMode === 'CONSULT' && !semantic.question) throw new Error('question is required for CONSULT mode');
+  const producerKind = requiredText(producer_kind, 'producer_kind', 32);
+  if (!new Set(['codex', 'ephemera', 'local-worker']).has(producerKind)) throw new Error('producer_kind is invalid');
+  const producerSessionId = producer_session_id === undefined
+    ? undefined
+    : optionalText(producer_session_id, 'producer_session_id', 256);
   assertNoLikelySecrets(semantic);
   const refs = Array.isArray(evidence_refs) ? evidence_refs.slice(0, 32).map((x) => requiredText(String(x), 'evidence_ref', 1000)) : [];
   const markerFile = sessionFile(stateRoot, binding.workspace);
@@ -323,8 +328,10 @@ export function saveCheckpoint({ workspace, next, approach, done_for_next = null
       sequence,
       created_at: now(),
       producer: {
-        kind: 'codex',
-        session_id: marker?.session_id || binding.bound_session_id || null,
+        kind: producerKind,
+        session_id: producerSessionId === undefined
+          ? (marker?.session_id || binding.bound_session_id || null)
+          : producerSessionId,
       },
       workspace: binding.workspace,
       goal: binding.goal,

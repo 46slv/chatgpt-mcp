@@ -39,6 +39,25 @@ test('checkpoint journal is append-only and session/git state is captured', () =
   assert.doesNotMatch(buildReportPacket(e2), new RegExp(f.workspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
+test('checkpoint producer override records a bounded local Worker without changing the default', () => {
+  const f = fixture();
+  recordCodexSession({ workspace: f.workspace, session_id: 'thr-producer', stateRoot: f.local });
+  bindWorkspace({ workspace: f.workspace, mission_id: 'MISSION-PRODUCER', stateRoot: f.local, registryPath: f.registryPath });
+  const local = saveCheckpoint({
+    workspace: f.workspace,
+    next: 'Continue from the local Worker result',
+    approach: 'Use the immutable terminal evidence.',
+    producer_kind: 'local-worker',
+    producer_session_id: 'job-001',
+    stateRoot: f.local,
+  });
+  assert.deepEqual(local.producer, { kind: 'local-worker', session_id: 'job-001' });
+  assert.throws(
+    () => saveCheckpoint({ workspace: f.workspace, next: 'No', approach: 'No.', producer_kind: 'worker-selected', stateRoot: f.local }),
+    /producer_kind is invalid/u,
+  );
+});
+
 test('delivery receipts dedupe and ambiguous claims prevent blind resend', async () => {
   const f = fixture();
   recordCodexSession({ workspace: f.workspace, session_id: 'thr-2', stateRoot: f.local });
