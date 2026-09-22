@@ -17,6 +17,52 @@ ChatGPT
   -> existing checkpoint REPORT/CONSULT delivery
 ```
 
+## Operator routing guard
+
+Remote Desktop Commander / equivalent hosted remote-control channels are a **control plane**, not the iterative execution plane.
+
+For one logical task:
+
+- use native GitHub / Notion / Files connectors directly when they own the target state;
+- if host-local work requires a read -> edit -> test -> repair loop, compile the whole bounded task into one WS Dispatch job;
+- a remote-control channel may be used for one job submission/start and, when automatic REPORT is unavailable, one terminal-result readback;
+- do not use repeated remote process/file calls for each shell command, test, poll, or repair step;
+- if a second remote process call would be needed to continue ordinary execution, treat that as a routing failure and move the work into the local Worker instead;
+- exception: bounded diagnosis of the local-job transport itself or a host-only emergency that cannot be expressed through an available local lane. Record the reason rather than silently falling back.
+
+This gate exists because hosted Remote control has a scarce call budget and because high-frequency host work is both cheaper and more coherent when the local Worker owns the loop.
+
+## Current local submission interface
+
+This branch exposes a first-class local CLI around the durable queue:
+
+```powershell
+# Submit one immutable job JSON. This only queues; a resident dispatcher may claim it.
+node .\tools\ws-dispatch-cli.mjs submit --root <machine-local-root> --job .\job.json
+
+# The same submission can be piped through stdin, useful for a single bounded
+# remote-control process call without a separate remote file-write operation.
+Get-Content .\job.json -Raw | node .\tools\ws-dispatch-cli.mjs submit --root <machine-local-root> --stdin
+
+# Inspect durable queue/result state without launching anything.
+node .\tools\ws-dispatch-cli.mjs status --root <machine-local-root> --job-id <job-id>
+
+# Until the Scheduled Task/service lifecycle is installed, a one-shot local
+# dispatcher can execute exactly one queued job through the Muse/OpenCode lane.
+node .\tools\ws-dispatch-cli.mjs run-once --root <machine-local-root>
+```
+
+Operationally, the preferred temporary path before service installation is one remote process invocation that performs the submit and then `run-once` locally. The remote channel must not be used to drive the Worker's internal shell/test loop.
+
+The installed steady state remains:
+
+```text
+one remote submit -> resident local dispatcher -> local Worker loop
+                  -> terminal result -> checkpoint REPORT/CONSULT
+```
+
+The exact machine-local dispatch root and resident dispatcher lifecycle remain host qualification gates; the CLI does not silently choose or install them.
+
 ## v1 ownership boundary
 
 - ChatGPT owns user-intent compilation: `goal`, observable `done`, authority, and requested reply mode.
