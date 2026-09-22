@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://46slv.example/schemas/checkpoint-report-receipt.v1.schema.json",
+  "title": "EPHEMERA Checkpoint Report Receipt v1",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["protocol","schema_version","mission_id","checkpoint_id","report_id","mode","delivery_state","delivery_proof","target","delivered_at","response_sha256","response_preview","error"],
+  "properties":{
+    "protocol":{"const":"ephemera.checkpoint-report-receipt"},
+    "schema_version":{"const":1},
+    "mission_id":{"type":"string"},
+    "checkpoint_id":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+    "report_id":{"type":"string","pattern":"^report-[a-f0-9]{24}$"},
+    "mode":{"type":"string","enum":["REPORT","CONSULT"]},
+    "delivery_state":{"type":"string","enum":["DELIVERED","DELIVERY_UNKNOWN","REJECTED"]},
+    "delivery_proof":{"enum":["USER_TURN_ACK","ASSISTANT_REPLY_READBACK",null]},
+    "target":{"type":"object"},
+    "delivered_at":{"type":"string","format":"date-time"},
+    "response_sha256":{"type":["string","null"],"pattern":"^[a-f0-9]{64}$"},
+    "response_preview":{"type":["string","null"],"maxLength":2000},
+    "error":{"type":["string","null"]}
+  }
+}
