@@ -21,8 +21,16 @@ function fakeSpawn(code = 0) {
   };
 }
 
-test('resolves Windows shim explicitly', () => {
-  assert.equal(resolveOpenCodeExecutable('win32'), 'opencode.cmd');
+test('resolves the native Windows OpenCode executable without a shell shim', () => {
+  const env = { APPDATA: 'C:\\Users\\test\\AppData\\Roaming' };
+  assert.equal(
+    resolveOpenCodeExecutable('win32', env, () => true),
+    path.resolve(env.APPDATA, 'npm', 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'),
+  );
+  assert.throws(
+    () => resolveOpenCodeExecutable('win32', env, () => false),
+    /native Windows executable was not found/,
+  );
   assert.equal(resolveOpenCodeExecutable('linux'), 'opencode');
 });
 

@@ -181,7 +181,7 @@ Additional cloud-prebuilt pieces:
 
 - single-instance dispatcher lock with safe stale-owner replacement;
 - generic `dispatchNextJob` terminalization with runner exceptions converted to FAILED receipts;
-- OpenCode process adapter with explicit Windows `opencode.cmd`, shell disabled, and local stdout/stderr evidence capture.
+- OpenCode process adapter with the exact native Windows `opencode.exe`, shell disabled, and local stdout/stderr evidence capture. `OPENCODE_EXECUTABLE` is an explicit exact-path override; the normal npm global path is resolved without executing the `.cmd` shell shim.
 
 SHIRO-WS qualification rows:
 
