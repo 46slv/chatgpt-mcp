@@ -170,6 +170,7 @@ async function acquireLock(filePath, waitMs = LOCK_WAIT_MS) {
   const lock = lockPath(filePath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const deadline = Date.now() + Math.max(1, Number(waitMs) || LOCK_WAIT_MS);
+  let absentEpermRetryUsed = false;
   for (;;) {
     try {
       const handle = await fs.promises.open(lock, "wx");
@@ -177,9 +178,19 @@ async function acquireLock(filePath, waitMs = LOCK_WAIT_MS) {
       return { handle, lock };
     } catch (error) {
       // Windows may report a second exclusive open as EPERM rather than
-      // EEXIST. Treat it as contention only while the lock path exists;
-      // unrelated permission failures remain hard errors.
-      if (error?.code !== "EEXIST" && !(error?.code === "EPERM" && fs.existsSync(lock))) throw error;
+      // EEXIST. A releasing owner can also remove the lock between that
+      // failed open and our path check. Allow exactly one bounded retry for
+      // that absent-path race; repeated invisible EPERM remains a hard error
+      // instead of being mislabeled as another writer indefinitely.
+      if (error?.code === "EPERM" && !fs.existsSync(lock)) {
+        if (absentEpermRetryUsed) throw error;
+        absentEpermRetryUsed = true;
+        if (Date.now() >= deadline) throw error;
+        await sleep(LOCK_RETRY_MS);
+        continue;
+      }
+      if (error?.code !== "EEXIST" && error?.code !== "EPERM") throw error;
+      absentEpermRetryUsed = false;
       // A host crash can leave the lock marker behind. Reclaim only when its
       // recorded owner PID is provably gone; malformed/permission-denied
       // markers remain fail-closed and are never blindly removed.
