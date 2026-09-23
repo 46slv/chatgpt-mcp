@@ -50,7 +50,12 @@ function validateExternalRunId(id){if(typeof id!=="string"||!/^[A-Za-z0-9][A-Za-
 function repairPath(){if(!process.env.DEV_EXEC_RUN_ID)return null;return path.join(BASE,"ChatGPTMCPProbe","dev-exec-runs",validateExternalRunId(process.env.DEV_EXEC_RUN_ID),"local-worker-repair.json");}
 function statePath(id){return path.join(STATE_DIR,`${validateWorkerRunId(id)}.json`);}
 function save(s){fs.mkdirSync(STATE_DIR,{recursive:true});const d=statePath(s.run_id);const t=`${d}.tmp-${process.pid}`;fs.writeFileSync(t,JSON.stringify(s,null,2)+"\n","utf8");fs.renameSync(t,d);}
-function load(id){return JSON.parse(fs.readFileSync(statePath(id),"utf8"));}
+function load(id){
+ const expected=validateWorkerRunId(id);
+ const value=JSON.parse(fs.readFileSync(statePath(expected),"utf8"));
+ if(value?.protocol!=="devexec.local-worker"||value?.schema_version!==1||value?.run_id!==expected)throw new Error("local worker state identity mismatch");
+ return value;
+}
 function runProcess(command,args,options={}){const r=spawnSync(command,args,{cwd:options.cwd,input:options.input,encoding:"utf8",windowsHide:true,shell:false,timeout:options.timeout||180000,maxBuffer:2*1024*1024,env:{...process.env,PYTHONUTF8:"1"}});if(r.error)throw r.error;if(r.status!==0)throw new Error(`${command} exit=${r.status}\n${r.stderr||r.stdout}`);return r.stdout||"";}
 async function runLlamaPlanner(prompt){
  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(new Error("llama.cpp planner timeout")),Math.max(1000,PLANNER_TIMEOUT_MS));
