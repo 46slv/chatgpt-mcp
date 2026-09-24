@@ -420,7 +420,7 @@ export function cleanResponseText(value: unknown): string {
   cleaned = cleaned.replace(/^Thinking\s*/i, '');
   cleaned = cleaned.replace(/Pro\s+thinking\s*\u2022?\s*/gi, '');
   cleaned = cleaned.replace(/^\d+\s*(seconds?|secs?)\s*/i, '');
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  cleaned = cleaned.replace(/\r\n?/g, '\n').trim();
   return cleaned;
 }
 /**
