@@ -1,0 +1,1074 @@
+DEV-25 Coordination Core Source Bundle
+Reconstruct each file using the FILE markers below.
+
+===== FILE: ARCHITECTURE.md =====
+# Architecture canary
+
+## Authority split
+
+- **Mission/Task execution state:** transactional Coordination Core.
+- **Brief / requirements / decisions / human projection:** Notion or another replaceable authoring/projection adapter.
+- **Code/artifacts:** dedicated Git repository once provisioned.
+- **Long-term knowledge/personality:** separate memory/retrieval layer; never used as live ownership truth.
+
+Workers are replaceable adapters. They do not write SQLite directly in the intended architecture; they call the versioned Coordination API.
+
+## Minimal entities
+
+Mission -> Task -> Attempt. Worker is a reusable execution identity. Leases protect both source write scopes and non-file resources. Material state changes create idempotent coordination events. Heartbeats update worker liveness only.
+
+## Current canary boundary
+
+The HTTP server binds to localhost by default and validates only that the supplied worker ID is registered. This is not remote authentication. Before exposing it beyond a trusted local boundary, add authenticated worker identity and transport policy without changing the Mission/Task state semantics.
+===== END FILE: ARCHITECTURE.md =====
+
+===== FILE: README.md =====
+# Agent Coordination Core — SQLite canary
+
+Temporary prebuild for DEV-25. It is deliberately small and dependency-free.
+
+What it proves:
+
+- Mission / Task / Attempt are separate lifecycles.
+- responsible owner / active executor / active writer / last substantive actor are separate facts.
+- heartbeat/liveness does not mutate task ownership or substantive history.
+- write scopes and shared resources use transactional SQLite leases.
+- detached waiting yields the Attempt and releases worker capacity.
+- unknown in-flight attempts retain their lease until explicit reconciliation; blind retry is blocked.
+- dispatch keys are idempotent.
+- workers select only capability-compatible ready tasks.
+
+This package is not yet a network service, Notion adapter, authentication layer, scheduler daemon, or production release. Workers should eventually call a versioned Coordination API rather than write the database directly.
+
+Run:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Versioned local Coordination API canary
+
+`coordination_core.api` exposes a minimal dependency-free HTTP API bound to `127.0.0.1` by default:
+
+- `GET /v1/health`
+- `GET /v1/tasks/{task_id}`
+- `GET /v1/workers/{worker_id}/ready`
+- `POST /v1/tasks/{task_id}/claim`
+- `POST /v1/tasks/{task_id}/wait`
+- `POST /v1/tasks/{task_id}/wake`
+- `POST /v1/tasks/{task_id}/handoff`
+- `POST /v1/tasks/{task_id}/action`
+
+This proves the adapter boundary; it is not remote authentication. The canary only accepts registered worker IDs and binds locally. A production remote adapter still needs authenticated worker identity and transport policy.
+
+## Run as a service
+
+```bash
+python -m coordination_core --db coordination.db --host 127.0.0.1 --port 8765
+```
+
+The default localhost bind is intentional. Remote authentication and real Worker adapters are outside the current canary evidence.
+===== END FILE: README.md =====
+
+===== FILE: STATE_MACHINE.md =====
+# State machine
+
+## Task
+
+`proposed -> ready -> active -> review -> done`
+
+Additional transitions:
+
+- `ready|active -> waiting`: known wake condition; active Attempt yields and executor capacity is released.
+- `ready|active -> blocked`: safe progress requires missing authority/capability/ownership reconciliation.
+- `waiting -> ready`: wake condition observed.
+- `review -> ready`: repair/rework.
+- `* -> cancelled`: only with applicable authority; history remains.
+
+## Attempt
+
+`dispatched -> running -> succeeded | failed | unknown | cancelled | yielded`
+
+- Attempt failure does not erase the Task.
+- `unknown` retains its leases until explicit reconciliation.
+- retry creates a new Attempt only after unknown side effects/results are checked.
+
+## Ownership
+
+`responsible_owner`, `active_executor`, `active_writer`, and `last_substantive_actor` are separate facts.
+
+Heartbeat, observation, metadata edits and read-only review do not change owner or writer. Owner/writer changes require explicit transitions such as CLAIM, RELEASE, HANDOFF_ACCEPT or TAKEOVER.
+===== END FILE: STATE_MACHINE.md =====
+
+===== FILE: canary_evidence.json =====
+{
+  "schema_version": 1,
+  "checked_at": "2026-11-11 JST",
+  "suite": {
+    "tests_total": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "implementation": {
+    "language": "Python stdlib",
+    "backend": "SQLite",
+    "api": "HTTP /v1 localhost-only"
+  },
+  "snapshots": [
+    {
+      "step": "created",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "ready",
+        "responsible_owner": "owner-A",
+        "active_executor": null,
+        "active_writer": null,
+        "last_substantive_actor": null,
+        "last_substantive_action": null,
+        "wake_condition": null,
+        "revision": 1
+      }
+    },
+    {
+      "step": "A_claim",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "active",
+        "responsible_owner": "owner-A",
+        "active_executor": "worker-A",
+        "active_writer": "worker-A",
+        "last_substantive_actor": null,
+        "last_substantive_action": null,
+        "wake_condition": null,
+        "revision": 2
+      }
+    },
+    {
+      "step": "B_review_owner_unchanged",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "active",
+        "responsible_owner": "owner-A",
+        "active_executor": "worker-A",
+        "active_writer": "worker-A",
+        "last_substantive_actor": "worker-B",
+        "last_substantive_action": "read-only independent review",
+        "wake_condition": null,
+        "revision": 3
+      }
+    },
+    {
+      "step": "A_yield_release_writer",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "waiting",
+        "responsible_owner": "owner-A",
+        "active_executor": null,
+        "active_writer": null,
+        "last_substantive_actor": "worker-B",
+        "last_substantive_action": "read-only independent review",
+        "wake_condition": "handoff boundary",
+        "revision": 4
+      }
+    },
+    {
+      "step": "handoff_accept_owner_B",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "ready",
+        "responsible_owner": "owner-B",
+        "active_executor": null,
+        "active_writer": null,
+        "last_substantive_actor": "worker-B",
+        "last_substantive_action": "read-only independent review",
+        "wake_condition": null,
+        "revision": 6
+      }
+    },
+    {
+      "step": "B_claim_writer_B",
+      "task": {
+        "task_id": "TASK-OWN",
+        "state": "active",
+        "responsible_owner": "owner-B",
+        "active_executor": "worker-B",
+        "active_writer": "worker-B",
+        "last_substantive_actor": "worker-B",
+        "last_substantive_action": "read-only independent review",
+        "wake_condition": null,
+        "revision": 7
+      }
+    }
+  ],
+  "events": [
+    {
+      "event_type": "CLAIM",
+      "actor_id": "worker-A",
+      "previous_revision": 1,
+      "idempotency_key": "claim:canary-claim-a"
+    },
+    {
+      "event_type": "ACTION",
+      "actor_id": "worker-B",
+      "previous_revision": 2,
+      "idempotency_key": "canary-review-b"
+    },
+    {
+      "event_type": "WAIT",
+      "actor_id": "worker-A",
+      "previous_revision": 3,
+      "idempotency_key": "canary-wait"
+    },
+    {
+      "event_type": "WAKE",
+      "actor_id": "owner-A",
+      "previous_revision": 4,
+      "idempotency_key": "canary-wake"
+    },
+    {
+      "event_type": "HANDOFF_ACCEPT",
+      "actor_id": "owner-A",
+      "previous_revision": 5,
+      "idempotency_key": "canary-handoff"
+    },
+    {
+      "event_type": "CLAIM",
+      "actor_id": "worker-B",
+      "previous_revision": 6,
+      "idempotency_key": "claim:canary-claim-b"
+    }
+  ],
+  "not_proven": [
+    "remote authentication",
+    "Notion projection automation",
+    "real Dot/Hermes/Codex adapter",
+    "multi-process crash recovery",
+    "durable Git repository",
+    "independent second-agent architecture review"
+  ]
+}
+===== END FILE: canary_evidence.json =====
+
+===== FILE: coordination_core/__init__.py =====
+from .ledger import (
+    Ledger, LedgerError, RevisionConflict, IllegalTransition,
+    CapabilityMismatch, LeaseConflict, UnknownInflight, ClaimResult,
+)
+
+__all__ = [
+    "Ledger", "LedgerError", "RevisionConflict", "IllegalTransition",
+    "CapabilityMismatch", "LeaseConflict", "UnknownInflight", "ClaimResult",
+]
+===== END FILE: coordination_core/__init__.py =====
+
+===== FILE: coordination_core/__main__.py =====
+from __future__ import annotations
+
+import argparse
+from .ledger import Ledger
+from .api import make_server
+
+
+def main():
+    p = argparse.ArgumentParser(description="DEV-25 coordination-core canary")
+    p.add_argument("--db", default="coordination.db", help="SQLite database path")
+    p.add_argument("--host", default="127.0.0.1", help="Bind host; localhost by default")
+    p.add_argument("--port", type=int, default=8765)
+    args = p.parse_args()
+    ledger = Ledger(args.db)
+    server = make_server(ledger, args.host, args.port)
+    print(f"coordination-core v1 listening on http://{args.host}:{server.server_address[1]}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        ledger.close()
+
+
+if __name__ == "__main__":
+    main()
+===== END FILE: coordination_core/__main__.py =====
+
+===== FILE: coordination_core/api.py =====
+from __future__ import annotations
+
+import json
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
+from .ledger import (
+    Ledger, LedgerError, RevisionConflict, IllegalTransition,
+    CapabilityMismatch, LeaseConflict, UnknownInflight,
+)
+
+API_VERSION = "v1"
+
+
+def task_projection(task: dict) -> dict:
+    return {
+        "task_id": task["task_id"],
+        "mission_id": task["mission_id"],
+        "state": task["state"],
+        "priority": task["priority"],
+        "responsible_owner": task["responsible_owner"],
+        "active_executor": task["active_executor"],
+        "active_writer": task["active_writer"],
+        "last_substantive_actor": task["last_substantive_actor"],
+        "last_substantive_action": task["last_substantive_action"],
+        "last_substantive_at": task["last_substantive_at"],
+        "wake_condition": task["wake_condition"],
+        "revision": task["revision"],
+        "updated_at": task["updated_at"],
+    }
+
+
+class CoordinationHandler(BaseHTTPRequestHandler):
+    ledger: Ledger
+
+    def log_message(self, format, *args):
+        return
+
+    def _send(self, status: int, obj: dict):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        if n == 0:
+            return {}
+        return json.loads(self.rfile.read(n).decode("utf-8"))
+
+    def _worker(self, data: dict) -> str:
+        worker_id = self.headers.get("X-Worker-ID") or data.get("worker_id")
+        if not worker_id:
+            raise PermissionError("worker identity required")
+        row = self.ledger.conn.execute("SELECT 1 FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+        if not row:
+            raise PermissionError("unknown worker")
+        return worker_id
+
+    def do_GET(self):
+        p = urlparse(self.path).path.strip("/").split("/")
+        try:
+            if p == ["v1", "health"]:
+                return self._send(200, {"ok": True, "api_version": API_VERSION})
+            if len(p) == 3 and p[:2] == ["v1", "tasks"]:
+                return self._send(200, task_projection(self.ledger.get_task(p[2])))
+            if len(p) == 4 and p[:2] == ["v1", "workers"] and p[3] == "ready":
+                worker_id = p[2]
+                row = self.ledger.conn.execute("SELECT 1 FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+                if not row:
+                    return self._send(404, {"error": "unknown_worker"})
+                return self._send(200, {"tasks": [task_projection(t) for t in self.ledger.eligible_ready_tasks(worker_id)]})
+            return self._send(404, {"error": "not_found"})
+        except KeyError:
+            return self._send(404, {"error": "not_found"})
+        except Exception as exc:
+            return self._send(500, {"error": type(exc).__name__, "message": str(exc)})
+
+    def do_POST(self):
+        p = urlparse(self.path).path.strip("/").split("/")
+        try:
+            data = self._json()
+            worker_id = self._worker(data)
+            if len(p) == 4 and p[:2] == ["v1", "tasks"]:
+                task_id, action = p[2], p[3]
+                if action == "claim":
+                    r = self.ledger.claim_task(
+                        task_id, worker_id,
+                        expected_revision=int(data["expected_revision"]),
+                        dispatch_key=data["dispatch_key"],
+                    )
+                    return self._send(200, {"task_id": r.task_id, "attempt_id": r.attempt_id, "revision": r.revision})
+                if action == "wait":
+                    t = self.ledger.set_waiting(
+                        task_id, worker_id,
+                        expected_revision=int(data["expected_revision"]),
+                        wake_condition=data["wake_condition"],
+                        idempotency_key=data["idempotency_key"],
+                    )
+                    return self._send(200, task_projection(t))
+                if action == "wake":
+                    t = self.ledger.wake_task(
+                        task_id, worker_id,
+                        expected_revision=int(data["expected_revision"]),
+                        idempotency_key=data["idempotency_key"],
+                    )
+                    return self._send(200, task_projection(t))
+                if action == "handoff":
+                    t = self.ledger.handoff_owner(
+                        task_id, worker_id, data["new_owner"],
+                        expected_revision=int(data["expected_revision"]),
+                        idempotency_key=data["idempotency_key"],
+                    )
+                    return self._send(200, task_projection(t))
+                if action == "action":
+                    t = self.ledger.record_action(
+                        task_id, worker_id, data["action"],
+                        expected_revision=int(data["expected_revision"]),
+                        idempotency_key=data["idempotency_key"],
+                    )
+                    return self._send(200, task_projection(t))
+            return self._send(404, {"error": "not_found"})
+        except PermissionError as exc:
+            return self._send(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized", "message": str(exc)})
+        except (RevisionConflict, IllegalTransition, CapabilityMismatch, LeaseConflict, UnknownInflight) as exc:
+            return self._send(HTTPStatus.CONFLICT, {"error": type(exc).__name__, "message": str(exc)})
+        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+            return self._send(HTTPStatus.BAD_REQUEST, {"error": type(exc).__name__, "message": str(exc)})
+        except LedgerError as exc:
+            return self._send(HTTPStatus.CONFLICT, {"error": type(exc).__name__, "message": str(exc)})
+        except Exception as exc:
+            return self._send(500, {"error": type(exc).__name__, "message": str(exc)})
+
+
+def make_server(ledger: Ledger, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
+    handler = type("BoundCoordinationHandler", (CoordinationHandler,), {"ledger": ledger})
+    return ThreadingHTTPServer((host, port), handler)
+===== END FILE: coordination_core/api.py =====
+
+===== FILE: coordination_core/ledger.py =====
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Optional
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def jdump(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def jload(value: Optional[str]):
+    return json.loads(value) if value else []
+
+
+class LedgerError(RuntimeError):
+    pass
+
+
+class RevisionConflict(LedgerError):
+    pass
+
+
+class IllegalTransition(LedgerError):
+    pass
+
+
+class CapabilityMismatch(LedgerError):
+    pass
+
+
+class LeaseConflict(LedgerError):
+    pass
+
+
+class UnknownInflight(LedgerError):
+    pass
+
+
+@dataclass(frozen=True)
+class ClaimResult:
+    task_id: str
+    attempt_id: str
+    revision: int
+
+
+SCHEMA = r"""
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+
+CREATE TABLE IF NOT EXISTS missions (
+  mission_id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  done TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  mission_owner TEXT NOT NULL,
+  authority_ref TEXT,
+  brief_ref TEXT,
+  harness_revision TEXT NOT NULL,
+  current_phase TEXT,
+  next_action TEXT,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  task_id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES missions(mission_id),
+  parent_task_id TEXT REFERENCES tasks(task_id),
+  kind TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  acceptance TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'proposed',
+  wake_condition TEXT,
+  responsible_owner TEXT NOT NULL,
+  active_executor TEXT,
+  active_writer TEXT,
+  required_capabilities TEXT NOT NULL DEFAULT '[]',
+  write_scopes TEXT NOT NULL DEFAULT '[]',
+  resource_requirements TEXT NOT NULL DEFAULT '[]',
+  authority_ref TEXT,
+  preemptible INTEGER NOT NULL DEFAULT 1,
+  last_substantive_actor TEXT,
+  last_substantive_action TEXT,
+  last_substantive_at TEXT,
+  evidence_refs TEXT NOT NULL DEFAULT '[]',
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  depends_on_task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  PRIMARY KEY(task_id, depends_on_task_id)
+);
+
+CREATE TABLE IF NOT EXISTS workers (
+  worker_id TEXT PRIMARY KEY,
+  runtime TEXT NOT NULL,
+  capabilities TEXT NOT NULL DEFAULT '[]',
+  tools TEXT NOT NULL DEFAULT '[]',
+  host_access TEXT NOT NULL DEFAULT '[]',
+  availability TEXT NOT NULL DEFAULT 'available',
+  max_concurrency INTEGER NOT NULL DEFAULT 1,
+  resource_class TEXT,
+  usage_class TEXT,
+  last_seen_at TEXT,
+  health TEXT NOT NULL DEFAULT 'unknown'
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+  attempt_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+  runtime TEXT NOT NULL,
+  session_or_process_ref TEXT,
+  dispatch_key TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  result_ref TEXT,
+  error_class TEXT,
+  observed_usage TEXT,
+  inflight_external_ref TEXT
+);
+
+CREATE TABLE IF NOT EXISTS leases (
+  lease_id TEXT PRIMARY KEY,
+  lease_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  holder_attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+  holder_worker_id TEXT NOT NULL REFERENCES workers(worker_id),
+  state TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL,
+  released_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_lease
+  ON leases(lease_type, resource_id) WHERE state = 'active';
+
+CREATE TABLE IF NOT EXISTS events (
+  event_id TEXT PRIMARY KEY,
+  timestamp TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  mission_id TEXT,
+  task_id TEXT,
+  attempt_id TEXT,
+  resource_id TEXT,
+  previous_revision INTEGER,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  result_ref TEXT,
+  payload TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS conversation_deltas (
+  delta_id TEXT PRIMARY KEY,
+  source_ref TEXT NOT NULL,
+  mission_id TEXT NOT NULL REFERENCES missions(mission_id),
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  authority_class TEXT NOT NULL,
+  accepted_by TEXT,
+  source_pointer TEXT,
+  payload TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+"""
+
+
+class Ledger:
+    """Transactional coordination core. Workers should mutate state through this API, not raw SQL."""
+
+    def __init__(self, path: str | Path = ":memory:"):
+        self.lock = threading.RLock()
+        self.conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA)
+
+    @contextmanager
+    def tx(self):
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+            else:
+                self.conn.execute("COMMIT")
+
+    def close(self):
+        with self.lock:
+            self.conn.close()
+
+    def create_mission(self, mission_id: str, goal: str, done: str, owner: str,
+                       harness_revision: str = "dev-0", authority_ref: str | None = None):
+        t = now()
+        self.conn.execute(
+            "INSERT INTO missions(mission_id,goal,done,mission_owner,authority_ref,harness_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (mission_id, goal, done, owner, authority_ref, harness_revision, t, t),
+        )
+
+    def create_task(self, task_id: str, mission_id: str, kind: str, outcome: str,
+                    acceptance: str, owner: str, *, state: str = "ready", priority: int = 0,
+                    required_capabilities: Iterable[str] = (), write_scopes: Iterable[str] = (),
+                    resources: Iterable[str] = (), dependencies: Iterable[str] = (),
+                    authority_ref: str | None = None, preemptible: bool = True):
+        t = now()
+        with self.tx():
+            self.conn.execute(
+                """INSERT INTO tasks(task_id,mission_id,kind,outcome,acceptance,priority,state,responsible_owner,
+                required_capabilities,write_scopes,resource_requirements,authority_ref,preemptible,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, mission_id, kind, outcome, acceptance, priority, state, owner,
+                 jdump(sorted(set(required_capabilities))), jdump(sorted(set(write_scopes))),
+                 jdump(sorted(set(resources))), authority_ref, int(preemptible), t, t),
+            )
+            for dep in dependencies:
+                self.conn.execute("INSERT INTO task_dependencies(task_id,depends_on_task_id) VALUES(?,?)", (task_id, dep))
+
+    def register_worker(self, worker_id: str, runtime: str, *, capabilities=(), tools=(), host_access=(),
+                        max_concurrency: int = 1, usage_class: str | None = None):
+        self.conn.execute(
+            """INSERT INTO workers(worker_id,runtime,capabilities,tools,host_access,max_concurrency,usage_class,last_seen_at,health)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(worker_id) DO UPDATE SET runtime=excluded.runtime,capabilities=excluded.capabilities,
+              tools=excluded.tools,host_access=excluded.host_access,max_concurrency=excluded.max_concurrency,
+              usage_class=excluded.usage_class,last_seen_at=excluded.last_seen_at,health='ok'""",
+            (worker_id, runtime, jdump(sorted(set(capabilities))), jdump(sorted(set(tools))),
+             jdump(sorted(set(host_access))), max_concurrency, usage_class, now(), "ok"),
+        )
+
+    def heartbeat(self, worker_id: str):
+        self.conn.execute("UPDATE workers SET last_seen_at=?, health='ok' WHERE worker_id=?", (now(), worker_id))
+
+    def get_task(self, task_id: str):
+        row = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if not row:
+            raise KeyError(task_id)
+        return dict(row)
+
+    def _event(self, *, actor: str, event_type: str, idempotency_key: str, task_id: str | None = None,
+               attempt_id: str | None = None, mission_id: str | None = None, resource_id: str | None = None,
+               previous_revision: int | None = None, payload=None):
+        self.conn.execute(
+            """INSERT INTO events(event_id,timestamp,actor_id,event_type,mission_id,task_id,attempt_id,resource_id,
+            previous_revision,idempotency_key,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), now(), actor, event_type, mission_id, task_id, attempt_id, resource_id,
+             previous_revision, idempotency_key, jdump(payload or {})),
+        )
+
+    def _assert_revision(self, task_id: str, expected: int):
+        actual = self.conn.execute("SELECT revision FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if not actual:
+            raise KeyError(task_id)
+        if actual[0] != expected:
+            raise RevisionConflict(f"{task_id}: expected {expected}, got {actual[0]}")
+
+    def _dependencies_done(self, task_id: str) -> bool:
+        row = self.conn.execute(
+            """SELECT COUNT(*) FROM task_dependencies d JOIN tasks t ON t.task_id=d.depends_on_task_id
+               WHERE d.task_id=? AND t.state!='done'""", (task_id,)
+        ).fetchone()
+        return row[0] == 0
+
+    def _active_attempt_count(self, worker_id: str) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM attempts WHERE worker_id=? AND state IN ('dispatched','running','unknown')", (worker_id,)
+        ).fetchone()[0]
+
+    def eligible_ready_tasks(self, worker_id: str):
+        w = self.conn.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+        if not w:
+            raise KeyError(worker_id)
+        caps = set(jload(w["capabilities"]))
+        rows = self.conn.execute("SELECT * FROM tasks WHERE state='ready' ORDER BY priority DESC, created_at ASC").fetchall()
+        result = []
+        for row in rows:
+            if not self._dependencies_done(row["task_id"]):
+                continue
+            if set(jload(row["required_capabilities"])).issubset(caps):
+                result.append(dict(row))
+        return result
+
+    def claim_task(self, task_id: str, worker_id: str, *, expected_revision: int, dispatch_key: str) -> ClaimResult:
+        with self.tx():
+            existing = self.conn.execute("SELECT attempt_id FROM attempts WHERE dispatch_key=?", (dispatch_key,)).fetchone()
+            if existing:
+                a = self.conn.execute("SELECT task_id FROM attempts WHERE attempt_id=?", (existing[0],)).fetchone()
+                t = self.conn.execute("SELECT revision FROM tasks WHERE task_id=?", (a[0],)).fetchone()
+                return ClaimResult(a[0], existing[0], t[0])
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task["state"] != "ready":
+                raise IllegalTransition(f"claim requires ready, got {task['state']}")
+            if not self._dependencies_done(task_id):
+                raise IllegalTransition("dependencies not satisfied")
+            unknown = self.conn.execute("SELECT 1 FROM attempts WHERE task_id=? AND state='unknown' LIMIT 1", (task_id,)).fetchone()
+            if unknown:
+                raise UnknownInflight(task_id)
+            worker = self.conn.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+            if not worker:
+                raise KeyError(worker_id)
+            if self._active_attempt_count(worker_id) >= worker["max_concurrency"]:
+                raise IllegalTransition("worker at concurrency limit")
+            required = set(jload(task["required_capabilities"]))
+            if not required.issubset(set(jload(worker["capabilities"]))):
+                raise CapabilityMismatch(sorted(required))
+            attempt_id = str(uuid.uuid4())
+            self.conn.execute(
+                "INSERT INTO attempts(attempt_id,task_id,worker_id,runtime,dispatch_key,state,started_at) VALUES(?,?,?,?,?,'running',?)",
+                (attempt_id, task_id, worker_id, worker["runtime"], dispatch_key, now()),
+            )
+            resources = [("write", x) for x in jload(task["write_scopes"])] + [("resource", x) for x in jload(task["resource_requirements"])]
+            for lease_type, resource_id in resources:
+                token_row = self.conn.execute("SELECT COALESCE(MAX(fencing_token),0)+1 FROM leases WHERE lease_type=? AND resource_id=?", (lease_type, resource_id)).fetchone()
+                try:
+                    self.conn.execute(
+                        "INSERT INTO leases(lease_id,lease_type,resource_id,holder_attempt_id,holder_worker_id,state,fencing_token,acquired_at) VALUES(?,?,?,?,?,'active',?,?)",
+                        (str(uuid.uuid4()), lease_type, resource_id, attempt_id, worker_id, token_row[0], now()),
+                    )
+                except sqlite3.IntegrityError as e:
+                    raise LeaseConflict(f"{lease_type}:{resource_id}") from e
+            newrev = task["revision"] + 1
+            writer = worker_id if jload(task["write_scopes"]) else None
+            self.conn.execute(
+                "UPDATE tasks SET state='active',active_executor=?,active_writer=?,revision=?,updated_at=? WHERE task_id=?",
+                (worker_id, writer, newrev, now(), task_id),
+            )
+            self._event(actor=worker_id, event_type="CLAIM", idempotency_key="claim:"+dispatch_key,
+                        task_id=task_id, attempt_id=attempt_id, mission_id=task["mission_id"], previous_revision=task["revision"])
+            return ClaimResult(task_id, attempt_id, newrev)
+
+    def record_action(self, task_id: str, actor: str, action: str, *, expected_revision: int, idempotency_key: str):
+        with self.tx():
+            exists = self.conn.execute("SELECT 1 FROM events WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if exists:
+                return self.get_task(task_id)
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            newrev = task["revision"] + 1
+            self.conn.execute(
+                "UPDATE tasks SET last_substantive_actor=?,last_substantive_action=?,last_substantive_at=?,revision=?,updated_at=? WHERE task_id=?",
+                (actor, action, now(), newrev, now(), task_id),
+            )
+            self._event(actor=actor, event_type="ACTION", idempotency_key=idempotency_key, task_id=task_id,
+                        mission_id=task["mission_id"], previous_revision=task["revision"], payload={"action": action})
+            return self.get_task(task_id)
+
+    def set_waiting(self, task_id: str, actor: str, *, expected_revision: int, wake_condition: str, idempotency_key: str):
+        with self.tx():
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task["state"] != "active":
+                raise IllegalTransition("waiting requires active task")
+            attempt = self.conn.execute("SELECT * FROM attempts WHERE task_id=? AND state='running' ORDER BY started_at DESC LIMIT 1", (task_id,)).fetchone()
+            if not attempt:
+                raise IllegalTransition("no running attempt")
+            self.conn.execute("UPDATE attempts SET state='yielded',ended_at=? WHERE attempt_id=?", (now(), attempt["attempt_id"]))
+            self.conn.execute("UPDATE leases SET state='released',released_at=? WHERE holder_attempt_id=? AND state='active'", (now(), attempt["attempt_id"]))
+            newrev = task["revision"] + 1
+            self.conn.execute(
+                "UPDATE tasks SET state='waiting',wake_condition=?,active_executor=NULL,active_writer=NULL,revision=?,updated_at=? WHERE task_id=?",
+                (wake_condition, newrev, now(), task_id),
+            )
+            self._event(actor=actor,event_type="WAIT",idempotency_key=idempotency_key,task_id=task_id,attempt_id=attempt["attempt_id"],
+                        mission_id=task["mission_id"],previous_revision=task["revision"],payload={"wake_condition":wake_condition})
+            return self.get_task(task_id)
+
+    def wake_task(self, task_id: str, actor: str, *, expected_revision: int, idempotency_key: str):
+        with self.tx():
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task["state"] != "waiting":
+                raise IllegalTransition("wake requires waiting")
+            newrev = task["revision"] + 1
+            self.conn.execute("UPDATE tasks SET state='ready',wake_condition=NULL,revision=?,updated_at=? WHERE task_id=?", (newrev, now(), task_id))
+            self._event(actor=actor,event_type="WAKE",idempotency_key=idempotency_key,task_id=task_id,mission_id=task["mission_id"],previous_revision=task["revision"])
+            return self.get_task(task_id)
+
+    def handoff_owner(self, task_id: str, actor: str, new_owner: str, *, expected_revision: int, idempotency_key: str):
+        with self.tx():
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task["active_writer"] is not None:
+                raise IllegalTransition("release active writer before owner handoff")
+            newrev = task["revision"] + 1
+            self.conn.execute("UPDATE tasks SET responsible_owner=?,revision=?,updated_at=? WHERE task_id=?", (new_owner, newrev, now(), task_id))
+            self._event(actor=actor,event_type="HANDOFF_ACCEPT",idempotency_key=idempotency_key,task_id=task_id,mission_id=task["mission_id"],previous_revision=task["revision"],payload={"new_owner":new_owner})
+            return self.get_task(task_id)
+
+    def finish_attempt(self, task_id: str, attempt_id: str, actor: str, *, expected_revision: int,
+                       success: bool, result_ref: str | None, idempotency_key: str):
+        with self.tx():
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            attempt = self.conn.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if not attempt or attempt["task_id"] != task_id or attempt["state"] != "running":
+                raise IllegalTransition("attempt not running for task")
+            astate = "succeeded" if success else "failed"
+            tstate = "review" if success else "ready"
+            self.conn.execute("UPDATE attempts SET state=?,ended_at=?,result_ref=? WHERE attempt_id=?", (astate, now(), result_ref, attempt_id))
+            self.conn.execute("UPDATE leases SET state='released',released_at=? WHERE holder_attempt_id=? AND state='active'", (now(), attempt_id))
+            newrev = task["revision"] + 1
+            self.conn.execute("UPDATE tasks SET state=?,active_executor=NULL,active_writer=NULL,revision=?,updated_at=? WHERE task_id=?", (tstate, newrev, now(), task_id))
+            self._event(actor=actor,event_type="ATTEMPT_END",idempotency_key=idempotency_key,task_id=task_id,attempt_id=attempt_id,mission_id=task["mission_id"],previous_revision=task["revision"],payload={"success":success,"result_ref":result_ref})
+            return self.get_task(task_id)
+
+    def mark_unknown(self, attempt_id: str, actor: str, *, idempotency_key: str):
+        with self.tx():
+            a = self.conn.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if not a:
+                raise KeyError(attempt_id)
+            self.conn.execute("UPDATE attempts SET state='unknown' WHERE attempt_id=?", (attempt_id,))
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (a["task_id"],)).fetchone()
+            self._event(actor=actor,event_type="ATTEMPT_UNKNOWN",idempotency_key=idempotency_key,task_id=a["task_id"],attempt_id=attempt_id,mission_id=task["mission_id"],previous_revision=task["revision"])
+
+    def resolve_unknown_no_side_effect(self, attempt_id: str, actor: str, *, idempotency_key: str):
+        with self.tx():
+            a = self.conn.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if not a or a["state"] != "unknown":
+                raise IllegalTransition("attempt must be unknown")
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (a["task_id"],)).fetchone()
+            self.conn.execute("UPDATE attempts SET state='failed',ended_at=?,error_class='reconciled_no_side_effect' WHERE attempt_id=?", (now(), attempt_id))
+            self.conn.execute("UPDATE leases SET state='released',released_at=? WHERE holder_attempt_id=? AND state='active'", (now(), attempt_id))
+            newrev = task["revision"] + 1
+            self.conn.execute("UPDATE tasks SET state='ready',active_executor=NULL,active_writer=NULL,revision=?,updated_at=? WHERE task_id=?", (newrev, now(), task["task_id"]))
+            self._event(actor=actor,event_type="RECONCILE_UNKNOWN",idempotency_key=idempotency_key,task_id=task["task_id"],attempt_id=attempt_id,mission_id=task["mission_id"],previous_revision=task["revision"],payload={"side_effect":"none_observed"})
+            return self.get_task(task["task_id"])
+
+    def accept_review(self, task_id: str, actor: str, *, expected_revision: int, evidence_ref: str, idempotency_key: str):
+        with self.tx():
+            self._assert_revision(task_id, expected_revision)
+            task = self.conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task["state"] != "review":
+                raise IllegalTransition("accept requires review")
+            refs = jload(task["evidence_refs"])
+            refs.append(evidence_ref)
+            newrev = task["revision"] + 1
+            self.conn.execute("UPDATE tasks SET state='done',evidence_refs=?,revision=?,updated_at=? WHERE task_id=?", (jdump(refs), newrev, now(), task_id))
+            self._event(actor=actor,event_type="VERIFY",idempotency_key=idempotency_key,task_id=task_id,mission_id=task["mission_id"],previous_revision=task["revision"],result_ref=evidence_ref)
+            return self.get_task(task_id)
+
+    def events_for(self, task_id: str):
+        return [dict(r) for r in self.conn.execute("SELECT * FROM events WHERE task_id=? ORDER BY timestamp,event_id", (task_id,)).fetchall()]
+===== END FILE: coordination_core/ledger.py =====
+
+===== FILE: pyproject.toml =====
+[build-system]
+requires = []
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-coordination-core-canary"
+version = "0.0.1"
+description = "DEV-25 transactional Mission/Task coordination canary"
+requires-python = ">=3.11"
+dependencies = []
+===== END FILE: pyproject.toml =====
+
+===== FILE: tests/test_api.py =====
+import json
+import threading
+import unittest
+import urllib.request
+import urllib.error
+
+from coordination_core import Ledger
+from coordination_core.api import make_server
+
+
+class ApiCanaryTests(unittest.TestCase):
+    def setUp(self):
+        self.l = Ledger()
+        self.l.create_mission("M", "api canary", "pass", "owner-A", harness_revision="h1")
+        self.l.register_worker("A", "dot", capabilities=["code"], max_concurrency=1)
+        self.l.register_worker("B", "codex", capabilities=["review"], max_concurrency=1)
+        self.l.create_task("T", "M", "execution", "implement", "works", "owner-A", required_capabilities=["code"], write_scopes=["repo:x"])
+        self.server = make_server(self.l)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.l.close()
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path) as r:
+            return r.status, json.loads(r.read())
+
+    def post(self, path, worker, data):
+        req = urllib.request.Request(
+            self.base + path,
+            method="POST",
+            data=json.dumps(data).encode(),
+            headers={"Content-Type":"application/json","X-Worker-ID":worker},
+        )
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_versioned_health_ready_claim_projection(self):
+        status, body = self.get("/v1/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["api_version"], "v1")
+
+        status, body = self.get("/v1/workers/A/ready")
+        self.assertEqual([x["task_id"] for x in body["tasks"]], ["T"])
+
+        status, body = self.post("/v1/tasks/T/claim", "A", {"expected_revision":1,"dispatch_key":"api-d1"})
+        self.assertEqual(status, 200)
+        self.assertIn("attempt_id", body)
+
+        status, task = self.get("/v1/tasks/T")
+        self.assertEqual(task["responsible_owner"], "owner-A")
+        self.assertEqual(task["active_executor"], "A")
+        self.assertEqual(task["active_writer"], "A")
+
+    def test_unknown_worker_cannot_mutate(self):
+        status, body = self.post("/v1/tasks/T/claim", "ghost", {"expected_revision":1,"dispatch_key":"api-x"})
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"], "unauthorized")
+
+
+if __name__ == "__main__":
+    unittest.main()
+===== END FILE: tests/test_api.py =====
+
+===== FILE: tests/test_ledger.py =====
+import unittest
+
+from coordination_core import Ledger, IllegalTransition, LeaseConflict, UnknownInflight
+
+
+class LedgerCanaryTests(unittest.TestCase):
+    def setUp(self):
+        self.l = Ledger()
+        self.l.create_mission("M1", "ship coordination canary", "ownership/waiting pass", "owner-A", harness_revision="h1")
+        self.l.register_worker("A", "dot", capabilities=["code", "review"], max_concurrency=1, usage_class="unmetered")
+        self.l.register_worker("B", "codex", capabilities=["code", "review"], max_concurrency=1, usage_class="bounded")
+
+    def tearDown(self):
+        self.l.close()
+
+    def test_last_actor_does_not_change_owner(self):
+        self.l.create_task("T1", "M1", "execution", "implement", "works", "owner-A", write_scopes=["repo:x"], required_capabilities=["code"])
+        c = self.l.claim_task("T1", "A", expected_revision=1, dispatch_key="d1")
+        t = self.l.record_action("T1", "B", "independent review", expected_revision=c.revision, idempotency_key="act:b-review")
+        self.assertEqual(t["responsible_owner"], "owner-A")
+        self.assertEqual(t["active_executor"], "A")
+        self.assertEqual(t["active_writer"], "A")
+        self.assertEqual(t["last_substantive_actor"], "B")
+        before = t.copy()
+        self.l.heartbeat("B")
+        after = self.l.get_task("T1")
+        self.assertEqual(after["revision"], before["revision"])
+        self.assertEqual(after["last_substantive_actor"], "B")
+
+    def test_explicit_release_then_handoff(self):
+        self.l.create_task("T2", "M1", "execution", "implement", "works", "owner-A", write_scopes=["repo:y"], required_capabilities=["code"])
+        c = self.l.claim_task("T2", "A", expected_revision=1, dispatch_key="d2")
+        t = self.l.set_waiting("T2", "A", expected_revision=c.revision, wake_condition="handoff ready", idempotency_key="wait:t2")
+        self.assertIsNone(t["active_writer"])
+        t = self.l.wake_task("T2", "owner-A", expected_revision=t["revision"], idempotency_key="wake:t2")
+        t = self.l.handoff_owner("T2", "owner-A", "owner-B", expected_revision=t["revision"], idempotency_key="handoff:t2")
+        self.assertEqual(t["responsible_owner"], "owner-B")
+        c2 = self.l.claim_task("T2", "B", expected_revision=t["revision"], dispatch_key="d2b")
+        t2 = self.l.get_task("T2")
+        self.assertEqual(t2["active_writer"], "B")
+        self.assertEqual(t2["active_executor"], "B")
+        self.assertTrue(any(e["event_type"] == "HANDOFF_ACCEPT" for e in self.l.events_for("T2")))
+
+    def test_waiting_releases_worker_capacity(self):
+        self.l.create_task("T3", "M1", "execution", "first", "works", "owner-A", required_capabilities=["code"])
+        self.l.create_task("T4", "M1", "research", "second", "works", "owner-A", required_capabilities=["code"])
+        c = self.l.claim_task("T3", "A", expected_revision=1, dispatch_key="d3")
+        t3 = self.l.set_waiting("T3", "A", expected_revision=c.revision, wake_condition="external CI", idempotency_key="wait:t3")
+        self.assertEqual(t3["state"], "waiting")
+        eligible = [t["task_id"] for t in self.l.eligible_ready_tasks("A")]
+        self.assertIn("T4", eligible)
+        c4 = self.l.claim_task("T4", "A", expected_revision=1, dispatch_key="d4")
+        self.assertEqual(self.l.get_task("T4")["active_executor"], "A")
+
+    def test_resource_lock_conflict(self):
+        self.l.register_worker("C", "hermes", capabilities=["code"], max_concurrency=1)
+        self.l.create_task("T5", "M1", "execution", "gpu A", "works", "owner-A", required_capabilities=["code"], resources=["gpu:0"])
+        self.l.create_task("T6", "M1", "execution", "gpu B", "works", "owner-A", required_capabilities=["code"], resources=["gpu:0"])
+        self.l.claim_task("T5", "A", expected_revision=1, dispatch_key="d5")
+        with self.assertRaises(LeaseConflict):
+            self.l.claim_task("T6", "C", expected_revision=1, dispatch_key="d6")
+
+    def test_unknown_inflight_blocks_retry_until_reconciled(self):
+        self.l.create_task("T7", "M1", "execution", "side effect", "works", "owner-A", required_capabilities=["code"], write_scopes=["repo:z"])
+        c = self.l.claim_task("T7", "A", expected_revision=1, dispatch_key="d7")
+        self.l.mark_unknown(c.attempt_id, "controller", idempotency_key="unknown:t7")
+        # Task remains active and lease is retained; blind retry is illegal.
+        with self.assertRaises(IllegalTransition):
+            self.l.claim_task("T7", "B", expected_revision=c.revision, dispatch_key="d7b")
+        t = self.l.resolve_unknown_no_side_effect(c.attempt_id, "controller", idempotency_key="reconcile:t7")
+        self.assertEqual(t["state"], "ready")
+        c2 = self.l.claim_task("T7", "B", expected_revision=t["revision"], dispatch_key="d7b2")
+        self.assertEqual(self.l.get_task("T7")["active_writer"], "B")
+
+    def test_idempotent_dispatch_key_does_not_duplicate_attempt(self):
+        self.l.create_task("T8", "M1", "execution", "idempotent", "works", "owner-A", required_capabilities=["code"])
+        c1 = self.l.claim_task("T8", "A", expected_revision=1, dispatch_key="same-key")
+        c2 = self.l.claim_task("T8", "A", expected_revision=999, dispatch_key="same-key")
+        self.assertEqual(c1.attempt_id, c2.attempt_id)
+        count = self.l.conn.execute("SELECT COUNT(*) FROM attempts WHERE task_id='T8'").fetchone()[0]
+        self.assertEqual(count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+===== END FILE: tests/test_ledger.py =====
