@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export const WS_DISPATCH_JOB_PROTOCOL = 'ws-dispatch.job';
 export const WS_DISPATCH_RESULT_PROTOCOL = 'ws-dispatch.result';
@@ -180,9 +181,9 @@ export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-cont
     throw new Error('read-only jobs require the OpenCode plan agent');
   }
   const args = ['run'];
-  if (attach) args.push('--attach', attach);
+  if (attach) args.push('--server', attach);
   const selectedAgent = agent || (valid.authority === 'read-only' ? 'plan' : 'build');
-  args.push('--dir', valid.workspace, '--model', model, '--agent', selectedAgent, '--format', 'json');
+  args.push('--model', model, '--agent', selectedAgent, '--format', 'json');
   const prompt = [
     `Goal: ${valid.goal}`,
     `Done: ${valid.done}`,
@@ -195,45 +196,92 @@ export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-cont
 }
 
 
-export function defaultIsPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
+export function defaultPidState(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return 'unknown';
+  try { process.kill(pid, 0); return 'alive'; }
   catch (error) {
-    if (error?.code === 'ESRCH') return false;
-    if (error?.code === 'EPERM') return true;
-    throw error;
+    if (error?.code === 'ESRCH') return 'dead';
+    return 'unknown';
   }
 }
 
-export function acquireDispatcherLock({ root, pid = process.pid, started_at = new Date().toISOString(), isPidAlive = defaultIsPidAlive } = {}) {
+// Compatibility: unknown must be treated as potentially alive.
+export function defaultIsPidAlive(pid) { return defaultPidState(pid) !== 'dead'; }
+
+// All cooperating v2 acquisitions, stale recovery and releases share this guard.
+// A guard left by a crash is not automatically removed; reconcile it separately.
+function withDispatcherGuard(root, action) {
+  const guardPath = path.join(root, 'dispatcher.recovery.lock');
+  let fd;
+  try { fd = fs.openSync(guardPath, 'wx'); }
+  catch (error) {
+    if (error?.code === 'EEXIST') throw new Error('dispatcher recovery requires reconciliation');
+    throw error;
+  }
+  const token = randomUUID();
+  let durable = false;
+  try {
+    fs.writeFileSync(fd, token, 'utf8'); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    durable = true;
+    return action();
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    if (durable) {
+      if (fs.readFileSync(guardPath, 'utf8') !== token) throw new Error('dispatcher recovery guard ownership changed; reconcile');
+      fs.unlinkSync(guardPath);
+    }
+  }
+}
+
+export function acquireDispatcherLock({ root, pid = process.pid, started_at = new Date().toISOString(), isPidAlive = null } = {}) {
   const dirs = ensureLayout(root);
   const lockPath = path.join(dirs.root, 'dispatcher.lock');
-  const payload = { protocol: 'ws-dispatch.lock', schema_version: 1, pid, started_at };
+  if (!Number.isInteger(pid) || pid <= 0 || typeof started_at !== 'string' || !Number.isFinite(Date.parse(started_at))) {
+    throw new Error('invalid dispatcher identity; reconcile');
+  }
+  const owner_token = randomUUID();
+  const payload = { protocol: 'ws-dispatch.lock', schema_version: 1, pid, started_at, owner_token };
   const attempt = () => {
     const fd = fs.openSync(lockPath, 'wx');
     try { fs.writeFileSync(fd, `${JSON.stringify(payload)}\n`, 'utf8'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
-    return Object.freeze({ path: lockPath, pid, started_at });
+    return Object.freeze({ path: lockPath, pid, started_at, owner_token });
   };
-  try { return attempt(); }
-  catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
-    let prior = null;
-    try { prior = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch {}
-    if (prior && isPidAlive(prior.pid)) throw new Error(`dispatcher already active: pid ${prior.pid}`);
-    fs.rmSync(lockPath, { force: true });
-    return attempt();
-  }
+  return withDispatcherGuard(dirs.root, () => {
+    try { return attempt(); }
+    catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let raw, prior;
+      try { raw = fs.readFileSync(lockPath, 'utf8'); prior = JSON.parse(raw); }
+      catch { throw new Error('unknown dispatcher lock; reconcile'); }
+      if (!isObject(prior) || prior.protocol !== 'ws-dispatch.lock' || prior.schema_version !== 1 ||
+          !Number.isInteger(prior.pid) || prior.pid <= 0 || typeof prior.started_at !== 'string' || !Number.isFinite(Date.parse(prior.started_at))) {
+        throw new Error('invalid dispatcher lock; reconcile');
+      }
+      const result = isPidAlive === null ? defaultPidState(prior.pid) : isPidAlive(prior.pid);
+      const state = result === true ? 'alive' : result === false ? 'dead' : result;
+      if (state === 'alive') throw new Error(`dispatcher already active: pid ${prior.pid}`);
+      if (state !== 'dead') throw new Error('dispatcher PID unknown; reconcile');
+      if (fs.readFileSync(lockPath, 'utf8') !== raw) throw new Error('dispatcher lock changed; reconcile');
+      fs.unlinkSync(lockPath);
+      return attempt();
+    }
+  });
 }
 
 export function releaseDispatcherLock(lock) {
-  if (!lock?.path || !Number.isInteger(lock.pid)) throw new Error('valid dispatcher lock is required');
-  if (!fs.existsSync(lock.path)) return false;
-  let current = null;
-  try { current = JSON.parse(fs.readFileSync(lock.path, 'utf8')); } catch {}
-  if (!current || current.pid !== lock.pid) throw new Error('dispatcher lock ownership changed');
-  fs.rmSync(lock.path, { force: true });
-  return true;
+  if (!lock?.path || path.basename(lock.path) !== 'dispatcher.lock' || !Number.isInteger(lock.pid) ||
+      typeof lock.owner_token !== 'string' || !lock.owner_token) throw new Error('valid dispatcher lock is required');
+  return withDispatcherGuard(path.dirname(lock.path), () => {
+    if (!fs.existsSync(lock.path)) return false;
+    let current = null;
+    try { current = JSON.parse(fs.readFileSync(lock.path, 'utf8')); } catch {}
+    if (!current || current.pid !== lock.pid || current.started_at !== lock.started_at || current.owner_token !== lock.owner_token) {
+      throw new Error('dispatcher lock ownership changed');
+    }
+    fs.unlinkSync(lock.path);
+    return true;
+  });
 }
 
 export async function dispatchNextJob({ root, runner, now = () => new Date().toISOString() } = {}) {
