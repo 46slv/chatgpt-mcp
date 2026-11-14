@@ -206,3 +206,9 @@ SHIRO-WS qualification rows:
 - Exact-bound REPORT E2E: `e2e-report-b68e83e` completed through Muse, created checkpoint `505006875447608106a05407b3a741c8cb2b584bb7f67cd260896f5862fb7030`, linked `report-fbe68cde0be15a95e7921f28`, and reached `DELIVERED` with `USER_TURN_ACK`; pending became empty.
 
 The first real OpenCode attempt exposed Windows `spawn EINVAL` for `.cmd`; the accepted path now resolves the native `opencode.exe` and never passes Worker text through a command shell. Runtime installation similarly invokes `npm-cli.js` through the active `node.exe`. CDP checkpoint transport is disconnected during graceful shutdown through the existing browser cleanup contract without closing the caller-owned Chrome process or its tabs.
+
+### Dispatcher lock hardening candidate
+
+Acquisition, stale-owner recovery, and release are serialized by an exclusive recovery guard on one host. A lock with malformed content or an unknown PID state is preserved for reconciliation; only an owner positively determined dead is eligible for recovery. A guard left after a crash is also preserved and blocks new dispatch. New locks carry a random ownership token and releases require the matching PID, start timestamp, and token.
+
+The stored lock still uses schema version 1; the token identifies the new implementation generation, not a new protocol version. **Do not run old and new dispatcher implementations concurrently:** the old implementation does not honor the guard or ownership token. Before deployment, stop and verify every old launch path, reconcile existing locks without treating access denied as process death, and verify the installed release and task identity. Tests on one machine do not establish multi-host/shared-filesystem locking or power-loss durability. This candidate does not automatically recover a retained guard and does not establish whether a child worker survives its parent.
