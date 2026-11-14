@@ -181,9 +181,9 @@ export function buildOpenCodeRun({ job, model = 'opencode-go/muse-spark-1.3-cont
     throw new Error('read-only jobs require the OpenCode plan agent');
   }
   const args = ['run'];
-  if (attach) args.push('--attach', attach);
+  if (attach) args.push('--server', attach);
   const selectedAgent = agent || (valid.authority === 'read-only' ? 'plan' : 'build');
-  args.push('--dir', valid.workspace, '--model', model, '--agent', selectedAgent, '--format', 'json');
+  args.push('--model', model, '--agent', selectedAgent, '--format', 'json');
   const prompt = [
     `Goal: ${valid.goal}`,
     `Done: ${valid.done}`,

@@ -14,6 +14,10 @@ function fakeSpawn(code = 0) {
   return (command, args, options) => {
     assert.ok(command === 'opencode' || command === 'opencode.cmd');
     assert.ok(args.includes('--format'));
+    assert.equal(args.includes('--dir'), false);
+    assert.equal(args.includes('--attach'), false);
+    assert.equal(options.cwd, job().workspace);
+    assert.equal(options.windowsHide, true);
     assert.equal(options.shell, false);
     const child = new EventEmitter();
     queueMicrotask(() => child.emit('close', code, null));
@@ -31,12 +35,12 @@ test('resolves the native Windows OpenCode executable without a shell shim', () 
     () => resolveOpenCodeExecutable('win32', env, () => false),
     /native Windows executable was not found/,
   );
-  assert.equal(resolveOpenCodeExecutable('linux'), 'opencode');
+  assert.equal(resolveOpenCodeExecutable('linux', {}), 'opencode');
 });
 
 test('captures deterministic evidence refs around a successful OpenCode process boundary', async () => {
   const evidence_dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-dispatch-evidence-'));
-  const result = await runOpenCodeWorker({ job: job(), evidence_dir, spawnImpl: fakeSpawn(0), platform: 'linux' });
+  const result = await runOpenCodeWorker({ job: job(), evidence_dir, spawnImpl: fakeSpawn(0), platform: 'linux', env: {} });
   assert.equal(result.state, 'COMPLETED');
   assert.deepEqual(result.evidence_refs, ['evidence/runner-001.opencode.jsonl','evidence/runner-001.opencode.stderr.log']);
   assert.equal(fs.existsSync(path.join(evidence_dir, 'runner-001.opencode.jsonl')), true);
@@ -44,7 +48,7 @@ test('captures deterministic evidence refs around a successful OpenCode process 
 
 test('non-zero OpenCode exit becomes FAILED with evidence preserved', async () => {
   const evidence_dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-dispatch-evidence-'));
-  const result = await runOpenCodeWorker({ job: job(), evidence_dir, spawnImpl: fakeSpawn(7), platform: 'linux' });
+  const result = await runOpenCodeWorker({ job: job(), evidence_dir, spawnImpl: fakeSpawn(7), platform: 'linux', env: {} });
   assert.equal(result.state, 'FAILED');
   assert.match(result.error, /exit_code=7/);
 });

@@ -89,7 +89,10 @@ test('restart recovery marks active/no-receipt jobs AMBIGUOUS and never requeues
 test('OpenCode command builder carries only bounded job contract', () => {
   const run = buildOpenCodeRun({ job: job(), attach: 'http://127.0.0.1:4096' });
   assert.equal(run.command, 'opencode');
-  assert.deepEqual(run.args.slice(0, 5), ['run','--attach','http://127.0.0.1:4096','--dir','C:\\work\\repo']);
+  assert.deepEqual(run.args.slice(0, 3), ['run','--server','http://127.0.0.1:4096']);
+  assert.equal(run.cwd, 'C:\\work\\repo');
+  assert.equal(run.args.includes('--dir'), false);
+  assert.equal(run.args.includes('--attach'), false);
   assert.ok(run.args.includes('--format'));
   assert.match(run.args.at(-1), /Goal: Fix the failing focused test/);
   assert.match(run.args.at(-1), /Authority: workspace-write/);
@@ -102,6 +105,16 @@ test('read-only jobs select the non-editing OpenCode plan agent by default', () 
     () => buildOpenCodeRun({ job: job({ authority: 'read-only' }), agent: 'build' }),
     /require the OpenCode plan agent/,
   );
+});
+
+test('OpenCode v2 default run carries a spaced workspace only through cwd', () => {
+  const workspace = 'C:\\work\\review space';
+  const run = buildOpenCodeRun({ job: job({ workspace, authority: 'read-only' }) });
+  assert.equal(run.cwd, workspace);
+  assert.equal(run.args.includes(workspace), false);
+  assert.equal(run.args.includes('--dir'), false);
+  assert.equal(run.args.includes('--server'), false);
+  assert.deepEqual(run.args.slice(0, 7), ['run', '--model', 'opencode-go/muse-spark-1.3-contributor', '--agent', 'plan', '--format', 'json']);
 });
 
 test('unknown fields and unsafe authority expansion fail closed', () => {

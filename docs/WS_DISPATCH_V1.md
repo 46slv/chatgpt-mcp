@@ -207,6 +207,10 @@ SHIRO-WS qualification rows:
 
 The first real OpenCode attempt exposed Windows `spawn EINVAL` for `.cmd`; the accepted path now resolves the native `opencode.exe` and never passes Worker text through a command shell. Runtime installation similarly invokes `npm-cli.js` through the active `node.exe`. CDP checkpoint transport is disconnected during graceful shutdown through the existing browser cleanup contract without closing the caller-owned Chrome process or its tabs.
 
+### OpenCode v2 CLI compatibility candidate
+
+For the locally observed OpenCode v2.0.15 CLI, bind the workspace through the child process `cwd`, not the unsupported `run --dir` flag. The existing adapter `attach` option maps to `run --server`; it does not grant new server access. Keep the read-only `plan` agent, model selection, JSON evidence, hidden process, and shell-disabled execution unchanged. CLI help and mocked process-boundary tests verify argument compatibility and workspace propagation, not a live model call or server authorization. This candidate is not installed in the resident lane.
+
 ### Dispatcher lock hardening candidate
 
 Acquisition, stale-owner recovery, and release are serialized by an exclusive recovery guard on one host. A lock with malformed content or an unknown PID state is preserved for reconciliation; only an owner positively determined dead is eligible for recovery. A guard left after a crash is also preserved and blocks new dispatch. New locks carry a random ownership token and releases require the matching PID, start timestamp, and token.
